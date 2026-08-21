@@ -1,0 +1,22 @@
+# SDXL 15-Model Pass 2: Python Diffusers Benchmark
+
+**Device**: NVIDIA GeForce RTX 4070 Ti | **Precision**: FP16 Native
+**Resolution**: 1024x1024 | **Steps**: 30 (Euler Karras) | **CFG**: 6.0
+
+| # | Model Name | Size | Load Time | Status | Seed 42 Speed | Seed 1337 Speed | Image 1 | Image 2 |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `animaPencilXL_v100.safetensors` | 6.46 GB | 0.97s | SUCCESS | 37.57s (0.80 it/s) | 10.12s (2.96 it/s) | [animaPencilXL_v100_seed42.png](animaPencilXL_v100_seed42.png) | [animaPencilXL_v100_seed1337.png](animaPencilXL_v100_seed1337.png) |
+| 2 | `aniverseXL_v30.safetensors` | 6.46 GB | 0.83s | SUCCESS | 38.99s (0.77 it/s) | 10.07s (2.98 it/s) | [aniverseXL_v30_seed42.png](aniverseXL_v30_seed42.png) | [aniverseXL_v30_seed1337.png](aniverseXL_v30_seed1337.png) |
+| 3 | `babesByStableYogiPony_v50.safetensors` | 6.46 GB | 1.95s | SUCCESS | 38.42s (0.78 it/s) | 9.41s (3.19 it/s) | [babesByStableYogiPony_v50_seed42.png](babesByStableYogiPony_v50_seed42.png) | [babesByStableYogiPony_v50_seed1337.png](babesByStableYogiPony_v50_seed1337.png) |
+| 4 | `Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors` | 6.62 GB | 2.28s | SUCCESS | 25.30s (1.19 it/s) | 9.42s (3.19 it/s) | [Juggernaut-XL_v9_RunDiffusionPhoto_v2_seed42.png](Juggernaut-XL_v9_RunDiffusionPhoto_v2_seed42.png) | [Juggernaut-XL_v9_RunDiffusionPhoto_v2_seed1337.png](Juggernaut-XL_v9_RunDiffusionPhoto_v2_seed1337.png) |
+| 5 | `betterThanWords_v30.safetensors` | 6.46 GB | 3.27s | SUCCESS | 39.24s (0.76 it/s) | 9.37s (3.20 it/s) | [betterThanWords_v30_seed42.png](betterThanWords_v30_seed42.png) | [betterThanWords_v30_seed1337.png](betterThanWords_v30_seed1337.png) |
+| 6 | `bigLove_ponyV20.safetensors` | 6.46 GB | 2.62s | SUCCESS | 27.88s (1.08 it/s) | 9.41s (3.19 it/s) | [bigLove_ponyV20_seed42.png](bigLove_ponyV20_seed42.png) | [bigLove_ponyV20_seed1337.png](bigLove_ponyV20_seed1337.png) |
+| 7 | `realismarkPlus_realismarkPlus.safetensors` | 13.35 GB | 33.80s | SUCCESS | 9.58s (3.13 it/s) | 9.71s (3.09 it/s) | [realismarkPlus_realismarkPlus_seed42.png](realismarkPlus_realismarkPlus_seed42.png) | [realismarkPlus_realismarkPlus_seed1337.png](realismarkPlus_realismarkPlus_seed1337.png) |
+| 8 | `CHEYENNE_v20.safetensors` | 6.46 GB | 1.88s | SUCCESS | 25.75s (1.17 it/s) | 9.51s (3.15 it/s) | [CHEYENNE_v20_seed42.png](CHEYENNE_v20_seed42.png) | [CHEYENNE_v20_seed1337.png](CHEYENNE_v20_seed1337.png) |
+| 9 | `colossusProjectXLSFW_10bNeodemonFP16.safetensors` | 6.62 GB | 1.99s | SUCCESS | 28.39s (1.06 it/s) | 9.51s (3.15 it/s) | [colossusProjectXLSFW_10bNeodemonFP16_seed42.png](colossusProjectXLSFW_10bNeodemonFP16_seed42.png) | [colossusProjectXLSFW_10bNeodemonFP16_seed1337.png](colossusProjectXLSFW_10bNeodemonFP16_seed1337.png) |
+| 10 | `CyberRealisticPony_V7a.safetensors` | 6.46 GB | 4.15s | SUCCESS | 42.61s (0.70 it/s) | 9.39s (3.19 it/s) | [CyberRealisticPony_V7a_seed42.png](CyberRealisticPony_V7a_seed42.png) | [CyberRealisticPony_V7a_seed1337.png](CyberRealisticPony_V7a_seed1337.png) |
+| 11 | `dreamshaperXL_turboDpmppSDEKarras.safetensors` | 6.46 GB | 1.94s | SUCCESS | 29.66s (1.01 it/s) | 9.42s (3.19 it/s) | [dreamshaperXL_turboDpmppSDEKarras_seed42.png](dreamshaperXL_turboDpmppSDEKarras_seed42.png) | [dreamshaperXL_turboDpmppSDEKarras_seed1337.png](dreamshaperXL_turboDpmppSDEKarras_seed1337.png) |
+| 12 | `DreamShaperXL_Turbo_v2_1.safetensors` | 6.46 GB | 2.32s | SUCCESS | 35.94s (0.83 it/s) | 9.45s (3.18 it/s) | [DreamShaperXL_Turbo_v2_1_seed42.png](DreamShaperXL_Turbo_v2_1_seed42.png) | [DreamShaperXL_Turbo_v2_1_seed1337.png](DreamShaperXL_Turbo_v2_1_seed1337.png) |
+| 13 | `duchaitenAiartSDXL_v33515LightningTCD.safetensors` | 6.46 GB | 2.42s | SUCCESS | 34.56s (0.87 it/s) | 9.41s (3.19 it/s) | [duchaitenAiartSDXL_v33515LightningTCD_seed42.png](duchaitenAiartSDXL_v33515LightningTCD_seed42.png) | [duchaitenAiartSDXL_v33515LightningTCD_seed1337.png](duchaitenAiartSDXL_v33515LightningTCD_seed1337.png) |
+| 14 | `duchaitenPonyXLNo_v60.safetensors` | 6.46 GB | 2.40s | SUCCESS | 27.95s (1.07 it/s) | 9.38s (3.20 it/s) | [duchaitenPonyXLNo_v60_seed42.png](duchaitenPonyXLNo_v60_seed42.png) | [duchaitenPonyXLNo_v60_seed1337.png](duchaitenPonyXLNo_v60_seed1337.png) |
+| 15 | `eldgardKinkiestModel_v20.safetensors` | 6.46 GB | 2.21s | SUCCESS | 27.38s (1.10 it/s) | 9.44s (3.18 it/s) | [eldgardKinkiestModel_v20_seed42.png](eldgardKinkiestModel_v20_seed42.png) | [eldgardKinkiestModel_v20_seed1337.png](eldgardKinkiestModel_v20_seed1337.png) |

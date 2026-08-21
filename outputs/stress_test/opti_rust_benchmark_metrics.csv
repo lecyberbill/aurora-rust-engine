@@ -1,0 +1,16 @@
+model_name,model_size_gb,load_time_sec,status,img1_duration_sec,img1_it_per_sec,img2_duration_sec,img2_it_per_sec
+animaPencilXL_v100.safetensors,6.46,29.02,SUCCESS,25.37,1.18,24.59,1.22
+aniverseXL_v30.safetensors,6.46,29.47,SUCCESS,25.37,1.18,24.90,1.20
+babesByStableYogiPony_v50.safetensors,6.46,31.39,SUCCESS,25.09,1.20,30.48,0.98
+Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors,6.62,18.74,SUCCESS,25.55,1.17,25.22,1.19
+betterThanWords_v30.safetensors,6.46,33.07,SUCCESS,24.11,1.24,29.23,1.03
+bigLove_ponyV20.safetensors,6.46,21.50,SUCCESS,25.21,1.19,24.43,1.23
+realismarkPlus_realismarkPlus.safetensors,13.35,53.45,SUCCESS,25.09,1.20,24.20,1.24
+CHEYENNE_v20.safetensors,6.46,20.04,SUCCESS,25.08,1.20,24.53,1.22
+colossusProjectXLSFW_10bNeodemonFP16.safetensors,6.62,23.31,SUCCESS,26.16,1.15,25.28,1.19
+CyberRealisticPony_V7a.safetensors,6.46,40.59,SUCCESS,24.58,1.22,27.17,1.10
+dreamshaperXL_turboDpmppSDEKarras.safetensors,6.46,24.36,SUCCESS,25.18,1.19,24.68,1.22
+DreamShaperXL_Turbo_v2_1.safetensors,6.46,29.10,SUCCESS,24.25,1.24,29.27,1.02
+duchaitenAiartSDXL_v33515LightningTCD.safetensors,6.46,30.15,SUCCESS,24.87,1.21,24.42,1.23
+duchaitenPonyXLNo_v60.safetensors,6.46,22.70,SUCCESS,24.90,1.20,24.52,1.22
+eldgardKinkiestModel_v20.safetensors,6.46,22.50,SUCCESS,24.06,1.25,31.51,0.95

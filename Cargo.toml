@@ -1,0 +1,35 @@
+[package]
+name = "aurora-rust-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Pure Rust High-Performance AI Inference Engine (SD, SDXL, Transformers) powered by Candle & CUDA"
+authors = ["TransRust Team"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+candle-core = { version = "0.8.2", default-features = false }
+candle-nn = { version = "0.8.2" }
+candle-transformers = { version = "0.8.2" }
+safetensors = "0.5.2"
+tokenizers = { version = "0.21.0", default-features = false, features = ["onig"] }
+memmap2 = "0.9.5"
+image = { version = "0.25.5", default-features = false, features = ["png", "jpeg"] }
+anyhow = "1.0.95"
+thiserror = "2.0.11"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+rayon = "1.10.0"
+half = { version = "2.4.1", features = ["bytemuck"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
+mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
+
+[lib]
+name = "aurora_rust_engine"
+path = "src/lib.rs"
