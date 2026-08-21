@@ -357,6 +357,194 @@ impl StableDiffusionXLPipeline {
 
         Ok(image)
     }
+
+    /// Execute Inpainting / Outpainting diffusion generation
+    pub fn generate_inpaint<F>(
+        &mut self,
+        params: crate::traits::InpaintParams,
+        mut on_step: Option<F>,
+    ) -> crate::error::Result<RgbImage>
+    where
+        F: FnMut(usize, usize, &Tensor),
+    {
+        let clip_l = self.clip_l.as_mut().ok_or_else(|| crate::error::LuminaError::Config("CLIP-L not loaded".to_string()))?;
+        let clip_g = self.clip_g.as_mut().ok_or_else(|| crate::error::LuminaError::Config("OpenCLIP-G not loaded".to_string()))?;
+        let unet = self.unet.as_ref().ok_or_else(|| crate::error::LuminaError::Config("UNet not loaded".to_string()))?;
+
+        let prompt = params.prompt;
+        let negative_prompt = params.negative_prompt.unwrap_or("");
+        let num_steps = params.num_steps;
+        let guidance_scale = params.guidance_scale;
+        let strength = params.strength.clamp(0.01, 1.0);
+
+        let (orig_w, orig_h) = params.image.dimensions();
+        let target_w = (orig_w / 8) * 8;
+        let target_h = (orig_h / 8) * 8;
+        let latent_height = (target_h / 8) as usize;
+        let latent_width = (target_w / 8) as usize;
+
+        // Resize image and mask if needed
+        let src_image = if target_w != orig_w || target_h != orig_h {
+            image::imageops::resize(&params.image, target_w, target_h, image::imageops::FilterType::Lanczos3)
+        } else {
+            params.image
+        };
+
+        let mut mask_img = if params.mask.dimensions() != (target_w, target_h) {
+            image::imageops::resize(&params.mask, target_w, target_h, image::imageops::FilterType::Lanczos3)
+        } else {
+            params.mask
+        };
+
+        // Feather edges if mask_blur > 0
+        if params.mask_blur > 0 {
+            mask_img = image::imageops::blur(&mask_img, params.mask_blur as f32);
+        }
+
+        // Downsample mask to latent resolution [1, 1, H/8, W/8] (floats in [0.0, 1.0])
+        let mut latent_mask_floats = vec![0.0f32; latent_height * latent_width];
+        for ly in 0..latent_height {
+            for lx in 0..latent_width {
+                let mut sum = 0.0f32;
+                for py in 0..8 {
+                    for px in 0..8 {
+                        let p = mask_img.get_pixel((lx * 8 + px) as u32, (ly * 8 + py) as u32)[0];
+                        sum += p as f32 / 255.0;
+                    }
+                }
+                latent_mask_floats[ly * latent_width + lx] = sum / 64.0;
+            }
+        }
+        let latent_mask = Tensor::from_vec(latent_mask_floats, (1, 1, latent_height, latent_width), &self.device)?
+            .to_dtype(self.dtype)?;
+        let inv_latent_mask = (Tensor::ones_like(&latent_mask)? - &latent_mask)?;
+
+        // 1. Encode source image into latent space first
+        let init_latents = self.vae.encode_image(&src_image)?
+            .to_device(&self.device)?
+            .to_dtype(self.dtype)?;
+
+        // 2. Text embeddings: CLIP-L + OpenCLIP-G with pooled vectors
+        let cond_l = clip_l.encode_prompt(prompt)?
+            .to_device(&self.device)?
+            .to_dtype(self.dtype)?;
+
+        let (cond_g, cond_pooled) = clip_g.encode_prompt_with_pooled(prompt)?;
+        let cond_g = cond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let cond_pooled = cond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let cond_embeds = Tensor::cat(&[&cond_l, &cond_g], 2)?;
+
+        let uncond_l = clip_l.encode_prompt(negative_prompt)?
+            .to_device(&self.device)?
+            .to_dtype(self.dtype)?;
+
+        let (uncond_g, uncond_pooled) = clip_g.encode_prompt_with_pooled(negative_prompt)?;
+        let uncond_g = uncond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let uncond_pooled = uncond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let uncond_embeds = Tensor::cat(&[&uncond_l, &uncond_g], 2)?;
+
+        let text_embeds = Tensor::cat(&[&uncond_embeds, &cond_embeds], 0)?;
+        let pooled_embeds = Tensor::cat(&[&uncond_pooled, &cond_pooled], 0)?;
+
+        // 3. Set scheduler timesteps and compute start timestep
+        self.scheduler.set_timesteps(num_steps)?;
+        let timesteps = self.scheduler.timesteps().to_vec();
+        let sigmas = self.scheduler.sigmas().to_vec();
+
+        let num_inference_steps = ((num_steps as f64) * strength).round() as usize;
+        let num_inference_steps = num_inference_steps.max(1).min(num_steps);
+        let start_idx = num_steps - num_inference_steps;
+        let active_timesteps = &timesteps[start_idx..];
+        let init_sigma = sigmas.get(start_idx).copied().unwrap_or(1.0);
+
+        // Fixed background noise for unmasked area
+        let fixed_bg_noise = Tensor::randn(
+            0f32,
+            1f32,
+            (1, 4, latent_height, latent_width),
+            &self.device,
+        )?.to_dtype(self.dtype)?;
+
+        // Target noise for inpainting area
+        let inpaint_noise = Tensor::randn(
+            0f32,
+            1f32,
+            (1, 4, latent_height, latent_width),
+            &self.device,
+        )?.to_dtype(self.dtype)?;
+
+        // Initial combined latent
+        let init_noisy_bg = (&init_latents + (&fixed_bg_noise * init_sigma)?)?;
+        let init_noisy_fg = (&inpaint_noise * init_sigma)?;
+        let mut latents = (
+            init_noisy_bg.broadcast_mul(&inv_latent_mask)? +
+            init_noisy_fg.broadcast_mul(&latent_mask)?
+        )?;
+
+        // Pre-compute SDXL Add Embedding
+        let precomputed_add_proj = unet.compute_add_embedding(
+            2,
+            latent_height,
+            latent_width,
+            Some(&pooled_embeds),
+            &self.device,
+            self.dtype,
+        )?;
+
+        // 4. Denoising loop
+        for (step_idx, &timestep) in active_timesteps.iter().enumerate() {
+            let current_global_step = start_idx + step_idx;
+            let scaled_latent = self.scheduler.scale_model_input(&latents, timestep)?;
+            let latent_model_input = Tensor::cat(&[&scaled_latent, &scaled_latent], 0)?;
+
+            let noise_pred = unet.forward_with_precomputed(
+                &latent_model_input,
+                timestep as f64,
+                &text_embeds,
+                precomputed_add_proj.as_ref(),
+            )?;
+
+            let noise_uncond = noise_pred.narrow(0, 0, 1)?;
+            let noise_cond = noise_pred.narrow(0, 1, 1)?;
+            let diff = (&noise_cond - &noise_uncond)?;
+            let guided_noise = (&noise_uncond + (&diff * (guidance_scale as f64))?)?;
+
+            let denoised_step = self.scheduler.step(&guided_noise, timestep, &latents)?;
+
+            // Re-inject the original latent at next timestep sigma to perfectly preserve unmasked region
+            let next_sigma = sigmas.get(current_global_step + 1).copied().unwrap_or(0.0);
+            let bg_at_next_step = if next_sigma > 0.0 {
+                (&init_latents + (&fixed_bg_noise * next_sigma)?)?
+            } else {
+                init_latents.clone()
+            };
+
+            latents = (
+                bg_at_next_step.broadcast_mul(&inv_latent_mask)? +
+                denoised_step.broadcast_mul(&latent_mask)?
+            )?;
+
+            if let Some(ref mut callback) = on_step {
+                callback(step_idx + 1, num_inference_steps, &latents);
+            }
+        }
+
+        // 5. Decode final latents via SDXL VAE
+        let t_vae = std::time::Instant::now();
+        let image = if self.memory_config.vae_tiling {
+            self.vae.decode_tiled(
+                &latents,
+                self.memory_config.vae_tile_size,
+                self.memory_config.vae_tile_overlap,
+            )?
+        } else {
+            self.vae.decode_direct(&latents)?
+        };
+        println!("\n    VAE decoded in {:.2}s", t_vae.elapsed().as_secs_f64());
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        Ok(image)
+    }
 }
 
 impl TextToImagePipeline for StableDiffusionXLPipeline {

@@ -12,7 +12,7 @@ pub mod weights;
 pub use device::{auto_device, select_device};
 pub use error::{LuminaError, Result};
 pub use lora::{LoRALoader, LoRAManager, LoRAMerger, LoRAPair, LoRATarget, LoadedLoRA};
-pub use traits::{DiffusionParams, Img2ImgParams, TextGenerationPipeline, TextToImagePipeline};
+pub use traits::{DiffusionParams, Img2ImgParams, InpaintParams, TextGenerationPipeline, TextToImagePipeline};
 pub use weights::{SafeTensorsArchive, WeightRouter};
 
 pub use diffusion::schedulers::{

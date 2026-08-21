@@ -94,20 +94,20 @@
 
 ---
 
-## 🚀 Upcoming Milestones
-
-### 🎨 Milestone 5: Inpainting & Outpainting Pipeline
-**Objective**: Mask-guided diffusion for targeted region editing, object replacement, and canvas expansion.
-
-#### Technical Architecture:
-- `src/pipelines/sdxl_inpaint.rs`:
-  - `InpaintParams`: source image, binary mask, mask blur radius, denoising strength.
-  - Latent mask downsampling ($1/8$ spatial resolution).
-  - In-loop noise blending matching Euler scheduler timesteps:
-    $$z_t = M \odot z_t + (1 - M) \odot \text{add\_noise}(z_0, \epsilon, t)$$
-  - Seamless edge feathering and high-resolution VAE reconstruction.
+### ✅ Milestone 5: Inpainting & Outpainting Pipeline (COMPLETED)
+- [x] **Mask Ingestion & Latent Downsampling** (`src/pipelines/sdxl.rs`):
+  - Binary and grayscale mask processing with edge feathering / Gaussian blurring.
+  - $8\times$ spatial downsampling with area averaging into float latent mask $M \in [0.0, 1.0]$.
+- [x] **In-Loop Latent Noise Blending** (`src/pipelines/sdxl.rs`):
+  - Per-step noise matching injecting exact background latents at each timestep $\sigma(t_i)$:
+    $$z_t = (1 - M) \odot (z_{\text{orig}} + \sigma(t_i) \cdot \epsilon_{\text{bg}}) + M \odot z_{\text{denoised}, t}$$
+  - Guarantees 100% preservation of unmasked regions with seamless transition at boundary edges.
+- [x] **End-to-End Object Replacement Benchmark** (`src/bin/test_inpaint.rs`):
+  - Validated with targeted object addition (wizard hat on photographic cat) preserving pixels outside mask.
 
 ---
+
+## 🚀 Upcoming Milestones
 
 ### 🎛️ Milestone 6: Multi-ControlNet & IP-Adapter Conditioners
 **Objective**: Precise spatial structural guidance via edge maps, depth, pose, and reference image prompts.

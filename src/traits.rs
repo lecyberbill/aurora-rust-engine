@@ -57,6 +57,36 @@ impl<'a> Img2ImgParams<'a> {
     }
 }
 
+/// Parameters for Inpainting and Outpainting generation.
+#[derive(Debug, Clone)]
+pub struct InpaintParams<'a> {
+    pub prompt: &'a str,
+    pub negative_prompt: Option<&'a str>,
+    pub image: RgbImage,
+    pub mask: image::GrayImage,
+    pub mask_blur: usize,
+    pub strength: f64,
+    pub num_steps: usize,
+    pub guidance_scale: f64,
+    pub seed: u64,
+}
+
+impl<'a> InpaintParams<'a> {
+    pub fn new(prompt: &'a str, image: RgbImage, mask: image::GrayImage) -> Self {
+        Self {
+            prompt,
+            negative_prompt: None,
+            image,
+            mask,
+            mask_blur: 4,
+            strength: 1.0,
+            num_steps: 30,
+            guidance_scale: 7.0,
+            seed: 42,
+        }
+    }
+}
+
 /// Unified trait for full-pipeline Text-to-Image models (e.g. SD 1.5, SDXL, Flux).
 pub trait TextToImagePipeline {
     /// Load weights directly from a monolithic or multi-part SafeTensors path.

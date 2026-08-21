@@ -282,7 +282,9 @@ pub fn rgb_image_to_tensor(img: &RgbImage, device: &Device, dtype: DType) -> Res
         }
     }
 
-    Tensor::from_vec(raw_floats, (1, 3, h as usize, w as usize), device)?.to_dtype(dtype)
+    Tensor::from_vec(raw_floats, (1, 3, h as usize, w as usize), &Device::Cpu)?
+        .to_device(device)?
+        .to_dtype(dtype)
 }
 
 pub struct FastLatentPreviewer;
