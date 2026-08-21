@@ -48,6 +48,7 @@ pub struct StableDiffusionXLPipeline {
     dtype: DType,
     memory_config: PipelineMemoryConfig,
     lora_manager: crate::lora::LoRAManager,
+    prompt_cache: std::collections::HashMap<String, (Tensor, Tensor)>,
 }
 
 impl StableDiffusionXLPipeline {
@@ -111,6 +112,7 @@ impl StableDiffusionXLPipeline {
             dtype,
             memory_config,
             lora_manager: crate::lora::LoRAManager::new(),
+            prompt_cache: std::collections::HashMap::new(),
         })
     }
 
@@ -680,6 +682,27 @@ impl StableDiffusionXLPipeline {
         Ok(image)
     }
 
+    /// Encode prompt with Dual-CLIP (CLIP-L + OpenCLIP-G) using in-memory tensor caching
+    pub fn encode_prompt_cached(&mut self, prompt: &str) -> crate::error::Result<(Tensor, Tensor)> {
+        if let Some((embeds, pooled)) = self.prompt_cache.get(prompt) {
+            return Ok((embeds.clone(), pooled.clone()));
+        }
+
+        let clip_l = self.clip_l.as_mut().ok_or_else(|| crate::error::LuminaError::Config("CLIP-L not loaded".to_string()))?;
+        let cond_l = clip_l.encode_prompt(prompt)?
+            .to_device(&self.device)?
+            .to_dtype(self.dtype)?;
+
+        let clip_g = self.clip_g.as_mut().ok_or_else(|| crate::error::LuminaError::Config("OpenCLIP-G not loaded".to_string()))?;
+        let (cond_g, cond_pooled) = clip_g.encode_prompt_with_pooled(prompt)?;
+        let cond_g = cond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let cond_pooled = cond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let cond_embeds = Tensor::cat(&[&cond_l, &cond_g], 2)?;
+
+        self.prompt_cache.insert(prompt.to_string(), (cond_embeds.clone(), cond_pooled.clone()));
+        Ok((cond_embeds, cond_pooled))
+    }
+
     /// Execute text-to-image generation returning image and detailed telemetry metrics
     pub fn generate_with_metrics<F>(
         &mut self,
@@ -690,10 +713,6 @@ impl StableDiffusionXLPipeline {
         F: FnMut(usize, usize, &Tensor),
     {
         let t_total = std::time::Instant::now();
-        let clip_l = self.clip_l.as_mut().ok_or_else(|| crate::error::LuminaError::Config("CLIP-L not loaded".to_string()))?;
-        let clip_g = self.clip_g.as_mut().ok_or_else(|| crate::error::LuminaError::Config("OpenCLIP-G not loaded".to_string()))?;
-        let unet = self.unet.as_ref().ok_or_else(|| crate::error::LuminaError::Config("UNet not loaded".to_string()))?;
-
         let prompt = params.prompt;
         let negative_prompt = params.negative_prompt.unwrap_or("");
         let num_steps = params.num_steps;
@@ -701,29 +720,16 @@ impl StableDiffusionXLPipeline {
         let latent_height = params.height / 8;
         let latent_width = params.width / 8;
 
-        // 1. Text embeddings: CLIP-L + OpenCLIP-G with pooled vectors
+        // 1. Text embeddings: cached Dual CLIP-L + OpenCLIP-G with pooled vectors
         let t_text = std::time::Instant::now();
-        let cond_l = clip_l.encode_prompt(prompt)?
-            .to_device(&self.device)?
-            .to_dtype(self.dtype)?;
-
-        let (cond_g, cond_pooled) = clip_g.encode_prompt_with_pooled(prompt)?;
-        let cond_g = cond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
-        let cond_pooled = cond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
-        let cond_embeds = Tensor::cat(&[&cond_l, &cond_g], 2)?;
-
-        let uncond_l = clip_l.encode_prompt(negative_prompt)?
-            .to_device(&self.device)?
-            .to_dtype(self.dtype)?;
-
-        let (uncond_g, uncond_pooled) = clip_g.encode_prompt_with_pooled(negative_prompt)?;
-        let uncond_g = uncond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
-        let uncond_pooled = uncond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
-        let uncond_embeds = Tensor::cat(&[&uncond_l, &uncond_g], 2)?;
+        let (cond_embeds, cond_pooled) = self.encode_prompt_cached(prompt)?;
+        let (uncond_embeds, uncond_pooled) = self.encode_prompt_cached(negative_prompt)?;
 
         let text_embeds = Tensor::cat(&[&uncond_embeds, &cond_embeds], 0)?;
         let pooled_embeds = Tensor::cat(&[&uncond_pooled, &cond_pooled], 0)?;
         let prompt_encode_ms = t_text.elapsed().as_secs_f64() * 1000.0;
+
+        let unet = self.unet.as_ref().ok_or_else(|| crate::error::LuminaError::Config("UNet not loaded".to_string()))?;
 
         // 2. Scheduler and latents initialization
         self.scheduler.set_timesteps(num_steps)?;
@@ -774,6 +780,11 @@ impl StableDiffusionXLPipeline {
         let unet_total_ms = t_unet.elapsed().as_secs_f64() * 1000.0;
         let unet_step_avg_ms = if num_steps > 0 { unet_total_ms / (num_steps as f64) } else { 0.0 };
         let unet_it_per_sec = if unet_total_ms > 0.0 { (num_steps as f64) / (unet_total_ms / 1000.0) } else { 0.0 };
+
+        // Explicitly release UNet activations and projections to maximize VRAM headroom for VAE
+        drop(text_embeds);
+        drop(pooled_embeds);
+        drop(precomputed_add_proj);
 
         // 4. VAE Decode
         let t_vae = std::time::Instant::now();
