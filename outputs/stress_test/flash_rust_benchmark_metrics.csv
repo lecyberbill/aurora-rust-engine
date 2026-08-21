@@ -1,0 +1,6 @@
+model_name,model_size_gb,load_time_sec,status,img1_duration_sec,img1_it_per_sec,img2_duration_sec,img2_it_per_sec
+animaPencilXL_v100.safetensors,6.46,31.29,SUCCESS,20.00,1.50,20.89,1.44
+aniverseXL_v30.safetensors,6.46,36.17,SUCCESS,19.42,1.54,19.48,1.54
+babesByStableYogiPony_v50.safetensors,6.46,36.35,SUCCESS,19.55,1.53,27.02,1.11
+Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors,6.62,16.84,SUCCESS,20.22,1.48,19.67,1.53
+betterThanWords_v30.safetensors,6.46,31.53,SUCCESS,19.29,1.55,30.86,0.97

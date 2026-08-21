@@ -54,19 +54,26 @@ impl CrossAttention {
         let k = self.to_k.forward(context)?;
         let v = self.to_v.forward(context)?;
 
-        // Reshape to [b_size, heads, seq_len, head_dim]
-        let q = q
-            .reshape((b_size, seq_len, self.heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let k = k
-            .reshape((b_size, context_len, self.heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let v = v
-            .reshape((b_size, context_len, self.heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
+        let q = q.reshape((b_size, seq_len, self.heads, self.head_dim))?;
+        let k = k.reshape((b_size, context_len, self.heads, self.head_dim))?;
+        let v = v.reshape((b_size, context_len, self.heads, self.head_dim))?;
+
+        #[cfg(feature = "flash-attn")]
+        {
+            if q.device().is_cuda() && (q.dtype() == candle_core::DType::F16 || q.dtype() == candle_core::DType::BF16) {
+                let q_c = q.contiguous()?;
+                let k_c = k.contiguous()?;
+                let v_c = v.contiguous()?;
+                let out = candle_flash_attn::flash_attn(&q_c, &k_c, &v_c, self.scale as f32, false)?;
+                let out = out.reshape((b_size, seq_len, self.heads * self.head_dim))?;
+                return self.to_out[0].forward(&out);
+            }
+        }
+
+        // Standard Attention fallback (cuBLAS GEMM)
+        let q = q.transpose(1, 2)?.contiguous()?;
+        let k = k.transpose(1, 2)?.contiguous()?;
+        let v = v.transpose(1, 2)?.contiguous()?;
 
         // Exact 4D matrix transpose on spatial dims [B, H, head_dim, context_len]
         let k_t = k.transpose(2, 3)?.contiguous()?;

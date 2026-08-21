@@ -1,6 +1,6 @@
 // [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Native SDXL OpenCLIP-G Text Encoder with Penultimate Layer Extraction & Standard GELU
 
-use candle_core::{DType, Device, Module, Result, Tensor};
+use candle_core::{Device, Module, Result, Tensor};
 use candle_nn::{embedding, layer_norm, linear, Embedding, LayerNorm, Linear, VarBuilder};
 use tokenizers::Tokenizer;
 use std::path::Path;

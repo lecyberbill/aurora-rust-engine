@@ -1,4 +1,4 @@
-// [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 1 (per-model isolation) | Action: Optimized SDXL 15-Model Benchmark Runner for aurora-rust-engine
+// [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 1 (per-model isolation) | Action: FlashAttention-2 Accelerated SDXL 15-Model Benchmark Runner for aurora-rust-engine
 
 use candle_core::{Device, Tensor};
 use aurora_rust_engine::{DiffusionParams, StableDiffusionXLPipeline, TextToImagePipeline};
@@ -52,8 +52,8 @@ fn main() -> anyhow::Result<()> {
     let output_dir = Path::new("outputs/stress_test/rust");
     fs::create_dir_all(output_dir)?;
 
-    let log_path = Path::new("outputs/stress_test/opti_rust_stress_test_log.md");
-    let json_path = Path::new("outputs/stress_test/opti_rust_metrics.json");
+    let log_path = Path::new("outputs/stress_test/flash_rust_stress_test_log.md");
+    let json_path = Path::new("outputs/stress_test/flash_rust_metrics.json");
 
     let device = match Device::new_cuda(0) {
         Ok(dev) => {
@@ -85,7 +85,7 @@ fn main() -> anyhow::Result<()> {
     ];
 
     println!("============================================================");
-    println!("🔥 Starting Optimized Pass 1: aurora-rust-engine Stress Test");
+    println!("⚡ Starting FlashAttention-2 Accelerated aurora-rust-engine Stress Test");
     println!("   Device: NVIDIA RTX 4070 Ti | FP16 Precision | Steps: 30");
     println!("============================================================");
 
@@ -169,7 +169,7 @@ fn main() -> anyhow::Result<()> {
                         let duration = t_gen_start.elapsed().as_secs_f64();
                         let it_per_sec = num_steps as f64 / duration;
                         let clean_name = model_name.trim_end_matches(".safetensors");
-                        let out_filename = format!("opti_{}_seed{}.png", clean_name, seed);
+                        let out_filename = format!("flash_{}_seed{}.png", clean_name, seed);
                         let out_file_path = output_dir.join(&out_filename);
                         img.save(&out_file_path)?;
 
@@ -207,7 +207,7 @@ fn main() -> anyhow::Result<()> {
 
         // Flush intermediate json
         let benchmark_data = BenchmarkData {
-            engine: "aurora-rust-engine (Pure Rust)".to_string(),
+            engine: "aurora-rust-engine (FlashAttention-2)".to_string(),
             device: "NVIDIA GeForce RTX 4070 Ti (12GB)".to_string(),
             prompt: STRIKING_PROMPT.to_string(),
             negative_prompt: NEGATIVE_PROMPT.to_string(),
@@ -222,7 +222,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         // Flush CSV metrics
-        let csv_path = Path::new("outputs/stress_test/opti_rust_benchmark_metrics.csv");
+        let csv_path = Path::new("outputs/stress_test/flash_rust_benchmark_metrics.csv");
         let mut csv_file = File::create(csv_path)?;
         writeln!(csv_file, "model_name,model_size_gb,load_time_sec,status,img1_duration_sec,img1_it_per_sec,img2_duration_sec,img2_it_per_sec")?;
         for res in &model_results {
@@ -239,15 +239,15 @@ fn main() -> anyhow::Result<()> {
     }
 
     println!("\n============================================================");
-    println!("🏁 Optimized Pass 1 (Rust) Finished! Report: {}", log_path.display());
+    println!("🏁 FlashAttention-2 Pass (Rust) Finished! Report: {}", log_path.display());
     println!("============================================================");
 
     Ok(())
 }
 
 fn write_summary_table<W: Write>(f: &mut W, results: &[ModelStressResult]) -> std::io::Result<()> {
-    writeln!(f, "# ⚡ SDXL 15-Model Pass 1: `aurora-rust-engine` (Pure Rust) Benchmark\n")?;
-    writeln!(f, "**Device**: NVIDIA GeForce RTX 4070 Ti (12GB VRAM) | **Precision**: FP16 Native")?;
+    writeln!(f, "# ⚡ SDXL 15-Model FlashAttention-2: `aurora-rust-engine` (Pure Rust) Benchmark\n")?;
+    writeln!(f, "**Device**: NVIDIA GeForce RTX 4070 Ti (12GB VRAM) | **Precision**: FP16 Native | **Attention**: FlashAttention-2")?;
     writeln!(f, "**Resolution**: 1024x1024 | **Steps**: 30 (Euler Karras) | **CFG**: 6.0\n")?;
     writeln!(f, "| # | Model Name | Size | Load Time | Status | Seed 42 Speed | Seed 1337 Speed | Image 1 | Image 2 |")?;
     writeln!(f, "|---|---|---|---|---|---|---|---|---|")?;
