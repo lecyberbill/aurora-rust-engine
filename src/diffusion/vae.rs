@@ -58,6 +58,20 @@ impl VaeDecoder {
         tensor_to_rgb_image(&decoded)
     }
 
+    /// Encode image tensor [1, 3, H, W] in [-1.0, 1.0] to scaled latent space [1, 4, H/8, W/8]
+    pub fn encode_direct(&self, img_tensor: &Tensor) -> Result<Tensor> {
+        let img_matched = img_tensor.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let dist = self.vae.encode(&img_matched)?;
+        let latents = (dist.sample()? * self.scaling_factor)?;
+        Ok(latents)
+    }
+
+    /// Encode an RgbImage into latent space
+    pub fn encode_image(&self, img: &RgbImage) -> Result<Tensor> {
+        let tensor = rgb_image_to_tensor(img, &self.device, self.dtype)?;
+        self.encode_direct(&tensor)
+    }
+
     /// Tiled Latent Decoding: decodes latents in custom tiles with overlap blending to prevent VRAM spikes
     pub fn decode_tiled(&self, latents: &Tensor, tile_size: usize, overlap: usize) -> Result<RgbImage> {
         let latents = if latents.rank() == 4 {
@@ -251,6 +265,24 @@ pub fn tensor_to_rgb_image(tensor: &Tensor) -> Result<RgbImage> {
         .ok_or_else(|| candle_core::Error::Msg("Failed to construct ImageBuffer from raw RGB bytes".to_string()))?;
 
     Ok(img)
+}
+
+pub fn rgb_image_to_tensor(img: &RgbImage, device: &Device, dtype: DType) -> Result<Tensor> {
+    let (w, h) = img.dimensions();
+    let mut raw_floats = vec![0.0f32; 3 * (h as usize) * (w as usize)];
+    let plane_size = (h as usize) * (w as usize);
+
+    for y in 0..h {
+        for x in 0..w {
+            let pixel = img.get_pixel(x, y);
+            let idx = (y as usize) * (w as usize) + (x as usize);
+            raw_floats[idx] = (pixel[0] as f32 / 127.5) - 1.0;
+            raw_floats[plane_size + idx] = (pixel[1] as f32 / 127.5) - 1.0;
+            raw_floats[2 * plane_size + idx] = (pixel[2] as f32 / 127.5) - 1.0;
+        }
+    }
+
+    Tensor::from_vec(raw_floats, (1, 3, h as usize, w as usize), device)?.to_dtype(dtype)
 }
 
 pub struct FastLatentPreviewer;

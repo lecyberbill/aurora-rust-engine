@@ -75,15 +75,28 @@
     $$\Delta W = \text{multiplier} \times \frac{\alpha}{r} (B \times A)$$
 - [x] **Zero-Overhead In-Memory Hot Weight Merging** (`src/lora/merger.rs` & `src/pipelines/sdxl.rs`):
   - In-place GPU tensor weight updates for 2D Linear and 4D Conv2d modules in UNet and Text Encoders.
-  - Dynamic device-matching for CPU-offloaded text encoders and CUDA UNet tensors.
+  - CPU-backed delta computation eliminating VRAM spikes during patching.
   - Instant $< 10$s patch application with **0 MB additional VRAM allocation** during inference.
   - Seamless unloading (`unload_all_loras`) with bit-for-bit base weight recovery.
 
 ---
 
+### ✅ Milestone 4: Image-to-Image (Img2Img) Pipeline (COMPLETED)
+- [x] **VAE Latent Encoding** (`src/diffusion/vae.rs`):
+  - Image tensor normalization (scaled to $[-1.0, 1.0]$) and latent distribution encoding via `AutoEncoderKL::encode()`.
+  - Seamless handling of arbitrary image resolutions with multiple-of-8 padding/resizing.
+- [x] **Euler Discrete Strength Scheduling** (`src/pipelines/sdxl.rs`):
+  - Timestep truncation and sigma-calibrated Gaussian noise injection:
+    $$z_{\text{start}} = z_{\text{init}} + \sigma(t_{\text{start}}) \cdot \epsilon, \quad t_{\text{start}} = \lfloor N \times (1 - \text{strength}) \rfloor$$
+  - Sub-step execution scaling with user-defined denoising strength $D \in (0.0, 1.0]$.
+- [x] **Multi-Strength Verification Benchmark** (`src/bin/test_img2img.rs`):
+  - Multi-strength validation ($D = 0.35, 0.60, 0.85$) on $1024\times 1024$ input with strict structural fidelity.
+
+---
+
 ## 🚀 Upcoming Milestones
 
-### 🎨 Milestone 4: Inpainting & Outpainting Pipeline
+### 🎨 Milestone 5: Inpainting & Outpainting Pipeline
 **Objective**: Mask-guided diffusion for targeted region editing, object replacement, and canvas expansion.
 
 #### Technical Architecture:
@@ -92,23 +105,7 @@
   - Latent mask downsampling ($1/8$ spatial resolution).
   - In-loop noise blending matching Euler scheduler timesteps:
     $$z_t = M \odot z_t + (1 - M) \odot \text{add\_noise}(z_0, \epsilon, t)$$
-- Seamless edge feathering and high-resolution VAE reconstruction.
-
----
-
-### 🖼️ Milestone 5: Image-to-Image (Img2Img) & Hi-Res Fix Pipeline
-**Objective**: Creative variation and high-resolution structural upscaling.
-
-#### Technical Architecture:
-- `src/pipelines/sdxl_img2img.rs`:
-  - `Img2ImgParams`: initial image, prompt, denoising strength $\sigma_{\text{start}} \in (0.0, 1.0]$.
-  - Start timestep calculation: $t_{\text{start}} = \lfloor \text{num\_steps} \times (1.0 - \text{strength}) \rfloor$.
-  - Forward latent noise injection:
-    $$z_{\text{start}} = z_{\text{init}} + \sigma(t_{\text{start}}) \cdot \epsilon$$
-- **Two-Pass Hi-Res Fix**:
-  - Pass 1: Standard generation at native latent size ($1024 \times 1024$).
-  - Bilinear / Bicubic latent upscaling to target canvas ($1536 \times 1536$ or $2048 \times 2048$).
-  - Pass 2: Low-strength denoising refinement ($0.35 - 0.50$).
+  - Seamless edge feathering and high-resolution VAE reconstruction.
 
 ---
 
@@ -125,11 +122,12 @@
 
 ---
 
-### ⚡ Milestone 7: cuDNN Fused Convolutions & TensorRT Acceleration
+### ⚡ Milestone 7: cuDNN Fused Convolutions & Kernel Compilation Dispatch
 **Objective**: Further optimize UNet ResNet blocks and VAE 2D convolutions to achieve $> 3.5$ it/s on consumer GPUs.
 
 #### Technical Architecture:
 - cuDNN Graph API integration for fused Conv2d + GroupNorm + SiLU kernels.
+- Parameterized pre-compiled CUDA kernel binaries (`.cubin` / `.ptx`) embedded in binary with dynamic runtime autotuning.
 - Pure GPU FP16 VAE decoding with cuDNN acceleration reducing full $1024\times 1024$ decode time to $< 0.5$s.
 - Clear separation in telemetry between pure diffusion loop it/s and total wall-clock time.
 

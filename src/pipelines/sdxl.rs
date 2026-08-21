@@ -221,6 +221,142 @@ impl StableDiffusionXLPipeline {
     pub fn memory_config(&self) -> &PipelineMemoryConfig {
         &self.memory_config
     }
+
+    /// Execute Image-to-Image (Img2Img) diffusion generation
+    pub fn generate_img2img<F>(
+        &mut self,
+        params: crate::traits::Img2ImgParams,
+        mut on_step: Option<F>,
+    ) -> crate::error::Result<RgbImage>
+    where
+        F: FnMut(usize, usize, &Tensor),
+    {
+        let clip_l = self.clip_l.as_mut().ok_or_else(|| crate::error::LuminaError::Config("CLIP-L not loaded".to_string()))?;
+        let clip_g = self.clip_g.as_mut().ok_or_else(|| crate::error::LuminaError::Config("OpenCLIP-G not loaded".to_string()))?;
+        let unet = self.unet.as_ref().ok_or_else(|| crate::error::LuminaError::Config("UNet not loaded".to_string()))?;
+
+        let prompt = params.prompt;
+        let negative_prompt = params.negative_prompt.unwrap_or("");
+        let num_steps = params.num_steps;
+        let guidance_scale = params.guidance_scale;
+        let strength = params.strength.clamp(0.01, 1.0);
+
+        let (orig_w, orig_h) = params.image.dimensions();
+        // Ensure dimensions are multiples of 8
+        let target_w = (orig_w / 8) * 8;
+        let target_h = (orig_h / 8) * 8;
+        let latent_height = (target_h / 8) as usize;
+        let latent_width = (target_w / 8) as usize;
+
+        // Resize image if dimensions were adjusted
+        let src_image = if target_w != orig_w || target_h != orig_h {
+            image::imageops::resize(&params.image, target_w, target_h, image::imageops::FilterType::Lanczos3)
+        } else {
+            params.image
+        };
+
+        // 1. Text embeddings: CLIP-L + OpenCLIP-G with pooled vectors
+        let cond_l = clip_l.encode_prompt(prompt)?
+            .to_device(&self.device)?
+            .to_dtype(self.dtype)?;
+
+        let (cond_g, cond_pooled) = clip_g.encode_prompt_with_pooled(prompt)?;
+        let cond_g = cond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let cond_pooled = cond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let cond_embeds = Tensor::cat(&[&cond_l, &cond_g], 2)?;
+
+        let uncond_l = clip_l.encode_prompt(negative_prompt)?
+            .to_device(&self.device)?
+            .to_dtype(self.dtype)?;
+
+        let (uncond_g, uncond_pooled) = clip_g.encode_prompt_with_pooled(negative_prompt)?;
+        let uncond_g = uncond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let uncond_pooled = uncond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let uncond_embeds = Tensor::cat(&[&uncond_l, &uncond_g], 2)?;
+
+        let text_embeds = Tensor::cat(&[&uncond_embeds, &cond_embeds], 0)?;
+        let pooled_embeds = Tensor::cat(&[&uncond_pooled, &cond_pooled], 0)?;
+
+        // 2. Set scheduler timesteps and compute start timestep based on strength
+        self.scheduler.set_timesteps(num_steps)?;
+        let timesteps = self.scheduler.timesteps().to_vec();
+        let sigmas = self.scheduler.sigmas().to_vec();
+
+        let num_inference_steps = ((num_steps as f64) * strength).round() as usize;
+        let num_inference_steps = num_inference_steps.max(1).min(num_steps);
+        let start_idx = num_steps - num_inference_steps;
+        let active_timesteps = &timesteps[start_idx..];
+        let init_sigma = sigmas.get(start_idx).copied().unwrap_or(1.0);
+
+        // 3. Encode source image into latent space
+        let init_latents = self.vae.encode_image(&src_image)?
+            .to_device(&self.device)?
+            .to_dtype(self.dtype)?;
+
+        // 4. Inject noise at initial sigma: z_start = z_init + sigma * noise
+        let noise = Tensor::randn(
+            0f32,
+            1f32,
+            (1, 4, latent_height, latent_width),
+            &self.device,
+        )?.to_dtype(self.dtype)?;
+
+        let mut latents = if start_idx == 0 {
+            (noise * init_sigma)?
+        } else {
+            (&init_latents + (noise * init_sigma)?)?
+        };
+
+        // Pre-compute SDXL Add Embedding
+        let precomputed_add_proj = unet.compute_add_embedding(
+            2,
+            latent_height,
+            latent_width,
+            Some(&pooled_embeds),
+            &self.device,
+            self.dtype,
+        )?;
+
+        // 5. Denoising loop for active timesteps
+        for (step_idx, &timestep) in active_timesteps.iter().enumerate() {
+            let scaled_latent = self.scheduler.scale_model_input(&latents, timestep)?;
+            let latent_model_input = Tensor::cat(&[&scaled_latent, &scaled_latent], 0)?;
+
+            let noise_pred = unet.forward_with_precomputed(
+                &latent_model_input,
+                timestep as f64,
+                &text_embeds,
+                precomputed_add_proj.as_ref(),
+            )?;
+
+            let noise_uncond = noise_pred.narrow(0, 0, 1)?;
+            let noise_cond = noise_pred.narrow(0, 1, 1)?;
+            let diff = (&noise_cond - &noise_uncond)?;
+            let guided_noise = (&noise_uncond + (&diff * (guidance_scale as f64))?)?;
+
+            latents = self.scheduler.step(&guided_noise, timestep, &latents)?;
+
+            if let Some(ref mut callback) = on_step {
+                callback(step_idx + 1, num_inference_steps, &latents);
+            }
+        }
+
+        // 6. Decode final latents via SDXL VAE
+        let t_vae = std::time::Instant::now();
+        let image = if self.memory_config.vae_tiling {
+            self.vae.decode_tiled(
+                &latents,
+                self.memory_config.vae_tile_size,
+                self.memory_config.vae_tile_overlap,
+            )?
+        } else {
+            self.vae.decode_direct(&latents)?
+        };
+        println!("\n    VAE decoded in {:.2}s", t_vae.elapsed().as_secs_f64());
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        Ok(image)
+    }
 }
 
 impl TextToImagePipeline for StableDiffusionXLPipeline {

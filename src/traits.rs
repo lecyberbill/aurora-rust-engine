@@ -31,6 +31,32 @@ impl<'a> Default for DiffusionParams<'a> {
     }
 }
 
+/// Parameters for Image-to-Image (Img2Img) generation.
+#[derive(Debug, Clone)]
+pub struct Img2ImgParams<'a> {
+    pub prompt: &'a str,
+    pub negative_prompt: Option<&'a str>,
+    pub image: RgbImage,
+    pub strength: f64,
+    pub num_steps: usize,
+    pub guidance_scale: f64,
+    pub seed: u64,
+}
+
+impl<'a> Img2ImgParams<'a> {
+    pub fn new(prompt: &'a str, image: RgbImage) -> Self {
+        Self {
+            prompt,
+            negative_prompt: None,
+            image,
+            strength: 0.60,
+            num_steps: 30,
+            guidance_scale: 6.0,
+            seed: 42,
+        }
+    }
+}
+
 /// Unified trait for full-pipeline Text-to-Image models (e.g. SD 1.5, SDXL, Flux).
 pub trait TextToImagePipeline {
     /// Load weights directly from a monolithic or multi-part SafeTensors path.
