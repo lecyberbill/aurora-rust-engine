@@ -120,8 +120,8 @@ impl StableDiffusionXLPipeline {
         println!("🧬 Hot-merging LoRA: {} (weight: {:.2})...", path_ref.display(), multiplier);
         let t_start = std::time::Instant::now();
 
-        // 1. Compute LoRA deltas
-        let deltas = self.lora_manager.load_and_merge(path_ref, multiplier, &self.device, self.dtype)
+        // 1. Compute LoRA deltas on CPU (0 MB GPU VRAM allocation)
+        let deltas = self.lora_manager.load_and_merge(path_ref, multiplier, &candle_core::Device::Cpu, self.dtype)
             .map_err(|e| crate::error::LuminaError::Config(format!("LoRA merge error: {}", e)))?;
 
         // 2. Convert to lookup map

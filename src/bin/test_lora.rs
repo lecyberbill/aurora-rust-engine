@@ -50,10 +50,10 @@ fn main() -> anyhow::Result<()> {
     let base_dur = t_gen1.elapsed().as_secs_f64();
     let base_out = output_dir.join("01_baseline_no_lora.png");
     img_base.save(&base_out)?;
-    println!("  ✨ Baseline completed in {:.2}s -> {}", base_dur, base_out.display());
+    println!("  ✨ Baseline completed in {:.2}s -> {}", base_dur, base_out.to_string_lossy().replace('\\', "/"));
 
     // 2. Hot-merge LoRA
-    println!("\n🧬 [2/3] Hot-merging LoRA: {} (weight: 0.85)...", lora_path);
+    println!("\n🧬 [2/3] Hot-merging LoRA: {} (weight: 0.85)...", lora_path.replace('\\', "/"));
     let t_merge = Instant::now();
     pipeline.load_lora(lora_path, 0.85)?;
     println!("  ⚡ Merge completed in {:.2}s", t_merge.elapsed().as_secs_f64());
@@ -65,7 +65,7 @@ fn main() -> anyhow::Result<()> {
     let lora_dur = t_gen2.elapsed().as_secs_f64();
     let lora_out = output_dir.join("02_with_lora_acidzlime.png");
     img_lora.save(&lora_out)?;
-    println!("  ✨ LoRA image completed in {:.2}s -> {}", lora_dur, lora_out.display());
+    println!("  ✨ LoRA image completed in {:.2}s -> {}", lora_dur, lora_out.to_string_lossy().replace('\\', "/"));
 
     // 3. Unload LoRA
     println!("\n🔄 [3/3] Unloading LoRA and restoring base checkpoint...");
@@ -77,7 +77,7 @@ fn main() -> anyhow::Result<()> {
     let rest_dur = t_gen3.elapsed().as_secs_f64();
     let rest_out = output_dir.join("03_post_unload_restored.png");
     img_restored.save(&rest_out)?;
-    println!("  ✨ Restored image completed in {:.2}s -> {}", rest_dur, rest_out.display());
+    println!("  ✨ Restored image completed in {:.2}s -> {}", rest_dur, rest_out.to_string_lossy().replace('\\', "/"));
 
     println!("\n============================================================");
     println!("🎉 LoRA Hot-Merging & Restitution Verification Complete!");
