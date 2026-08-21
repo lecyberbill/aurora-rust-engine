@@ -15,7 +15,7 @@ fn progress_callback(step: usize, total: usize, _latent: &Tensor) {
 }
 
 fn main() -> anyhow::Result<()> {
-    let output_dir = Path::new("outputs/img2img_test");
+    let output_dir = Path::new("outputs/img2img_test_set2");
     fs::create_dir_all(output_dir)?;
 
     let device = Device::new_cuda(0)?;
@@ -35,14 +35,14 @@ fn main() -> anyhow::Result<()> {
     src_img.save(&src_copy_path)?;
     println!("  ✅ Source image dimensions: {}x{}", src_img.width(), src_img.height());
 
-    let prompt = "score_9, score_8_up, score_7_up, masterpiece, 1girl, solo, golden radiant armor, fiery glowing orange hair, sunset cyberpunk city, ultra-detailed, cinematic lighting";
+    let prompt = "score_9, score_8_up, score_7_up, masterpiece, 1girl, solo, ethereal crystalline tiara, glowing white and cyan hair, moonlit sanctuary, glowing crystal butterflies, soft magical lighting, highly detailed, photorealistic";
     let neg_prompt = "score_4, score_5, score_6, lowres, bad anatomy, bad hands, text, blurry";
 
-    let strengths = [0.35f64, 0.60f64, 0.85f64];
+    let strengths = [0.35f64, 0.55f64, 0.75f64];
     let mut results = Vec::new();
 
     for (idx, &strength) in strengths.iter().enumerate() {
-        let out_filename = format!("{:02}_img2img_strength_{:02}.png", idx + 1, (strength * 100.0) as u32);
+        let out_filename = format!("{:02}_crystal_strength_{:02}.png", idx + 1, (strength * 100.0) as u32);
         let out_path = output_dir.join(&out_filename);
 
         println!("\n🎨 [{}/{}] Running Img2Img with Denoising Strength: {:.2} (Target: {})...", idx + 1, strengths.len(), strength, out_filename);
