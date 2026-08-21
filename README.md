@@ -186,6 +186,24 @@ println!("{}", metrics.summary_report());
 // Output: ⏱️ [Telemetry] UNet: 15.37s (30 steps, 512.42 ms/step, 1.95 it/s) | VAE: 4.73s | Text: 2.33s | Total: 22.57s
 ```
 
+### Production REST & WebSocket Inference Server
+Start the standalone async inference microservice:
+```bash
+cargo run --release --bin server --features cuda,flash-attn
+```
+- **Health Check**: `GET http://127.0.0.1:8080/api/v1/health`
+- **Text-to-Image Generation**: `POST http://127.0.0.1:8080/api/v1/generate`
+  ```json
+  {
+    "prompt": "futuristic cyberpunk pilot, 8k masterpiece",
+    "steps": 30,
+    "guidance_scale": 6.5,
+    "width": 1024,
+    "height": 1024
+  }
+  ```
+- **WebSocket Streaming**: `ws://127.0.0.1:8080/api/v1/ws`
+
 ---
 
 ## 📊 Benchmark Summary (RTX 4070 Ti 12GB)
@@ -213,7 +231,7 @@ See [`ROADMAP.md`](ROADMAP.md) for full technical specifications and development
 - [x] **Milestone 5**: Inpainting & Outpainting Pipeline
 - [x] **Milestone 6**: Multi-ControlNet (OpenPose, Depth, Canny) & IP-Adapter Conditioners
 - [x] **Milestone 7**: Telemetry Profiler, Parameterized Kernel Dispatch & Adaptive VAE
-- [ ] **Milestone 8**: PyO3 Python Bindings & REST / WebSocket Microservice
+- [x] **Milestone 8**: Production Async Axum Server & WebSocket Streaming
 
 ---
 

@@ -5,6 +5,7 @@ pub mod diffusion;
 pub mod error;
 pub mod lora;
 pub mod pipelines;
+pub mod server;
 pub mod text;
 pub mod traits;
 pub mod weights;
@@ -14,6 +15,7 @@ pub use error::{LuminaError, Result};
 pub use lora::{LoRALoader, LoRAManager, LoRAMerger, LoRAPair, LoRATarget, LoadedLoRA};
 pub use traits::{ControlNetParams, DiffusionParams, Img2ImgParams, InpaintParams, TextGenerationPipeline, TextToImagePipeline};
 pub use weights::{SafeTensorsArchive, WeightRouter};
+pub use server::{build_router, run_server, AppState, GenerateRequest, GenerateResponse, HealthResponse};
 
 pub use diffusion::controlnet::{ControlNetModel, MultiControlNet, compute_canny_edge_map};
 pub use diffusion::schedulers::{
