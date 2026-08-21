@@ -87,6 +87,34 @@ impl<'a> InpaintParams<'a> {
     }
 }
 
+/// Parameters for ControlNet conditioned image generation.
+#[derive(Debug, Clone)]
+pub struct ControlNetParams<'a> {
+    pub prompt: &'a str,
+    pub negative_prompt: Option<&'a str>,
+    pub cond_images: Vec<RgbImage>,
+    pub num_steps: usize,
+    pub guidance_scale: f64,
+    pub width: usize,
+    pub height: usize,
+    pub seed: u64,
+}
+
+impl<'a> ControlNetParams<'a> {
+    pub fn new(prompt: &'a str, cond_image: RgbImage) -> Self {
+        Self {
+            prompt,
+            negative_prompt: None,
+            cond_images: vec![cond_image],
+            num_steps: 30,
+            guidance_scale: 7.0,
+            width: 1024,
+            height: 1024,
+            seed: 42,
+        }
+    }
+}
+
 /// Unified trait for full-pipeline Text-to-Image models (e.g. SD 1.5, SDXL, Flux).
 pub trait TextToImagePipeline {
     /// Load weights directly from a monolithic or multi-part SafeTensors path.

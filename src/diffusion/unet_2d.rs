@@ -5,7 +5,7 @@ use candle_nn::{conv2d, group_norm, linear, Conv2d, Conv2dConfig, GroupNorm, Lin
 use crate::diffusion::attention::SpatialTransformer;
 
 /// Sinusoidal timestep embedding helper (exact Diffusers formula)
-fn get_timestep_embedding(timesteps: &Tensor, embedding_dim: usize) -> Result<Tensor> {
+pub fn get_timestep_embedding(timesteps: &Tensor, embedding_dim: usize) -> Result<Tensor> {
     let half_dim = embedding_dim / 2;
     let factor = -(10000.0f64.ln()) / (half_dim as f64);
     let dev = timesteps.device();
@@ -517,6 +517,26 @@ impl UNetConditionModel {
         encoder_hidden_states: &Tensor,
         precomputed_add_proj: Option<&Tensor>,
     ) -> Result<Tensor> {
+        self.forward_with_controlnet(
+            sample,
+            timestep,
+            encoder_hidden_states,
+            precomputed_add_proj,
+            None,
+            None,
+        )
+    }
+
+    /// Forward pass with optional ControlNet down and mid block zero-convolution residuals
+    pub fn forward_with_controlnet(
+        &self,
+        sample: &Tensor,
+        timestep: f64,
+        encoder_hidden_states: &Tensor,
+        precomputed_add_proj: Option<&Tensor>,
+        down_block_residuals: Option<&[Tensor]>,
+        mid_block_residual: Option<&Tensor>,
+    ) -> Result<Tensor> {
         let dev = sample.device();
         let dtype = sample.dtype();
         let b_size = sample.dim(0)?;
@@ -552,10 +572,22 @@ impl UNetConditionModel {
             }
         }
 
+        // Apply ControlNet down residuals to hs
+        if let Some(down_res) = down_block_residuals {
+            for (hs_tensor, res) in hs.iter_mut().zip(down_res.iter()) {
+                *hs_tensor = (&*hs_tensor + res)?;
+            }
+        }
+
         // 5. Mid Block
         h = self.mid_resnet1.forward(&h, Some(&temb))?;
         h = self.mid_attn.forward(&h, Some(encoder_hidden_states))?;
         h = self.mid_resnet2.forward(&h, Some(&temb))?;
+
+        // Apply ControlNet mid residual
+        if let Some(mid_res) = mid_block_residual {
+            h = (&h + mid_res)?;
+        }
 
         // 6. Up Blocks
         for (i, resnets) in self.up_resnets.iter().enumerate() {

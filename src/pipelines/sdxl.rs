@@ -545,6 +545,140 @@ impl StableDiffusionXLPipeline {
 
         Ok(image)
     }
+
+    /// Execute ControlNet conditioned diffusion generation
+    pub fn generate_controlnet<F>(
+        &mut self,
+        params: crate::traits::ControlNetParams,
+        controlnet: &crate::diffusion::MultiControlNet,
+        mut on_step: Option<F>,
+    ) -> crate::error::Result<RgbImage>
+    where
+        F: FnMut(usize, usize, &Tensor),
+    {
+        let clip_l = self.clip_l.as_mut().ok_or_else(|| crate::error::LuminaError::Config("CLIP-L not loaded".to_string()))?;
+        let clip_g = self.clip_g.as_mut().ok_or_else(|| crate::error::LuminaError::Config("OpenCLIP-G not loaded".to_string()))?;
+        let unet = self.unet.as_ref().ok_or_else(|| crate::error::LuminaError::Config("UNet not loaded".to_string()))?;
+
+        let prompt = params.prompt;
+        let negative_prompt = params.negative_prompt.unwrap_or("");
+        let num_steps = params.num_steps;
+        let guidance_scale = params.guidance_scale;
+        let width = (params.width / 8) * 8;
+        let height = (params.height / 8) * 8;
+        let latent_height = height / 8;
+        let latent_width = width / 8;
+
+        // 1. Text embeddings: CLIP-L + OpenCLIP-G with pooled vectors
+        let cond_l = clip_l.encode_prompt(prompt)?
+            .to_device(&self.device)?
+            .to_dtype(self.dtype)?;
+
+        let (cond_g, cond_pooled) = clip_g.encode_prompt_with_pooled(prompt)?;
+        let cond_g = cond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let cond_pooled = cond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let cond_embeds = Tensor::cat(&[&cond_l, &cond_g], 2)?;
+
+        let uncond_l = clip_l.encode_prompt(negative_prompt)?
+            .to_device(&self.device)?
+            .to_dtype(self.dtype)?;
+
+        let (uncond_g, uncond_pooled) = clip_g.encode_prompt_with_pooled(negative_prompt)?;
+        let uncond_g = uncond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let uncond_pooled = uncond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let uncond_embeds = Tensor::cat(&[&uncond_l, &uncond_g], 2)?;
+
+        let text_embeds = Tensor::cat(&[&uncond_embeds, &cond_embeds], 0)?;
+        let pooled_embeds = Tensor::cat(&[&uncond_pooled, &cond_pooled], 0)?;
+
+        // 2. Pre-process conditioning images to [2, 3, H, W] in [-1.0, 1.0] (for uncond & cond)
+        let mut cond_tensors = Vec::with_capacity(params.cond_images.len());
+        for img in &params.cond_images {
+            let resized = if img.dimensions() != (width as u32, height as u32) {
+                image::imageops::resize(img, width as u32, height as u32, image::imageops::FilterType::Lanczos3)
+            } else {
+                img.clone()
+            };
+            let single_cond = crate::diffusion::vae::rgb_image_to_tensor(&resized, &self.device, self.dtype)?;
+            let cond_batch = Tensor::cat(&[&single_cond, &single_cond], 0)?; // Batch of 2 for CFG
+            cond_tensors.push(cond_batch);
+        }
+
+        // 3. Set scheduler timesteps and initialize random Gaussian latents
+        self.scheduler.set_timesteps(num_steps)?;
+        let timesteps = self.scheduler.timesteps().to_vec();
+        let init_sigma = self.scheduler.sigmas().first().copied().unwrap_or(1.0);
+
+        let init_latents = Tensor::randn(
+            0f32,
+            1f32,
+            (1, 4, latent_height, latent_width),
+            &self.device,
+        )?.to_dtype(self.dtype)?;
+        let mut latents = (init_latents * init_sigma)?;
+
+        // Pre-compute SDXL Add Embedding
+        let precomputed_add_proj = unet.compute_add_embedding(
+            2,
+            latent_height,
+            latent_width,
+            Some(&pooled_embeds),
+            &self.device,
+            self.dtype,
+        )?;
+
+        // 4. Denoising loop with ControlNet residual injection
+        for (step_idx, &timestep) in timesteps.iter().enumerate() {
+            let scaled_latent = self.scheduler.scale_model_input(&latents, timestep)?;
+            let latent_model_input = Tensor::cat(&[&scaled_latent, &scaled_latent], 0)?;
+
+            // Forward pass through MultiControlNet
+            let (down_residuals, mid_residual) = controlnet.forward(
+                &latent_model_input,
+                timestep as f64,
+                &text_embeds,
+                precomputed_add_proj.as_ref(),
+                &cond_tensors,
+            )?;
+
+            // UNet forward with injected residuals
+            let noise_pred = unet.forward_with_controlnet(
+                &latent_model_input,
+                timestep as f64,
+                &text_embeds,
+                precomputed_add_proj.as_ref(),
+                Some(&down_residuals),
+                Some(&mid_residual),
+            )?;
+
+            let noise_uncond = noise_pred.narrow(0, 0, 1)?;
+            let noise_cond = noise_pred.narrow(0, 1, 1)?;
+            let diff = (&noise_cond - &noise_uncond)?;
+            let guided_noise = (&noise_uncond + (&diff * (guidance_scale as f64))?)?;
+
+            latents = self.scheduler.step(&guided_noise, timestep, &latents)?;
+
+            if let Some(ref mut callback) = on_step {
+                callback(step_idx + 1, num_steps, &latents);
+            }
+        }
+
+        // 5. Decode final latents via SDXL VAE
+        let t_vae = std::time::Instant::now();
+        let image = if self.memory_config.vae_tiling {
+            self.vae.decode_tiled(
+                &latents,
+                self.memory_config.vae_tile_size,
+                self.memory_config.vae_tile_overlap,
+            )?
+        } else {
+            self.vae.decode_direct(&latents)?
+        };
+        println!("\n    VAE decoded in {:.2}s", t_vae.elapsed().as_secs_f64());
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        Ok(image)
+    }
 }
 
 impl TextToImagePipeline for StableDiffusionXLPipeline {
