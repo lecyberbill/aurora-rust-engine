@@ -679,17 +679,17 @@ impl StableDiffusionXLPipeline {
 
         Ok(image)
     }
-}
 
-impl TextToImagePipeline for StableDiffusionXLPipeline {
-    fn from_safetensors<P: AsRef<Path>>(path: P, device: &Device) -> crate::error::Result<Self> {
-        Self::from_single_file(path, device.clone())
-    }
-
-    fn generate<F>(&mut self, params: DiffusionParams, mut on_step: Option<F>) -> crate::error::Result<RgbImage>
+    /// Execute text-to-image generation returning image and detailed telemetry metrics
+    pub fn generate_with_metrics<F>(
+        &mut self,
+        params: DiffusionParams,
+        mut on_step: Option<F>,
+    ) -> crate::error::Result<(RgbImage, crate::device::GenerationMetrics)>
     where
         F: FnMut(usize, usize, &Tensor),
     {
+        let t_total = std::time::Instant::now();
         let clip_l = self.clip_l.as_mut().ok_or_else(|| crate::error::LuminaError::Config("CLIP-L not loaded".to_string()))?;
         let clip_g = self.clip_g.as_mut().ok_or_else(|| crate::error::LuminaError::Config("OpenCLIP-G not loaded".to_string()))?;
         let unet = self.unet.as_ref().ok_or_else(|| crate::error::LuminaError::Config("UNet not loaded".to_string()))?;
@@ -701,7 +701,8 @@ impl TextToImagePipeline for StableDiffusionXLPipeline {
         let latent_height = params.height / 8;
         let latent_width = params.width / 8;
 
-        // 1. Text embeddings: CLIP-L + OpenCLIP-G with pooled vectors (transferred to GPU)
+        // 1. Text embeddings: CLIP-L + OpenCLIP-G with pooled vectors
+        let t_text = std::time::Instant::now();
         let cond_l = clip_l.encode_prompt(prompt)?
             .to_device(&self.device)?
             .to_dtype(self.dtype)?;
@@ -709,7 +710,7 @@ impl TextToImagePipeline for StableDiffusionXLPipeline {
         let (cond_g, cond_pooled) = clip_g.encode_prompt_with_pooled(prompt)?;
         let cond_g = cond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
         let cond_pooled = cond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
-        let cond_embeds = Tensor::cat(&[&cond_l, &cond_g], 2)?; // [1, 77, 2048]
+        let cond_embeds = Tensor::cat(&[&cond_l, &cond_g], 2)?;
 
         let uncond_l = clip_l.encode_prompt(negative_prompt)?
             .to_device(&self.device)?
@@ -718,27 +719,25 @@ impl TextToImagePipeline for StableDiffusionXLPipeline {
         let (uncond_g, uncond_pooled) = clip_g.encode_prompt_with_pooled(negative_prompt)?;
         let uncond_g = uncond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
         let uncond_pooled = uncond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
-        let uncond_embeds = Tensor::cat(&[&uncond_l, &uncond_g], 2)?; // [1, 77, 2048]
+        let uncond_embeds = Tensor::cat(&[&uncond_l, &uncond_g], 2)?;
 
-        // Concatenate for CFG batching [2, 77, 2048] and [2, 1280]
         let text_embeds = Tensor::cat(&[&uncond_embeds, &cond_embeds], 0)?;
         let pooled_embeds = Tensor::cat(&[&uncond_pooled, &cond_pooled], 0)?;
+        let prompt_encode_ms = t_text.elapsed().as_secs_f64() * 1000.0;
 
-        // 2. Set scheduler timesteps and get initial sigma
+        // 2. Scheduler and latents initialization
         self.scheduler.set_timesteps(num_steps)?;
         let timesteps = self.scheduler.timesteps().to_vec();
         let init_sigma = self.scheduler.sigmas().first().copied().unwrap_or(1.0);
 
-        // 3. Initial noise latents [1, 4, H/8, W/8] scaled by init_sigma
-        let raw_noise = Tensor::randn(
+        let init_latents = Tensor::randn(
             0f32,
             1f32,
             (1, 4, latent_height, latent_width),
             &self.device,
         )?.to_dtype(self.dtype)?;
-        let mut latents = (raw_noise * init_sigma)?;
+        let mut latents = (init_latents * init_sigma)?;
 
-        // Pre-compute SDXL Add Embedding (size/crops + text pooled vector) once for all steps
         let precomputed_add_proj = unet.compute_add_embedding(
             2,
             latent_height,
@@ -748,12 +747,12 @@ impl TextToImagePipeline for StableDiffusionXLPipeline {
             self.dtype,
         )?;
 
-        // 4. Denoising loop
+        // 3. Denoising loop
+        let t_unet = std::time::Instant::now();
         for (step_idx, &timestep) in timesteps.iter().enumerate() {
             let scaled_latent = self.scheduler.scale_model_input(&latents, timestep)?;
             let latent_model_input = Tensor::cat(&[&scaled_latent, &scaled_latent], 0)?;
 
-            // Forward through SDXL UNet with precomputed add_embedding
             let noise_pred = unet.forward_with_precomputed(
                 &latent_model_input,
                 timestep as f64,
@@ -761,25 +760,25 @@ impl TextToImagePipeline for StableDiffusionXLPipeline {
                 precomputed_add_proj.as_ref(),
             )?;
 
-            // Apply Classifier-Free Guidance (CFG): uncond + scale * (cond - uncond)
             let noise_uncond = noise_pred.narrow(0, 0, 1)?;
             let noise_cond = noise_pred.narrow(0, 1, 1)?;
             let diff = (&noise_cond - &noise_uncond)?;
             let guided_noise = (&noise_uncond + (&diff * (guidance_scale as f64))?)?;
 
-            // Solver step
             latents = self.scheduler.step(&guided_noise, timestep, &latents)?;
 
-            // Optional latent preview callback
             if let Some(ref mut callback) = on_step {
                 callback(step_idx + 1, num_steps, &latents);
             }
         }
+        let unet_total_ms = t_unet.elapsed().as_secs_f64() * 1000.0;
+        let unet_step_avg_ms = if num_steps > 0 { unet_total_ms / (num_steps as f64) } else { 0.0 };
+        let unet_it_per_sec = if unet_total_ms > 0.0 { (num_steps as f64) / (unet_total_ms / 1000.0) } else { 0.0 };
 
-        // 5. Decode final latents via SDXL VAE
+        // 4. VAE Decode
         let t_vae = std::time::Instant::now();
         let image = if self.memory_config.vae_tiling {
-            self.vae.decode_tiled(
+            self.vae.decode_adaptive(
                 &latents,
                 self.memory_config.vae_tile_size,
                 self.memory_config.vae_tile_overlap,
@@ -787,9 +786,36 @@ impl TextToImagePipeline for StableDiffusionXLPipeline {
         } else {
             self.vae.decode_direct(&latents)?
         };
-        println!("\n    VAE decoded in {:.2}s", t_vae.elapsed().as_secs_f64());
+        let vae_decode_ms = t_vae.elapsed().as_secs_f64() * 1000.0;
+        let total_wallclock_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+        let metrics = crate::device::GenerationMetrics {
+            prompt_encode_ms,
+            unet_steps: num_steps,
+            unet_total_ms,
+            unet_step_avg_ms,
+            unet_it_per_sec,
+            vae_decode_ms,
+            total_wallclock_ms,
+        };
+
+        println!("\n{}", metrics.summary_report());
         let _ = std::io::Write::flush(&mut std::io::stdout());
 
+        Ok((image, metrics))
+    }
+}
+
+impl TextToImagePipeline for StableDiffusionXLPipeline {
+    fn from_safetensors<P: AsRef<Path>>(path: P, device: &Device) -> crate::error::Result<Self> {
+        Self::from_single_file(path, device.clone())
+    }
+
+    fn generate<F>(&mut self, params: DiffusionParams, on_step: Option<F>) -> crate::error::Result<RgbImage>
+    where
+        F: FnMut(usize, usize, &Tensor),
+    {
+        let (image, _metrics) = self.generate_with_metrics(params, on_step)?;
         Ok(image)
     }
 }

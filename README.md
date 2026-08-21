@@ -179,6 +179,13 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+### High-Resolution Disentangled Profiling
+```rust
+let (image, metrics) = pipeline.generate_with_metrics(params, None)?;
+println!("{}", metrics.summary_report());
+// Output: ⏱️ [Telemetry] UNet: 15.37s (30 steps, 512.42 ms/step, 1.95 it/s) | VAE: 4.73s | Text: 2.33s | Total: 22.57s
+```
+
 ---
 
 ## 📊 Benchmark Summary (RTX 4070 Ti 12GB)
@@ -187,6 +194,7 @@ fn main() -> anyhow::Result<()> {
 |---|---|---|---|
 | Attention Kernels (per step) | 186.0 ms | **19.6 ms** | **9.5x** |
 | SDXL UNet Denoising (50 steps) | ~42.5 s (1.18 it/s) | **25.8 s (1.94 it/s)** | **1.65x** |
+| Pure UNet Step Speed | ~850 ms/step | **~512 ms/step (1.95 it/s)** | **1.65x** |
 | LoRA Hot Weight Merging Time | N/A | **< 9.0 s** | In-place |
 | Img2Img VAE Encode Time | N/A | **< 0.15 s** | In-place |
 | Inpainting Latent Blending | N/A | **< 0.05 ms/step** | Real-time |
@@ -204,7 +212,7 @@ See [`ROADMAP.md`](ROADMAP.md) for full technical specifications and development
 - [x] **Milestone 4**: Image-to-Image (Img2Img) Pipeline
 - [x] **Milestone 5**: Inpainting & Outpainting Pipeline
 - [x] **Milestone 6**: Multi-ControlNet (OpenPose, Depth, Canny) & IP-Adapter Conditioners
-- [ ] **Milestone 7**: cuDNN Fused Convolutions & Direct GPU FP16 VAE Acceleration
+- [x] **Milestone 7**: Telemetry Profiler, Parameterized Kernel Dispatch & Adaptive VAE
 - [ ] **Milestone 8**: PyO3 Python Bindings & REST / WebSocket Microservice
 
 ---

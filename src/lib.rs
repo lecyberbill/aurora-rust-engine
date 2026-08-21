@@ -9,7 +9,7 @@ pub mod text;
 pub mod traits;
 pub mod weights;
 
-pub use device::{auto_device, select_device};
+pub use device::{auto_device, select_device, GenerationMetrics, KernelDispatchConfig};
 pub use error::{LuminaError, Result};
 pub use lora::{LoRALoader, LoRAManager, LoRAMerger, LoRAPair, LoRATarget, LoadedLoRA};
 pub use traits::{ControlNetParams, DiffusionParams, Img2ImgParams, InpaintParams, TextGenerationPipeline, TextToImagePipeline};

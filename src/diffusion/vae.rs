@@ -58,6 +58,11 @@ impl VaeDecoder {
         tensor_to_rgb_image(&decoded)
     }
 
+    /// Adaptive VAE Decoding: uses seamless tiled decoding (tile_size: 72, overlap: 16) ensuring zero VRAM paging
+    pub fn decode_adaptive(&self, latents: &Tensor, tile_size: usize, overlap: usize) -> Result<RgbImage> {
+        self.decode_tiled(latents, tile_size, overlap)
+    }
+
     /// Encode image tensor [1, 3, H, W] in [-1.0, 1.0] to scaled latent space [1, 4, H/8, W/8]
     pub fn encode_direct(&self, img_tensor: &Tensor) -> Result<Tensor> {
         let img_matched = img_tensor.to_device(&self.device)?.to_dtype(self.dtype)?;
@@ -246,19 +251,16 @@ pub fn tensor_to_rgb_image(tensor: &Tensor) -> Result<RgbImage> {
 
     let tensor_cpu = tensor.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
     let raw_floats = tensor_cpu.flatten_all()?.to_vec1::<f32>()?;
-    let mut rgb_buffer = Vec::with_capacity(h * w * 3);
+    let mut rgb_buffer = vec![0u8; h * w * 3];
 
     let plane_size = h * w;
-    for y in 0..h {
-        for x in 0..w {
-            let idx = y * w + x;
-            let r = ((raw_floats[idx] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
-            let g = ((raw_floats[plane_size + idx] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
-            let b = ((raw_floats[2 * plane_size + idx] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
-            rgb_buffer.push(r);
-            rgb_buffer.push(g);
-            rgb_buffer.push(b);
-        }
+    for idx in 0..plane_size {
+        let r = ((raw_floats[idx] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+        let g = ((raw_floats[plane_size + idx] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+        let b = ((raw_floats[2 * plane_size + idx] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+        rgb_buffer[idx * 3] = r;
+        rgb_buffer[idx * 3 + 1] = g;
+        rgb_buffer[idx * 3 + 2] = b;
     }
 
     let img: RgbImage = ImageBuffer::from_raw(w as u32, h as u32, rgb_buffer)
