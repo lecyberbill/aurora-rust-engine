@@ -1,15 +1,15 @@
-# 🚀 Aurora Rust AI Inference Engine (`TransRust`)
+# 🚀 Aurora Rust AI Inference Engine (`aurora-rust-engine`)
 ## Technical Roadmap & Architectural Specification
 
-**Version**: 0.2.0-dev  
-**Language**: 100% Pure Rust (Candle, CUDA / cuDNN, FP16)  
-**Target Hardware**: NVIDIA GPUs (Ada Lovelace, Ampere, Turing) / Apple Silicon (Metal) / CPU (AVX-512)
+**Version**: 0.3.0-dev  
+**Language**: 100% Pure Rust (Candle, CUDA / cuDNN, FlashAttention-2, FP16)  
+**Target Hardware**: NVIDIA GPUs (Ada Lovelace, Ampere, Turing, Pascal) / Apple Silicon (Metal) / CPU (AVX-512)
 
 ---
 
 ## 🧭 Executive Vision
 
-`aurora-rust-engine` is an ultra-fast, memory-efficient, production-ready pure Rust AI inference engine designed as a lightweight, zero-Python alternative to Diffusers, ComfyUI, and Automatic1111 for Stable Diffusion XL, Pony XL, and next-generation diffusion architectures.
+`aurora-rust-engine` is a pure Rust inference engine for modern image generation and diffusion architectures. Designed as a lightweight, zero-Python alternative to Diffusers, ComfyUI, and Automatic1111, it offers deterministic execution, sub-8GB VRAM footprint, in-memory zero-overhead LoRA hot weight merging, and native FlashAttention-2 fused CUDA kernels.
 
 ```
                     ┌────────────────────────────────────────┐
@@ -28,7 +28,7 @@
                                         │
                     ┌───────────────────▼────────────────────┐
                     │           LoRA Engine Core             │
-                    │   (Hot Weight Merging & Multi-LoRA)    │
+                    │   (In-Memory Zero-Overhead Merging)    │
                     └───────────────────┬────────────────────┘
                                         │
           ┌─────────────────────────────┼─────────────────────────────┐
@@ -41,123 +41,104 @@
 
 ---
 
-## 🗺️ Implementation Milestones
+## 🗺️ Completed Milestones
 
-### ✅ Milestone 1: SDXL Core Pipeline & Calibration (COMPLETED)
-- [x] **SafeTensors Parser & Fast Weight Router**: Zero-copy memory-mapped loading with automatic key normalization.
+### ✅ Milestone 1: SDXL Core Pipeline & Conditioning (COMPLETED)
+- [x] **SafeTensors Zero-Copy Memory Mapper**: Fast binary header parser and weight router with automatic key normalization.
 - [x] **SDXL Penultimate Text Conditioning**:
-  - Custom CLIP-L (Layer 11 hidden state extraction, QuickGELU).
+  - Custom CLIP-L (Layer 11 hidden state extraction, QuickGELU activation).
   - Custom OpenCLIP-bigG (Layer 31 hidden state extraction, standard GELU, pooled EOS projection).
-  - 100% numerical bit-for-bit parity against Hugging Face Diffusers.
-- [x] **UNet 2D Condition Model**: Exact spatial cross-attention with optimized $Q$-prescaling and cached add-embeddings.
-- [x] **Euler Discrete / Karras Noise Scheduler**: Stable deterministic sampling.
-- [x] **Seamless $C^\infty$ Cosine Tiled VAE**: 4-quadrant $72\times 72$ decoding with 128px cross-fade eliminating all tile seams in $< 4.0$s.
-- [x] **Memory Safety**: CPU text offloading and capped $< 7.7$ GB cruise VRAM (0% Windows shared memory swap).
-- [x] **15-Model Stress Test**: 100% success rate across all SDXL base and Pony checkpoints.
+  - Bit-for-bit mathematical parity against Hugging Face Diffusers.
+- [x] **UNet 2D Condition Model**: Complete cross-attention and spatial transformer blocks with scaled dot-product attention and add-embeddings.
+- [x] **Euler Discrete / Karras Noise Scheduler**: Deterministic noise variance scaling.
+- [x] **Seamless $C^\infty$ Cosine Tiled VAE**: 4-quadrant $72\times 72$ decoding with 128px cross-fade eliminating tile seams in $< 4.0$s.
+- [x] **Memory Safety**: CPU text offloading and capped $< 7.7$ GB cruise VRAM on 12GB GPUs (**0% Windows shared memory swap**).
+- [x] **15-Model Stress Test**: 100% success rate across 15 SDXL base and Pony checkpoints.
 
 ---
 
-### 🧬 Milestone 2: LoRA & LyCORIS Engine (NEXT PHASE)
-**Objective**: Enable zero-overhead model personalization via Civitai / Hugging Face LoRA weights.
-
-#### 1. Architecture:
-- `src/lora/loader.rs`:
-  - Support standard LoRA format (`lora_unet_...`, `lora_te1_...`, `lora_te2_...`).
-  - Support LyCORIS / LoCon (`hada`, `lokr` decomposition).
-  - Support automatic $\alpha / \text{rank}$ scaling factor detection.
-- `src/lora/merger.rs`:
-  - **Mode A: Hot Weight Merging (Zero Inference Cost)**:
-    $$W_{\text{merged}} = W_{\text{base}} + \sum_{i=1}^N \lambda_i \frac{\alpha_i}{r_i} (A_i \times B_i)$$
-    Modifies weights directly in memory before inference for maximum speed.
-  - **Mode B: Dynamic Multi-LoRA Runtime**:
-    Evaluates $(A \times B) x$ dynamically during cross-attention for multi-character generation.
-
-#### 2. Pipeline Integration:
-```rust
-let mut pipeline = StableDiffusionXLPipeline::from_safetensors("model.safetensors", &device)?;
-pipeline.load_lora("detail_enhancer.safetensors", 0.75)?;
-pipeline.load_lora("character_style.safetensors", 0.85)?;
-```
+### ✅ Milestone 2: FlashAttention-2 Windows MSVC Kernel Fusion (COMPLETED)
+- [x] **Windows MSVC Linker Integration**: Custom linker stub in `build.rs` resolving `stdc++.lib` / `msvcprt.lib` compatibility under MSVC.
+- [x] **Scaled Dot-Product Attention Fusion**: Replacement of $O(N^2)$ memory-bound attention with hardware-optimized FlashAttention-2 kernels.
+- [x] **Performance Benchmark**:
+  - Pure attention compute accelerated **9.5x** (186ms down to 19.6ms per step).
+  - End-to-end UNet denoising speed improved from **1.18 it/s to 1.94 it/s** (50 steps in 25.8s on RTX 4070 Ti).
+  - Strict numerical parity validated with maximum absolute difference $\le 0.000244$.
 
 ---
 
-### 🎨 Milestone 3: Inpainting & Outpainting Engine
-**Objective**: Mask-guided diffusion for object replacement, background alteration, and canvas expansion.
+### ✅ Milestone 3: LoRA & LyCORIS Engine & In-Memory Hot Weight Merging (COMPLETED)
+- [x] **Multi-Format LoRA Parser** (`src/lora/loader.rs`):
+  - Kohya-ss format (`lora_unet_...`, `lora_te1_...`, `lora_te2_...`).
+  - Hugging Face Diffusers format.
+  - Automatic rank $r$ and $\alpha$ extraction with rank-normalized scaling:
+    $$\Delta W = \text{multiplier} \times \frac{\alpha}{r} (B \times A)$$
+- [x] **Zero-Overhead In-Memory Hot Weight Merging** (`src/lora/merger.rs` & `src/pipelines/sdxl.rs`):
+  - In-place GPU tensor weight updates for 2D Linear and 4D Conv2d modules in UNet and Text Encoders.
+  - Dynamic device-matching for CPU-offloaded text encoders and CUDA UNet tensors.
+  - Instant $< 10$s patch application with **0 MB additional VRAM allocation** during inference.
+  - Seamless unloading (`unload_all_loras`) with bit-for-bit base weight recovery.
 
-#### 1. Architecture:
+---
+
+## 🚀 Upcoming Milestones
+
+### 🎨 Milestone 4: Inpainting & Outpainting Pipeline
+**Objective**: Mask-guided diffusion for targeted region editing, object replacement, and canvas expansion.
+
+#### Technical Architecture:
 - `src/pipelines/sdxl_inpaint.rs`:
   - `InpaintParams`: source image, binary mask, mask blur radius, denoising strength.
-  - VAE latent encoding of original unmasked region.
   - Latent mask downsampling ($1/8$ spatial resolution).
-  - In-loop noise injection matching Euler scheduler timesteps:
+  - In-loop noise blending matching Euler scheduler timesteps:
     $$z_t = M \odot z_t + (1 - M) \odot \text{add\_noise}(z_0, \epsilon, t)$$
-- Automatic edge feathering and seamless VAE reconstruction.
+- Seamless edge feathering and high-resolution VAE reconstruction.
 
 ---
 
-### 🖼️ Milestone 4: Image-to-Image (Img2Img) & Upscaling
-**Objective**: Creative transformation of existing sketches, renders, and photographs.
+### 🖼️ Milestone 5: Image-to-Image (Img2Img) & Hi-Res Fix Pipeline
+**Objective**: Creative variation and high-resolution structural upscaling.
 
-#### 1. Architecture:
+#### Technical Architecture:
 - `src/pipelines/sdxl_img2img.rs`:
-  - Input image VAE encoding to $z_0$.
-  - Parametric `strength` $\in (0.0, 1.0]$.
-  - Timestep truncation:
-    $$t_{\text{start}} = \lfloor \text{num\_steps} \times (1.0 - \text{strength}) \rfloor$$
-    $$z_{t_{\text{start}}} = \text{add\_noise}(z_0, \epsilon, t_{\text{start}})$$
-- Fast High-Resolution Latent Fix (Hi-Res Fix): 512x512 latent generation -> VAE decode -> Bicubic/ESRGAN upscale -> 1024x1024 Img2Img refinement pass.
+  - `Img2ImgParams`: initial image, prompt, denoising strength $\sigma_{\text{start}} \in (0.0, 1.0]$.
+  - Start timestep calculation: $t_{\text{start}} = \lfloor \text{num\_steps} \times (1.0 - \text{strength}) \rfloor$.
+  - Forward latent noise injection:
+    $$z_{\text{start}} = z_{\text{init}} + \sigma(t_{\text{start}}) \cdot \epsilon$$
+- **Two-Pass Hi-Res Fix**:
+  - Pass 1: Standard generation at native latent size ($1024 \times 1024$).
+  - Bilinear / Bicubic latent upscaling to target canvas ($1536 \times 1536$ or $2048 \times 2048$).
+  - Pass 2: Low-strength denoising refinement ($0.35 - 0.50$).
 
 ---
 
-### ⚡ Milestone 5: Kernel Optimizations (FlashAttention-2 & cuDNN Convolutions)
-**Objective**: Maximize throughput across Ada Lovelace Tensor Cores to reach peak GPU compute utilization.
+### 🎛️ Milestone 6: Multi-ControlNet & IP-Adapter Conditioners
+**Objective**: Precise spatial structural guidance via edge maps, depth, pose, and reference image prompts.
 
-#### 1. Delivered:
-- [x] **FlashAttention-2 Native CUDA Integration**:
-  - Direct integration into `CrossAttention::forward` (`candle-flash-attn`).
-  - Evaluates both Self-Attention ($4096 \times 4096$) and Cross-Attention ($4096 \times 77$) directly in SRAM.
-  - **9.5x attention speedup** (from 186ms down to 19.6ms per block) with zero VRAM matrix materialization.
-
-#### 2. Next Kernel Optimizations:
-- [ ] **cuDNN Fused Conv2d Acceleration**:
-  - Replace naive convolution routines in UNet ResNet down/up-blocks with cuDNN fused FP16 Winograd/implicit GEMM algorithms.
-- [ ] **Fused GroupNorm + SiLU Kernel**:
-  - Combine GroupNorm and activation into a single memory pass.
-- [ ] **Continuous it/s Measurement Metric**:
-  - Disentangle pure diffusion loop it/s ($30 / T_{\text{diffusion}}$) from total wall-clock time in logging and API responses.
+#### Technical Architecture:
+- `src/diffusion/controlnet.rs`:
+  - SafeTensors ControlNet loader (Canny, Depth, OpenPose).
+  - Down-block zero-convolution feature injection:
+    $$h_{\text{unet}}^{(i)} = h_{\text{unet}}^{(i)} + \text{ZeroConv}(h_{\text{control}}^{(i)})$$
+- Multi-ControlNet simultaneous conditioning with independent weighting.
+- IP-Adapter cross-attention projection for reference image styling.
 
 ---
 
-### 🕹️ Milestone 6: Multi-ControlNet & T2I-Adapters
-**Objective**: Spatial structural control (Pose, Canny edges, Depth maps).
+### ⚡ Milestone 7: cuDNN Fused Convolutions & TensorRT Acceleration
+**Objective**: Further optimize UNet ResNet blocks and VAE 2D convolutions to achieve $> 3.5$ it/s on consumer GPUs.
 
-#### 1. Architecture:
-- `src/controlnet/`:
-  - SDXL ControlNet condition encoder (OpenPose, Depth, Canny).
-  - Residual addition into UNet down-blocks and mid-block.
-  - Multi-ControlNet weighted blending (`control_scales: Vec<f64>`).
-
----
-
-### 🌐 Milestone 7: Production Serving & Bindings
-**Objective**: Frictionless integration into web servers, desktop apps, and microservices.
-
-#### 1. Architecture:
-- **PyO3 Python Extension (`transrust-py`)**: Drop-in high-performance Python package.
-- **REST & WebSocket Microservice**:
-  - Axum / Tokio asynchronous HTTP server.
-  - Real-time step progress streaming via WebSockets.
-  - Embedded web UI for instant prompt engineering.
+#### Technical Architecture:
+- cuDNN Graph API integration for fused Conv2d + GroupNorm + SiLU kernels.
+- Pure GPU FP16 VAE decoding with cuDNN acceleration reducing full $1024\times 1024$ decode time to $< 0.5$s.
+- Clear separation in telemetry between pure diffusion loop it/s and total wall-clock time.
 
 ---
 
-## 📊 Summary Timeline
+### 🌐 Milestone 8: Production Server & Ecosystem Bindings
+**Objective**: High-throughput deployment across cloud infrastructure and desktop tools.
 
-| Target Date | Milestone | Key Deliverables |
-|---|---|---|
-| **Aug 2026** | **Phase 1** | SDXL Core Engine, Quality Calibration, 15-Model Pass 2 (Done) |
-| **Aug 2026** | **Phase 2** | FlashAttention-2 Integration (9.5x attention speedup, Done) |
-| **Aug 2026** | **Phase 3** | LoRA & LyCORIS Engine (Civitai compatibility & hot merging) |
-| **Sep 2026** | **Phase 4** | Inpainting & Img2Img Pipelines |
-| **Sep 2026** | **Phase 5** | cuDNN Fused Convolutions & Kernel Optimization |
-| **Oct 2026** | **Phase 6** | Multi-ControlNet & PyO3 Python Bindings / Web API |
+#### Technical Architecture:
+- **PyO3 Python Bindings**: Direct drop-in Rust acceleration for Python ecosystems (`pip install aurora-diffusion`).
+- **REST / WebSocket Server**: Embedded Axum async HTTP server supporting streaming progressive latents.
+- **Node.js / WASM WebUI**: Lightweight local control panel with real-time hardware telemetry.

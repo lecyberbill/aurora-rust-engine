@@ -3,6 +3,7 @@
 pub mod device;
 pub mod diffusion;
 pub mod error;
+pub mod lora;
 pub mod pipelines;
 pub mod text;
 pub mod traits;
@@ -10,6 +11,7 @@ pub mod weights;
 
 pub use device::{auto_device, select_device};
 pub use error::{LuminaError, Result};
+pub use lora::{LoRALoader, LoRAManager, LoRAMerger, LoRAPair, LoRATarget, LoadedLoRA};
 pub use traits::{DiffusionParams, TextGenerationPipeline, TextToImagePipeline};
 pub use weights::{SafeTensorsArchive, WeightRouter};
 

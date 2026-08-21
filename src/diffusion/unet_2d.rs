@@ -34,6 +34,12 @@ impl TimestepEmbedding {
         Ok(Self { linear_1, linear_2 })
     }
 
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        crate::diffusion::attention::apply_linear_delta(&mut self.linear_1, &format!("{}.linear_1", prefix), deltas)?;
+        crate::diffusion::attention::apply_linear_delta(&mut self.linear_2, &format!("{}.linear_2", prefix), deltas)?;
+        Ok(())
+    }
+
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let xs = self.linear_1.forward(xs)?;
         let xs = candle_nn::ops::silu(&xs)?;
@@ -97,6 +103,19 @@ impl ResnetBlock2D {
         })
     }
 
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        crate::diffusion::attention::apply_conv2d_delta(&mut self.conv1, &format!("{}.conv1", prefix), deltas)?;
+        crate::diffusion::attention::apply_conv2d_delta(&mut self.conv2, &format!("{}.conv2", prefix), deltas)?;
+        if let Some(proj) = &mut self.time_emb_proj {
+            crate::diffusion::attention::apply_linear_delta(proj, &format!("{}.time_emb_proj", prefix), deltas)?;
+        }
+        if let Some(sc) = &mut self.conv_shortcut {
+            crate::diffusion::attention::apply_conv2d_delta(sc, &format!("{}.conv_shortcut", prefix), deltas)?;
+            crate::diffusion::attention::apply_conv2d_delta(sc, &format!("{}.nin_shortcut", prefix), deltas)?;
+        }
+        Ok(())
+    }
+
     pub fn forward(&self, xs: &Tensor, temb: Option<&Tensor>) -> Result<Tensor> {
         let residual = match &self.conv_shortcut {
             Some(sc) => sc.forward(xs)?,
@@ -140,6 +159,11 @@ impl Downsample2D {
         Ok(Self { conv })
     }
 
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        crate::diffusion::attention::apply_conv2d_delta(&mut self.conv, &format!("{}.conv", prefix), deltas)?;
+        Ok(())
+    }
+
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         self.conv.forward(xs)
     }
@@ -161,6 +185,11 @@ impl Upsample2D {
             vb.pp("conv"),
         )?;
         Ok(Self { conv })
+    }
+
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        crate::diffusion::attention::apply_conv2d_delta(&mut self.conv, &format!("{}.conv", prefix), deltas)?;
+        Ok(())
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
@@ -368,6 +397,68 @@ impl UNetConditionModel {
 
     pub fn new_sd15(vb: VarBuilder) -> Result<Self> {
         Self::new_sdxl(vb)
+    }
+
+    pub fn apply_lora_deltas(&mut self, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        let unet_deltas: std::collections::HashMap<String, Tensor> = deltas
+            .iter()
+            .map(|(k, v)| {
+                let stripped = k.strip_prefix("unet.").unwrap_or(k);
+                (stripped.to_string(), v.clone())
+            })
+            .collect();
+
+        crate::diffusion::attention::apply_conv2d_delta(&mut self.conv_in, "conv_in", &unet_deltas)?;
+        crate::diffusion::attention::apply_conv2d_delta(&mut self.conv_out, "conv_out", &unet_deltas)?;
+        self.time_embedding.apply_lora_deltas("time_embedding", &unet_deltas)?;
+        if let Some(add_emb) = &mut self.add_embedding {
+            add_emb.apply_lora_deltas("add_embedding", &unet_deltas)?;
+        }
+
+        // Down blocks
+        for (i, (resnets, (attns, sampler))) in self.down_resnets.iter_mut()
+            .zip(self.down_attns.iter_mut().zip(self.down_samplers.iter_mut()))
+            .enumerate()
+        {
+            let block_prefix = format!("down_blocks.{}", i);
+            for (j, resnet) in resnets.iter_mut().enumerate() {
+                resnet.apply_lora_deltas(&format!("{}.resnets.{}", block_prefix, j), &unet_deltas)?;
+            }
+            for (j, attn_opt) in attns.iter_mut().enumerate() {
+                if let Some(attn) = attn_opt {
+                    attn.apply_lora_deltas(&format!("{}.attentions.{}", block_prefix, j), &unet_deltas)?;
+                }
+            }
+            if let Some(s) = sampler {
+                s.apply_lora_deltas(&format!("{}.downsamplers.0", block_prefix), &unet_deltas)?;
+            }
+        }
+
+        // Mid block
+        self.mid_resnet1.apply_lora_deltas("mid_block.resnets.0", &unet_deltas)?;
+        self.mid_attn.apply_lora_deltas("mid_block.attentions.0", &unet_deltas)?;
+        self.mid_resnet2.apply_lora_deltas("mid_block.resnets.1", &unet_deltas)?;
+
+        // Up blocks
+        for (i, (resnets, (attns, sampler))) in self.up_resnets.iter_mut()
+            .zip(self.up_attns.iter_mut().zip(self.up_samplers.iter_mut()))
+            .enumerate()
+        {
+            let block_prefix = format!("up_blocks.{}", i);
+            for (j, resnet) in resnets.iter_mut().enumerate() {
+                resnet.apply_lora_deltas(&format!("{}.resnets.{}", block_prefix, j), &unet_deltas)?;
+            }
+            for (j, attn_opt) in attns.iter_mut().enumerate() {
+                if let Some(attn) = attn_opt {
+                    attn.apply_lora_deltas(&format!("{}.attentions.{}", block_prefix, j), &unet_deltas)?;
+                }
+            }
+            if let Some(s) = sampler {
+                s.apply_lora_deltas(&format!("{}.upsamplers.0", block_prefix), &unet_deltas)?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Pre-compute SDXL Add Embedding (time_ids + pooled text projection) once for all steps

@@ -1,7 +1,6 @@
 // [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: Test FlashAttention-2 with cross-attention (different sequence lengths)
 
 use candle_core::{DType, Device, Tensor};
-use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
     let device = Device::new_cuda(0)?;

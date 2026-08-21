@@ -37,6 +37,14 @@ impl ClipAttention {
         })
     }
 
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        crate::diffusion::attention::apply_linear_delta(&mut self.q_proj, &format!("{}.q_proj", prefix), deltas)?;
+        crate::diffusion::attention::apply_linear_delta(&mut self.k_proj, &format!("{}.k_proj", prefix), deltas)?;
+        crate::diffusion::attention::apply_linear_delta(&mut self.v_proj, &format!("{}.v_proj", prefix), deltas)?;
+        crate::diffusion::attention::apply_linear_delta(&mut self.out_proj, &format!("{}.out_proj", prefix), deltas)?;
+        Ok(())
+    }
+
     pub fn forward(&self, xs: &Tensor, causal_mask: Option<&Tensor>) -> Result<Tensor> {
         let (b_sz, seq_len, _) = xs.dims3()?;
 
@@ -74,6 +82,12 @@ impl ClipMlp {
         Ok(Self { fc1, fc2 })
     }
 
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        crate::diffusion::attention::apply_linear_delta(&mut self.fc1, &format!("{}.fc1", prefix), deltas)?;
+        crate::diffusion::attention::apply_linear_delta(&mut self.fc2, &format!("{}.fc2", prefix), deltas)?;
+        Ok(())
+    }
+
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let h = self.fc1.forward(xs)?;
         // QuickGELU: x * sigmoid(1.702 * x)
@@ -104,6 +118,12 @@ impl ClipEncoderLayer {
             mlp,
             layer_norm2,
         })
+    }
+
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        self.self_attn.apply_lora_deltas(&format!("{}.self_attn", prefix), deltas)?;
+        self.mlp.apply_lora_deltas(&format!("{}.mlp", prefix), deltas)?;
+        Ok(())
     }
 
     pub fn forward(&self, xs: &Tensor, causal_mask: Option<&Tensor>) -> Result<Tensor> {
@@ -179,6 +199,16 @@ impl ClipTextEncoder {
             tokenizer: None,
             device: dev,
         })
+    }
+
+    pub fn apply_lora_deltas(&mut self, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let p1 = format!("te1.text_model.encoder.layers.{}", i);
+            let p2 = format!("text_model.encoder.layers.{}", i);
+            layer.apply_lora_deltas(&p1, deltas)?;
+            layer.apply_lora_deltas(&p2, deltas)?;
+        }
+        Ok(())
     }
 
     pub fn load_tokenizer<P: AsRef<Path>>(&mut self, path: P) -> crate::error::Result<()> {

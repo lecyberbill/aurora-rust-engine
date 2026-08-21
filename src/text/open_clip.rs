@@ -21,6 +21,12 @@ impl OpenClipMlp {
         Ok(Self { fc1, fc2 })
     }
 
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        crate::diffusion::attention::apply_linear_delta(&mut self.fc1, &format!("{}.mlp.fc1", prefix), deltas)?;
+        crate::diffusion::attention::apply_linear_delta(&mut self.fc2, &format!("{}.mlp.fc2", prefix), deltas)?;
+        Ok(())
+    }
+
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let h = self.fc1.forward(xs)?;
         let gelu = h.gelu_erf()?;
@@ -50,6 +56,12 @@ impl OpenClipEncoderLayer {
             mlp,
             layer_norm2,
         })
+    }
+
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        self.self_attn.apply_lora_deltas(&format!("{}.self_attn", prefix), deltas)?;
+        self.mlp.apply_lora_deltas(prefix, deltas)?;
+        Ok(())
     }
 
     pub fn forward(&self, xs: &Tensor, causal_mask: Option<&Tensor>) -> Result<Tensor> {
@@ -131,6 +143,25 @@ impl OpenClipTextEncoder {
             tokenizer: None,
             device: dev,
         })
+    }
+
+    pub fn apply_lora_deltas(&mut self, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let p1 = format!("te2.text_model.encoder.layers.{}", i);
+            let p2 = format!("text_model.encoder.layers.{}", i);
+            layer.apply_lora_deltas(&p1, deltas)?;
+            layer.apply_lora_deltas(&p2, deltas)?;
+        }
+        if let Some(proj) = &mut self.text_projection {
+            if let Some(delta) = deltas.get("te2.text_model.text_projection")
+                .or_else(|| deltas.get("text_model.text_projection"))
+                .or_else(|| deltas.get("text_projection"))
+            {
+                let delta = delta.to_device(proj.device())?.to_dtype(proj.dtype())?;
+                *proj = (proj.as_ref() + &delta)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn load_tokenizer<P: AsRef<Path>>(&mut self, path: P) -> crate::error::Result<()> {

@@ -11,6 +11,41 @@ fn linear_flexible(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Line
     }
 }
 
+pub fn apply_linear_delta(lin: &mut Linear, key: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+    let lookup_key = if !key.ends_with(".weight") {
+        format!("{}.weight", key)
+    } else {
+        key.to_string()
+    };
+    if let Some(delta) = deltas.get(&lookup_key).or_else(|| deltas.get(key)) {
+        let dev = lin.weight().device();
+        let dtype = lin.weight().dtype();
+        let delta = delta.to_device(dev)?.to_dtype(dtype)?;
+        let new_weight = (lin.weight() + &delta)?;
+        let bias = lin.bias().cloned();
+        *lin = Linear::new(new_weight, bias);
+    }
+    Ok(())
+}
+
+pub fn apply_conv2d_delta(conv: &mut Conv2d, key: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+    let lookup_key = if !key.ends_with(".weight") {
+        format!("{}.weight", key)
+    } else {
+        key.to_string()
+    };
+    if let Some(delta) = deltas.get(&lookup_key).or_else(|| deltas.get(key)) {
+        let dev = conv.weight().device();
+        let dtype = conv.weight().dtype();
+        let delta = delta.to_device(dev)?.to_dtype(dtype)?;
+        let new_weight = (conv.weight() + &delta)?;
+        let bias = conv.bias().cloned();
+        let config = *conv.config();
+        *conv = Conv2d::new(new_weight, bias, config);
+    }
+    Ok(())
+}
+
 /// Pure Rust Multi-Head Attention supporting Self-Attention & Cross-Attention
 #[derive(Debug)]
 pub struct CrossAttention {
@@ -43,6 +78,16 @@ impl CrossAttention {
             head_dim: dim_head,
             scale,
         })
+    }
+
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        apply_linear_delta(&mut self.to_q, &format!("{}.to_q", prefix), deltas)?;
+        apply_linear_delta(&mut self.to_k, &format!("{}.to_k", prefix), deltas)?;
+        apply_linear_delta(&mut self.to_v, &format!("{}.to_v", prefix), deltas)?;
+        if !self.to_out.is_empty() {
+            apply_linear_delta(&mut self.to_out[0], &format!("{}.to_out.0", prefix), deltas)?;
+        }
+        Ok(())
     }
 
     pub fn forward(&self, xs: &Tensor, context: Option<&Tensor>) -> Result<Tensor> {
@@ -121,6 +166,15 @@ impl FeedForward {
             is_geglu,
         })
     }
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        if self.is_geglu {
+            apply_linear_delta(&mut self.net_0_proj, &format!("{}.net.0.proj", prefix), deltas)?;
+        } else {
+            apply_linear_delta(&mut self.net_0_proj, &format!("{}.net.0", prefix), deltas)?;
+        }
+        apply_linear_delta(&mut self.net_2, &format!("{}.net.2", prefix), deltas)?;
+        Ok(())
+    }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let hidden = self.net_0_proj.forward(xs)?;
@@ -164,6 +218,13 @@ impl BasicTransformerBlock {
             norm2,
             norm3,
         })
+    }
+
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        self.attn1.apply_lora_deltas(&format!("{}.attn1", prefix), deltas)?;
+        self.attn2.apply_lora_deltas(&format!("{}.attn2", prefix), deltas)?;
+        self.ff.apply_lora_deltas(&format!("{}.ff", prefix), deltas)?;
+        Ok(())
     }
 
     pub fn forward(&self, xs: &Tensor, context: Option<&Tensor>) -> Result<Tensor> {
@@ -246,6 +307,21 @@ impl SpatialTransformer {
             transformer_blocks,
             proj_out,
         })
+    }
+
+    pub fn apply_lora_deltas(&mut self, prefix: &str, deltas: &std::collections::HashMap<String, Tensor>) -> Result<()> {
+        match &mut self.proj_in {
+            ProjIn::Conv(conv) => apply_conv2d_delta(conv, &format!("{}.proj_in", prefix), deltas)?,
+            ProjIn::Lin(lin) => apply_linear_delta(lin, &format!("{}.proj_in", prefix), deltas)?,
+        }
+        for (i, block) in self.transformer_blocks.iter_mut().enumerate() {
+            block.apply_lora_deltas(&format!("{}.transformer_blocks.{}", prefix, i), deltas)?;
+        }
+        match &mut self.proj_out {
+            ProjOut::Conv(conv) => apply_conv2d_delta(conv, &format!("{}.proj_out", prefix), deltas)?,
+            ProjOut::Lin(lin) => apply_linear_delta(lin, &format!("{}.proj_out", prefix), deltas)?,
+        }
+        Ok(())
     }
 
     pub fn forward(&self, xs: &Tensor, context: Option<&Tensor>) -> Result<Tensor> {

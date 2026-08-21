@@ -47,6 +47,10 @@ impl SafeTensorsArchive {
         })
     }
 
+    pub fn tensor_names(&self) -> Vec<String> {
+        self.tensors.keys().cloned().collect()
+    }
+
     pub fn get_tensor(&self, name: &str, device: &Device, dtype: DType) -> Result<Tensor> {
         let (st_dtype, shape, offset, len) = self
             .tensors
@@ -126,6 +130,7 @@ pub struct WeightRouter<'a> {
     archive: &'a SafeTensorsArchive,
     device: Device,
     dtype: DType,
+    lora_deltas: HashMap<String, Tensor>,
 }
 
 impl<'a> WeightRouter<'a> {
@@ -134,7 +139,51 @@ impl<'a> WeightRouter<'a> {
             archive,
             device,
             dtype,
+            lora_deltas: HashMap::new(),
         }
+    }
+
+    pub fn set_lora_deltas(&mut self, deltas: HashMap<String, Tensor>) {
+        self.lora_deltas = deltas;
+    }
+
+    pub fn add_lora_deltas(&mut self, deltas: &[(String, Tensor)]) -> Result<()> {
+        for (name, delta) in deltas {
+            if let Some(existing) = self.lora_deltas.get_mut(name) {
+                *existing = (existing.as_ref() + delta)?;
+            } else {
+                self.lora_deltas.insert(name.clone(), delta.clone());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn clear_lora_deltas(&mut self) {
+        self.lora_deltas.clear();
+    }
+
+    fn apply_delta_if_present(&self, prefix: &str, key: &str, tensor: Tensor, target_device: &Device, target_dtype: DType) -> Result<Tensor> {
+        let lookup_key = if !key.ends_with(".weight") && !key.ends_with(".bias") {
+            format!("{}.weight", key)
+        } else {
+            key.to_string()
+        };
+        let namespaced = if !prefix.is_empty() {
+            format!("{}.{}", prefix, lookup_key)
+        } else {
+            lookup_key.clone()
+        };
+
+        if let Some(delta) = self.lora_deltas.get(&namespaced)
+            .or_else(|| self.lora_deltas.get(&lookup_key))
+            .or_else(|| self.lora_deltas.get(key))
+        {
+            let delta = delta.to_device(target_device)?.to_dtype(target_dtype)?;
+            if delta.shape() == tensor.shape() {
+                return Ok((&tensor + &delta)?);
+            }
+        }
+        Ok(tensor)
     }
 
     pub fn var_builder_for_prefix(&self, primary_prefix: &str, alt_prefixes: &[&str]) -> Result<VarBuilder<'static>> {
@@ -152,7 +201,8 @@ impl<'a> WeightRouter<'a> {
 
             if let Some(suffix) = matched_suffix {
                 let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
-                tensors.insert(suffix.to_string(), tensor);
+                let final_tensor = self.apply_delta_if_present("", suffix, tensor, &self.device, self.dtype)?;
+                tensors.insert(suffix.to_string(), final_tensor);
             }
         }
 
@@ -174,10 +224,12 @@ impl<'a> WeightRouter<'a> {
             if let Some(compvis_key) = key.strip_prefix(unet_prefix) {
                 let diffusers_key = translate_compvis_unet_key(compvis_key);
                 let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
-                tensors.insert(diffusers_key, tensor);
+                let final_tensor = self.apply_delta_if_present("unet", &diffusers_key, tensor, &self.device, self.dtype)?;
+                tensors.insert(diffusers_key, final_tensor);
             } else if key.starts_with("conv_in.") || key.starts_with("down_blocks.") || key.starts_with("mid_block.") || key.starts_with("up_blocks.") {
                 let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
-                tensors.insert(key.clone(), tensor);
+                let final_tensor = self.apply_delta_if_present("unet", key, tensor, &self.device, self.dtype)?;
+                tensors.insert(key.clone(), final_tensor);
             }
         }
 
@@ -243,9 +295,10 @@ impl<'a> WeightRouter<'a> {
                     };
 
                     let tensor = self.archive.get_tensor(key, target_device, target_dtype)?;
-                    tensors.insert(raw_core.clone(), tensor.clone());
-                    tensors.insert(format!("text_model.{}", raw_core), tensor.clone());
-                    tensors.insert(format!("transformer.text_model.{}", raw_core), tensor.clone());
+                    let final_tensor = self.apply_delta_if_present("te1", &format!("text_model.{}", raw_core), tensor, target_device, target_dtype)?;
+                    tensors.insert(raw_core.clone(), final_tensor.clone());
+                    tensors.insert(format!("text_model.{}", raw_core), final_tensor.clone());
+                    tensors.insert(format!("transformer.text_model.{}", raw_core), final_tensor);
                     break;
                 }
             }
@@ -297,6 +350,10 @@ impl<'a> WeightRouter<'a> {
                             let k = tensor.narrow(0, dim, dim)?;
                             let v = tensor.narrow(0, 2 * dim, dim)?;
 
+                            let q = self.apply_delta_if_present("te2", &format!("text_model.encoder.layers.{}.self_attn.q_proj.weight", block_idx), q, target_device, target_dtype)?;
+                            let k = self.apply_delta_if_present("te2", &format!("text_model.encoder.layers.{}.self_attn.k_proj.weight", block_idx), k, target_device, target_dtype)?;
+                            let v = self.apply_delta_if_present("te2", &format!("text_model.encoder.layers.{}.self_attn.v_proj.weight", block_idx), v, target_device, target_dtype)?;
+
                             tensors.insert(format!("text_model.encoder.layers.{}.self_attn.q_proj.weight", block_idx), q.clone());
                             tensors.insert(format!("encoder.layers.{}.self_attn.q_proj.weight", block_idx), q);
                             tensors.insert(format!("text_model.encoder.layers.{}.self_attn.k_proj.weight", block_idx), k.clone());
@@ -316,8 +373,9 @@ impl<'a> WeightRouter<'a> {
                             tensors.insert(format!("text_model.encoder.layers.{}.self_attn.v_proj.bias", block_idx), v.clone());
                             tensors.insert(format!("encoder.layers.{}.self_attn.v_proj.bias", block_idx), v);
                         } else if subkey == "attn.out_proj.weight" {
-                            tensors.insert(format!("text_model.encoder.layers.{}.self_attn.out_proj.weight", block_idx), tensor.clone());
-                            tensors.insert(format!("encoder.layers.{}.self_attn.out_proj.weight", block_idx), tensor.clone());
+                            let final_tensor = self.apply_delta_if_present("te2", &format!("text_model.encoder.layers.{}.self_attn.out_proj.weight", block_idx), tensor, target_device, target_dtype)?;
+                            tensors.insert(format!("text_model.encoder.layers.{}.self_attn.out_proj.weight", block_idx), final_tensor.clone());
+                            tensors.insert(format!("encoder.layers.{}.self_attn.out_proj.weight", block_idx), final_tensor);
                         } else if subkey == "attn.out_proj.bias" {
                             tensors.insert(format!("text_model.encoder.layers.{}.self_attn.out_proj.bias", block_idx), tensor.clone());
                             tensors.insert(format!("encoder.layers.{}.self_attn.out_proj.bias", block_idx), tensor.clone());
@@ -334,14 +392,16 @@ impl<'a> WeightRouter<'a> {
                             tensors.insert(format!("text_model.encoder.layers.{}.layer_norm2.bias", block_idx), tensor.clone());
                             tensors.insert(format!("encoder.layers.{}.layer_norm2.bias", block_idx), tensor.clone());
                         } else if subkey == "mlp.c_fc.weight" {
-                            tensors.insert(format!("text_model.encoder.layers.{}.mlp.fc1.weight", block_idx), tensor.clone());
-                            tensors.insert(format!("encoder.layers.{}.mlp.fc1.weight", block_idx), tensor.clone());
+                            let final_tensor = self.apply_delta_if_present("te2", &format!("text_model.encoder.layers.{}.mlp.fc1.weight", block_idx), tensor, target_device, target_dtype)?;
+                            tensors.insert(format!("text_model.encoder.layers.{}.mlp.fc1.weight", block_idx), final_tensor.clone());
+                            tensors.insert(format!("encoder.layers.{}.mlp.fc1.weight", block_idx), final_tensor);
                         } else if subkey == "mlp.c_fc.bias" {
                             tensors.insert(format!("text_model.encoder.layers.{}.mlp.fc1.bias", block_idx), tensor.clone());
                             tensors.insert(format!("encoder.layers.{}.mlp.fc1.bias", block_idx), tensor.clone());
                         } else if subkey == "mlp.c_proj.weight" {
-                            tensors.insert(format!("text_model.encoder.layers.{}.mlp.fc2.weight", block_idx), tensor.clone());
-                            tensors.insert(format!("encoder.layers.{}.mlp.fc2.weight", block_idx), tensor.clone());
+                            let final_tensor = self.apply_delta_if_present("te2", &format!("text_model.encoder.layers.{}.mlp.fc2.weight", block_idx), tensor, target_device, target_dtype)?;
+                            tensors.insert(format!("text_model.encoder.layers.{}.mlp.fc2.weight", block_idx), final_tensor.clone());
+                            tensors.insert(format!("encoder.layers.{}.mlp.fc2.weight", block_idx), final_tensor);
                         } else if subkey == "mlp.c_proj.bias" {
                             tensors.insert(format!("text_model.encoder.layers.{}.mlp.fc2.bias", block_idx), tensor.clone());
                             tensors.insert(format!("encoder.layers.{}.mlp.fc2.bias", block_idx), tensor.clone());

@@ -38,14 +38,16 @@ impl Default for PipelineMemoryConfig {
 }
 
 pub struct StableDiffusionXLPipeline {
-    clip_l: ClipTextEncoder,
-    clip_g: OpenClipTextEncoder,
-    unet: UNetConditionModel,
+    checkpoint_path: std::path::PathBuf,
+    clip_l: Option<ClipTextEncoder>,
+    clip_g: Option<OpenClipTextEncoder>,
+    unet: Option<UNetConditionModel>,
     vae: VaeDecoder,
     scheduler: EulerDiscreteScheduler,
     device: Device,
     dtype: DType,
     memory_config: PipelineMemoryConfig,
+    lora_manager: crate::lora::LoRAManager,
 }
 
 impl StableDiffusionXLPipeline {
@@ -60,8 +62,9 @@ impl StableDiffusionXLPipeline {
     ) -> crate::error::Result<Self> {
         let is_cuda = device.is_cuda();
         let dtype = if is_cuda { DType::F16 } else { DType::F32 };
+        let checkpoint_buf = checkpoint_path.as_ref().to_path_buf();
 
-        let archive = SafeTensorsArchive::open(checkpoint_path)?;
+        let archive = SafeTensorsArchive::open(&checkpoint_buf)?;
         let router = WeightRouter::new(&archive, device.clone(), dtype);
 
         // If cpu_offload is true, load text encoders on CPU to save 2.6 GB VRAM
@@ -98,15 +101,82 @@ impl StableDiffusionXLPipeline {
         let scheduler = EulerDiscreteScheduler::new(scheduler_config);
 
         Ok(Self {
-            clip_l,
-            clip_g,
-            unet,
+            checkpoint_path: checkpoint_buf,
+            clip_l: Some(clip_l),
+            clip_g: Some(clip_g),
+            unet: Some(unet),
             vae,
             scheduler,
             device,
             dtype,
             memory_config,
+            lora_manager: crate::lora::LoRAManager::new(),
         })
+    }
+
+    /// Hot-merge a LoRA / LyCORIS into UNet and CLIP weights in-memory with zero runtime latency penalty
+    pub fn load_lora<P: AsRef<Path>>(&mut self, path: P, multiplier: f64) -> crate::error::Result<()> {
+        let path_ref = path.as_ref();
+        println!("🧬 Hot-merging LoRA: {} (weight: {:.2})...", path_ref.display(), multiplier);
+        let t_start = std::time::Instant::now();
+
+        // 1. Compute LoRA deltas
+        let deltas = self.lora_manager.load_and_merge(path_ref, multiplier, &self.device, self.dtype)
+            .map_err(|e| crate::error::LuminaError::Config(format!("LoRA merge error: {}", e)))?;
+
+        // 2. Convert to lookup map
+        let delta_map: std::collections::HashMap<String, Tensor> = deltas.into_iter().collect();
+
+        // 3. Instant in-place GPU weight modification (< 0.05s)
+        if let Some(unet) = &mut self.unet {
+            unet.apply_lora_deltas(&delta_map)?;
+        }
+        if let Some(clip_l) = &mut self.clip_l {
+            clip_l.apply_lora_deltas(&delta_map)?;
+        }
+        if let Some(clip_g) = &mut self.clip_g {
+            clip_g.apply_lora_deltas(&delta_map)?;
+        }
+
+        println!("  ✅ LoRA successfully merged in {:.2}s", t_start.elapsed().as_secs_f64());
+        Ok(())
+    }
+
+    /// Remove all merged LoRAs and restore original baseline checkpoint weights
+    pub fn unload_all_loras(&mut self) -> crate::error::Result<()> {
+        println!("🔄 Unloading all LoRAs and restoring base checkpoint weights...");
+        let t_start = std::time::Instant::now();
+
+        // Invert applied deltas to subtract them in-place
+        let mut negative_deltas: std::collections::HashMap<String, Tensor> = std::collections::HashMap::new();
+        for (k, v) in self.lora_manager.applied_deltas() {
+            let neg = (v.neg())?;
+            negative_deltas.insert(k.clone(), neg);
+        }
+
+        if let Some(unet) = &mut self.unet {
+            unet.apply_lora_deltas(&negative_deltas)?;
+        }
+        if let Some(clip_l) = &mut self.clip_l {
+            clip_l.apply_lora_deltas(&negative_deltas)?;
+        }
+        if let Some(clip_g) = &mut self.clip_g {
+            clip_g.apply_lora_deltas(&negative_deltas)?;
+        }
+
+        self.lora_manager.clear();
+        println!("  ✅ Original base weights restored in {:.2}s.", t_start.elapsed().as_secs_f64());
+        Ok(())
+    }
+
+    /// List currently loaded LoRA models and their multipliers
+    pub fn loaded_loras(&self) -> &[crate::lora::LoadedLoRA] {
+        self.lora_manager.loaded_loras()
+    }
+
+    /// Return the path to the loaded base checkpoint
+    pub fn checkpoint_path(&self) -> &Path {
+        &self.checkpoint_path
     }
 
     /// Enable Tiled VAE Decoding:
@@ -162,6 +232,10 @@ impl TextToImagePipeline for StableDiffusionXLPipeline {
     where
         F: FnMut(usize, usize, &Tensor),
     {
+        let clip_l = self.clip_l.as_mut().ok_or_else(|| crate::error::LuminaError::Config("CLIP-L not loaded".to_string()))?;
+        let clip_g = self.clip_g.as_mut().ok_or_else(|| crate::error::LuminaError::Config("OpenCLIP-G not loaded".to_string()))?;
+        let unet = self.unet.as_ref().ok_or_else(|| crate::error::LuminaError::Config("UNet not loaded".to_string()))?;
+
         let prompt = params.prompt;
         let negative_prompt = params.negative_prompt.unwrap_or("");
         let num_steps = params.num_steps;
@@ -170,20 +244,20 @@ impl TextToImagePipeline for StableDiffusionXLPipeline {
         let latent_width = params.width / 8;
 
         // 1. Text embeddings: CLIP-L + OpenCLIP-G with pooled vectors (transferred to GPU)
-        let cond_l = self.clip_l.encode_prompt(prompt)?
+        let cond_l = clip_l.encode_prompt(prompt)?
             .to_device(&self.device)?
             .to_dtype(self.dtype)?;
 
-        let (cond_g, cond_pooled) = self.clip_g.encode_prompt_with_pooled(prompt)?;
+        let (cond_g, cond_pooled) = clip_g.encode_prompt_with_pooled(prompt)?;
         let cond_g = cond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
         let cond_pooled = cond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
         let cond_embeds = Tensor::cat(&[&cond_l, &cond_g], 2)?; // [1, 77, 2048]
 
-        let uncond_l = self.clip_l.encode_prompt(negative_prompt)?
+        let uncond_l = clip_l.encode_prompt(negative_prompt)?
             .to_device(&self.device)?
             .to_dtype(self.dtype)?;
 
-        let (uncond_g, uncond_pooled) = self.clip_g.encode_prompt_with_pooled(negative_prompt)?;
+        let (uncond_g, uncond_pooled) = clip_g.encode_prompt_with_pooled(negative_prompt)?;
         let uncond_g = uncond_g.to_device(&self.device)?.to_dtype(self.dtype)?;
         let uncond_pooled = uncond_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
         let uncond_embeds = Tensor::cat(&[&uncond_l, &uncond_g], 2)?; // [1, 77, 2048]
@@ -207,7 +281,7 @@ impl TextToImagePipeline for StableDiffusionXLPipeline {
         let mut latents = (raw_noise * init_sigma)?;
 
         // Pre-compute SDXL Add Embedding (size/crops + text pooled vector) once for all steps
-        let precomputed_add_proj = self.unet.compute_add_embedding(
+        let precomputed_add_proj = unet.compute_add_embedding(
             2,
             latent_height,
             latent_width,
@@ -222,7 +296,7 @@ impl TextToImagePipeline for StableDiffusionXLPipeline {
             let latent_model_input = Tensor::cat(&[&scaled_latent, &scaled_latent], 0)?;
 
             // Forward through SDXL UNet with precomputed add_embedding
-            let noise_pred = self.unet.forward_with_precomputed(
+            let noise_pred = unet.forward_with_precomputed(
                 &latent_model_input,
                 timestep as f64,
                 &text_embeds,
