@@ -117,6 +117,226 @@
           "output_path": "outputs/stress_test/rust\\flash_betterThanWords_v30_seed1337.png"
         }
       ]
+    },
+    {
+      "model_name": "bigLove_ponyV20.safetensors",
+      "model_size_gb": 6.461583131924272,
+      "status": "SUCCESS",
+      "load_time_sec": 21.380587,
+      "images": [
+        {
+          "seed": 42,
+          "steps": 30,
+          "duration_sec": 20.7174386,
+          "it_per_sec": 1.4480554560446481,
+          "output_path": "outputs/stress_test/rust\\flash_bigLove_ponyV20_seed42.png"
+        },
+        {
+          "seed": 1337,
+          "steps": 30,
+          "duration_sec": 20.0271331,
+          "it_per_sec": 1.4979677745288464,
+          "output_path": "outputs/stress_test/rust\\flash_bigLove_ponyV20_seed1337.png"
+        }
+      ]
+    },
+    {
+      "model_name": "realismarkPlus_realismarkPlus.safetensors",
+      "model_size_gb": 13.353538362309337,
+      "status": "SUCCESS",
+      "load_time_sec": 53.9841686,
+      "images": [
+        {
+          "seed": 42,
+          "steps": 30,
+          "duration_sec": 20.4738005,
+          "it_per_sec": 1.4652873070634835,
+          "output_path": "outputs/stress_test/rust\\flash_realismarkPlus_realismarkPlus_seed42.png"
+        },
+        {
+          "seed": 1337,
+          "steps": 30,
+          "duration_sec": 19.875164,
+          "it_per_sec": 1.5094215071634125,
+          "output_path": "outputs/stress_test/rust\\flash_realismarkPlus_realismarkPlus_seed1337.png"
+        }
+      ]
+    },
+    {
+      "model_name": "CHEYENNE_v20.safetensors",
+      "model_size_gb": 6.461556315422058,
+      "status": "SUCCESS",
+      "load_time_sec": 20.2141328,
+      "images": [
+        {
+          "seed": 42,
+          "steps": 30,
+          "duration_sec": 20.4556539,
+          "it_per_sec": 1.4665871913290436,
+          "output_path": "outputs/stress_test/rust\\flash_CHEYENNE_v20_seed42.png"
+        },
+        {
+          "seed": 1337,
+          "steps": 30,
+          "duration_sec": 19.9913449,
+          "it_per_sec": 1.500649413536955,
+          "output_path": "outputs/stress_test/rust\\flash_CHEYENNE_v20_seed1337.png"
+        }
+      ]
+    },
+    {
+      "model_name": "colossusProjectXLSFW_10bNeodemonFP16.safetensors",
+      "model_size_gb": 6.621546823531389,
+      "status": "SUCCESS",
+      "load_time_sec": 23.6019401,
+      "images": [
+        {
+          "seed": 42,
+          "steps": 30,
+          "duration_sec": 21.8638702,
+          "it_per_sec": 1.3721266969468195,
+          "output_path": "outputs/stress_test/rust\\flash_colossusProjectXLSFW_10bNeodemonFP16_seed42.png"
+        },
+        {
+          "seed": 1337,
+          "steps": 30,
+          "duration_sec": 21.5411492,
+          "it_per_sec": 1.3926833578591062,
+          "output_path": "outputs/stress_test/rust\\flash_colossusProjectXLSFW_10bNeodemonFP16_seed1337.png"
+        }
+      ]
+    },
+    {
+      "model_name": "CyberRealisticPony_V7a.safetensors",
+      "model_size_gb": 6.4615539107471704,
+      "status": "SUCCESS",
+      "load_time_sec": 38.3033783,
+      "images": [
+        {
+          "seed": 42,
+          "steps": 30,
+          "duration_sec": 20.7822914,
+          "it_per_sec": 1.4435366833514809,
+          "output_path": "outputs/stress_test/rust\\flash_CyberRealisticPony_V7a_seed42.png"
+        },
+        {
+          "seed": 1337,
+          "steps": 30,
+          "duration_sec": 27.0586793,
+          "it_per_sec": 1.1087015617942595,
+          "output_path": "outputs/stress_test/rust\\flash_CyberRealisticPony_V7a_seed1337.png"
+        }
+      ]
+    },
+    {
+      "model_name": "dreamshaperXL_turboDpmppSDEKarras.safetensors",
+      "model_size_gb": 6.4626524690538645,
+      "status": "SUCCESS",
+      "load_time_sec": 23.6852969,
+      "images": [
+        {
+          "seed": 42,
+          "steps": 30,
+          "duration_sec": 31.2948084,
+          "it_per_sec": 0.9586254568665133,
+          "output_path": "outputs/stress_test/rust\\flash_dreamshaperXL_turboDpmppSDEKarras_seed42.png"
+        },
+        {
+          "seed": 1337,
+          "steps": 30,
+          "duration_sec": 25.3667219,
+          "it_per_sec": 1.1826518269985842,
+          "output_path": "outputs/stress_test/rust\\flash_dreamshaperXL_turboDpmppSDEKarras_seed1337.png"
+        }
+      ]
+    },
+    {
+      "model_name": "DreamShaperXL_Turbo_v2_1.safetensors",
+      "model_size_gb": 6.4626524690538645,
+      "status": "SUCCESS",
+      "load_time_sec": 28.3678728,
+      "images": [
+        {
+          "seed": 42,
+          "steps": 30,
+          "duration_sec": 23.3274928,
+          "it_per_sec": 1.2860361915962095,
+          "output_path": "outputs/stress_test/rust\\flash_DreamShaperXL_Turbo_v2_1_seed42.png"
+        },
+        {
+          "seed": 1337,
+          "steps": 30,
+          "duration_sec": 20.9005131,
+          "it_per_sec": 1.4353714598518637,
+          "output_path": "outputs/stress_test/rust\\flash_DreamShaperXL_Turbo_v2_1_seed1337.png"
+        }
+      ]
+    },
+    {
+      "model_name": "duchaitenAiartSDXL_v33515LightningTCD.safetensors",
+      "model_size_gb": 6.461553933098912,
+      "status": "SUCCESS",
+      "load_time_sec": 29.776254,
+      "images": [
+        {
+          "seed": 42,
+          "steps": 30,
+          "duration_sec": 27.1787365,
+          "it_per_sec": 1.1038040712451809,
+          "output_path": "outputs/stress_test/rust\\flash_duchaitenAiartSDXL_v33515LightningTCD_seed42.png"
+        },
+        {
+          "seed": 1337,
+          "steps": 30,
+          "duration_sec": 29.6315971,
+          "it_per_sec": 1.0124327723124988,
+          "output_path": "outputs/stress_test/rust\\flash_duchaitenAiartSDXL_v33515LightningTCD_seed1337.png"
+        }
+      ]
+    },
+    {
+      "model_name": "duchaitenPonyXLNo_v60.safetensors",
+      "model_size_gb": 6.4615539107471704,
+      "status": "SUCCESS",
+      "load_time_sec": 23.0295533,
+      "images": [
+        {
+          "seed": 42,
+          "steps": 30,
+          "duration_sec": 21.8748172,
+          "it_per_sec": 1.3714400319651585,
+          "output_path": "outputs/stress_test/rust\\flash_duchaitenPonyXLNo_v60_seed42.png"
+        },
+        {
+          "seed": 1337,
+          "steps": 30,
+          "duration_sec": 21.1071247,
+          "it_per_sec": 1.4213210196270836,
+          "output_path": "outputs/stress_test/rust\\flash_duchaitenPonyXLNo_v60_seed1337.png"
+        }
+      ]
+    },
+    {
+      "model_name": "eldgardKinkiestModel_v20.safetensors",
+      "model_size_gb": 6.461553975939751,
+      "status": "SUCCESS",
+      "load_time_sec": 21.6053576,
+      "images": [
+        {
+          "seed": 42,
+          "steps": 30,
+          "duration_sec": 21.4855827,
+          "it_per_sec": 1.3962851470628257,
+          "output_path": "outputs/stress_test/rust\\flash_eldgardKinkiestModel_v20_seed42.png"
+        },
+        {
+          "seed": 1337,
+          "steps": 30,
+          "duration_sec": 20.6115535,
+          "it_per_sec": 1.4554943663028603,
+          "output_path": "outputs/stress_test/rust\\flash_eldgardKinkiestModel_v20_seed1337.png"
+        }
+      ]
     }
   ]
 }
