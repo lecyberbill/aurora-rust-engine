@@ -56,7 +56,15 @@ Tested on identical prompts, seed (42), 30 steps Euler Karras, CFG 6.0, resoluti
 
 ### In Rust Code:
 ```rust
+// Load from local single-file checkpoint
 let mut pipeline = StableDiffusionXLPipeline::from_single_file(path, device)?;
+
+// OR download & cache directly from HuggingFace Hub (100% Pure Rust)
+let mut pipeline = StableDiffusionXLPipeline::from_pretrained(
+    "stabilityai/stable-diffusion-xl-base-1.0",
+    Some("sd_xl_base_1.0.safetensors"),
+    device,
+)?;
 
 // Schedulers (100% Pure Rust)
 pipeline.use_dpm_solver();                 // SOTA 2nd-order DPM-Solver++ 2M Karras (18-20 steps)
@@ -74,6 +82,10 @@ pipeline.disable_model_cpu_offload();      // Keep all models on GPU
 
 // Low-VRAM Sequential Loader
 pipeline.enable_low_vram_load();           // Sequential VarBuilder drop (Default)
+
+// FP8 Precision (Ada Lovelace)
+pipeline.enable_fp8();                     // Enable native FP8 weight mode
+pipeline.disable_fp8();                    // Disable FP8 (FP16 mode)
 ```
 
 ### In REST API (`POST /api/v1/generate`):

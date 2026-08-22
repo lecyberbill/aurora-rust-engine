@@ -61,6 +61,38 @@ pub struct StableDiffusionXLPipeline {
 }
 
 impl StableDiffusionXLPipeline {
+    /// Load pipeline directly from a HuggingFace repository ID (e.g. "stabilityai/stable-diffusion-xl-base-1.0")
+    /// Automatically downloads and caches weights locally using the official Pure Rust HuggingFace Hub API.
+    pub fn from_pretrained(
+        repo_id: &str,
+        file_name: Option<&str>,
+        device: Device,
+    ) -> crate::error::Result<Self> {
+        Self::from_pretrained_with_config(repo_id, file_name, device, PipelineMemoryConfig::default())
+    }
+
+    /// Load pipeline from a HuggingFace repository ID with explicit memory configuration
+    pub fn from_pretrained_with_config(
+        repo_id: &str,
+        file_name: Option<&str>,
+        device: Device,
+        memory_config: PipelineMemoryConfig,
+    ) -> crate::error::Result<Self> {
+        let api = hf_hub::api::sync::Api::new()
+            .map_err(|e| crate::error::LuminaError::Config(format!("Failed to init HuggingFace API: {}", e)))?;
+        let repo = api.model(repo_id.to_string());
+        
+        let target_file = file_name.unwrap_or("sd_xl_base_1.0.safetensors");
+        println!("📥 Downloading/Loading checkpoint '{}' from HuggingFace repo '{}'...", target_file, repo_id);
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        let checkpoint_path = repo.get(target_file)
+            .map_err(|e| crate::error::LuminaError::MissingWeight(format!("Failed to fetch '{}' from HF repo '{}': {}", target_file, repo_id, e)))?;
+
+        println!("✅ Checkpoint cached at: {}", checkpoint_path.to_string_lossy());
+        Self::from_single_file_with_config(checkpoint_path, device, memory_config)
+    }
+
     pub fn from_single_file<P: AsRef<Path>>(checkpoint_path: P, device: Device) -> crate::error::Result<Self> {
         Self::from_single_file_with_config(checkpoint_path, device, PipelineMemoryConfig::default())
     }
