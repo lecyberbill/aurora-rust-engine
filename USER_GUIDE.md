@@ -1,0 +1,389 @@
+# 📖 Aurora Rust Engine — User & Developer Guide
+
+> **SOTA Pure Rust Generative AI Inference Engine for SDXL, Pony XL & Diffusion Transformers**  
+> Powered by [Candle](https://github.com/huggingface/candle), [FlashAttention-2](https://github.com/Dao-AILab/flash-attention), and [Grio UI](https://github.com/lecyberbill/grio).
+
+---
+
+## 📑 Table of Contents
+
+1. [Architecture & Key Highlights](#1-architecture--key-highlights)
+2. [Installation & Requirements](#2-installation--requirements)
+3. [Running the Interactive Web UI (Grio)](#3-running-the-interactive-web-ui-grio)
+4. [Using Aurora in Rust Applications (SDK Reference)](#4-using-aurora-in-rust-applications-sdk-reference)
+   - [Loading Models (Local & HuggingFace Hub)](#loading-models-local--huggingface-hub)
+   - [Configuring Schedulers (DPM-Solver++, Euler, DDIM)](#configuring-schedulers-dpm-solver-euler-ddim)
+   - [Memory & VRAM Management Modes](#memory--vram-management-modes)
+   - [Text-to-Image Generation](#text-to-image-generation)
+   - [Image-to-Image (Img2Img)](#image-to-image-img2img)
+   - [Inpainting & Mask-Guided Diffusion](#inpainting--mask-guided-diffusion)
+   - [Hot LoRA Merging](#hot-lora-merging)
+   - [ControlNet (Canny Edge)](#controlnet-canny-edge)
+5. [REST API & WebSocket Server Reference](#5-rest-api--websocket-server-reference)
+   - [Endpoints & JSON Payload Schema](#endpoints--json-payload-schema)
+   - [Live Latent Preview via WebSocket](#live-latent-preview-via-websocket)
+6. [CLI Binaries & Benchmark Suite](#6-cli-binaries--benchmark-suite)
+7. [Hardware & Performance Tuning Guide](#7-hardware--performance-tuning-guide)
+
+---
+
+## 1. Architecture & Key Highlights
+
+Aurora is designed from the ground up to replace heavy Python generative pipelines (PyTorch, Diffusers, ComfyUI) with a **high-performance, standalone, zero-Python binary**:
+
+- **⚡ Sub-12s Generation**: Full $1024\times 1024$ SDXL generation in ~12.0s on RTX 4070 Ti (2.17 it/s) with DPM-Solver++ 2M Karras (18 steps).
+- **🚀 FlashAttention-2 Fused CUDA Kernels**: Cuts attention computation down to 19.6ms per pass ($\times 9.5$ faster than standard SDPA).
+- **🔒 Zero-Paging Seamless Tiled VAE**: Capped at $< 6.8\text{ GB}$ dedicated VRAM, preventing Windows WDDM shared RAM pagination.
+- **🧬 Zero-Overhead In-Memory LoRA Merging**: Instant hot-patching of UNet and CLIP weights directly in GPU VRAM.
+- **🌐 Native Hugging Face Hub Integration**: Direct automated download and caching of Safetensors checkpoints via `hf-hub`.
+- **🎨 Native Reactive Web UI**: Powered by [Grio](https://github.com/lecyberbill/grio) with 1.5ms live latent streaming.
+
+---
+
+## 2. Installation & Requirements
+
+### System Requirements
+- **OS**: Windows 10/11 x64 or Linux (Ubuntu 22.04+, Debian, Arch, RHEL).
+- **GPU**: NVIDIA GPU (RTX 3000 / 4000 series recommended, Pascal/Turing supported).
+- **CUDA Toolkit**: CUDA 12.0+ with `nvcc` in PATH.
+- **C++ Compiler**: MSVC Build Tools on Windows, `gcc`/`g++` on Linux.
+- **Rust**: Rust 1.80+ (`rustup default stable`).
+
+### Compilation
+Clone the repository and build in release mode:
+
+```bash
+git clone https://github.com/lecyberbill/aurora-rust-engine.git
+cd aurora-rust-engine
+
+# Build with CUDA and FlashAttention-2 acceleration
+cargo build --release --features cuda,flash-attn
+```
+
+---
+
+## 3. Running the Interactive Web UI (Grio)
+
+Aurora includes a native web studio powered by [Grio](https://github.com/lecyberbill/grio):
+
+```bash
+cargo run --release --bin grio_showcase --features cuda,flash-attn,ui
+```
+
+Once loaded, navigate in your browser to:
+👉 **`http://127.0.0.1:7860`**
+
+### Features Available in the Web Studio:
+- **Prompt & Negative Prompt Fields**: Full multi-line input with pre-configured high-quality negative prompt defaults.
+- **Scheduler Switcher**: Select between **DPM-Solver++ 2M Karras (18 steps)**, **Euler Discrete Karras (30 steps)**, and **DDIM**.
+- **Dimension Selector**: $1024\times 1024$ (Square 1:1), $832\times 1216$ (Portrait 2:3), $1216\times 832$ (Landscape 3:2).
+- **Interactive VRAM Controls**: Toggles for Seamless Tiled VAE, Dual-CLIP CPU Offloading, and FP8 precision.
+- **Progressive Real-Time Latent Previews**: Watch the image materialize live during the denoising process.
+- **Session History Gallery**: View all generated images side-by-side.
+- **Observability Cards**: Live telemetry of UNet speed (`it/s`), wall-clock latency (`s`), and peak VRAM.
+
+---
+
+## 4. Using Aurora in Rust Applications (SDK Reference)
+
+Add `aurora-rust-engine` to your `Cargo.toml`:
+
+```toml
+[dependencies]
+aurora-rust-engine = { git = "https://github.com/lecyberbill/aurora-rust-engine.git", features = ["cuda", "flash-attn"] }
+candle-core = "0.8.2"
+```
+
+### Loading Models (Local & HuggingFace Hub)
+
+```rust
+use candle_core::Device;
+use aurora_rust_engine::StableDiffusionXLPipeline;
+
+fn main() -> anyhow::Result<()> {
+    let device = Device::new_cuda(0)?;
+
+    // Option A: Load from a local single-file checkpoint (.safetensors)
+    let mut pipeline = StableDiffusionXLPipeline::from_single_file(
+        "G:/models/checkpoints/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors",
+        device.clone(),
+    )?;
+
+    // Option B: Download & cache automatically from Hugging Face Hub (100% Pure Rust)
+    let mut pipeline = StableDiffusionXLPipeline::from_pretrained(
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        Some("sd_xl_base_1.0.safetensors"),
+        device,
+    )?;
+
+    Ok(())
+}
+```
+
+---
+
+### Configuring Schedulers (DPM-Solver++, Euler, DDIM)
+
+Aurora provides hot-switchable schedulers via dynamic dispatch:
+
+```rust
+// 1. SOTA DPM-Solver++ 2M Karras (Recommended: 18 - 20 steps, ~12s generation)
+pipeline.use_dpm_solver();
+
+// 2. Standard Euler Discrete Karras (Recommended: 25 - 30 steps)
+pipeline.use_euler();
+
+// 3. Deterministic DDIM (Recommended: 30 - 50 steps)
+pipeline.use_ddim();
+```
+
+---
+
+### Memory & VRAM Management Modes
+
+Configure memory behavior on the fly to suit any hardware from 6GB to 24GB+ VRAM:
+
+```rust
+// 1. Tiled VAE Decoding (Caps VAE VRAM to < 400 MB, eliminating WDDM paging)
+pipeline.enable_vae_tiling(None);           // Default: 72x72 latents, 16 overlap (4 tiles)
+pipeline.enable_vae_tiling(Some((64, 16))); // Custom tile size and overlap
+pipeline.disable_vae_tiling();              // Direct single-pass decode (for 16GB+ GPUs)
+
+// 2. CPU Offloading for Text Encoders (Saves 2.6 GB VRAM)
+pipeline.enable_model_cpu_offload();        // Keeps CLIP-L & OpenCLIP-bigG in system RAM
+pipeline.disable_model_cpu_offload();       // Keeps all models in GPU VRAM for max speed
+
+// 3. Low-VRAM Sequential Loader (Eliminates memory allocation spikes during model loading)
+pipeline.enable_low_vram_load();            // Sequential VarBuilder model construction
+pipeline.disable_low_vram_load();
+
+// 4. Ada Lovelace FP8 (E4M3) Precision Mode
+pipeline.enable_fp8();                      // Stores weights in FP8 to halve bandwidth
+pipeline.disable_fp8();                     // Standard FP16 mode
+```
+
+---
+
+### Text-to-Image Generation
+
+```rust
+use aurora_rust_engine::DiffusionParams;
+
+let params = DiffusionParams {
+    prompt: "masterpiece, ultra-detailed, cyberpunk samurai, rainy neo-tokyo street, 8k",
+    negative_prompt: Some("lowres, blurry, bad anatomy, text, error"),
+    num_steps: 18,
+    guidance_scale: 6.5,
+    width: 1024,
+    height: 1024,
+    seed: 42,
+};
+
+// Optional progress callback with live latent preview
+let (image, metrics) = pipeline.generate_with_metrics(params, Some(|step, total, _latent| {
+    println!("Step {}/{}", step, total);
+}))?;
+
+image.save("output.png")?;
+println!("Generated in {:.2}s ({:.2} it/s)", metrics.total_wallclock_ms / 1000.0, metrics.unet_it_per_sec);
+```
+
+---
+
+### Image-to-Image (Img2Img)
+
+```rust
+use aurora_rust_engine::Img2ImgParams;
+
+let init_image = image::open("input.png")?.to_rgb8();
+
+let params = Img2ImgParams {
+    prompt: "masterpiece, cybernetic armor, golden glowing accents, cinematic lighting",
+    negative_prompt: Some("lowres, blurry, distorted"),
+    image: init_image,
+    strength: 0.65, // 0.0 = original image, 1.0 = completely new image
+    num_steps: 25,
+    guidance_scale: 6.5,
+    seed: 12345,
+};
+
+let output = pipeline.generate_img2img(params, None)?;
+output.save("output_img2img.png")?;
+```
+
+---
+
+### Inpainting & Mask-Guided Diffusion
+
+```rust
+use aurora_rust_engine::InpaintParams;
+
+let base_image = image::open("original.png")?.to_rgb8();
+let mask_image = image::open("mask.png")?.to_luma8(); // White = region to replace, Black = keep
+
+let params = InpaintParams {
+    prompt: "a majestic golden crown with emeralds and rubies",
+    negative_prompt: Some("low quality, blurry"),
+    image: base_image,
+    mask: mask_image,
+    strength: 0.85,
+    num_steps: 25,
+    guidance_scale: 7.0,
+    seed: 42,
+};
+
+let inpaint_result = pipeline.generate_inpaint(params, None)?;
+inpaint_result.save("output_inpaint.png")?;
+```
+
+---
+
+### Hot LoRA Merging
+
+Merge LoRA adapters into base model weights in GPU VRAM with **0 MB additional runtime memory overhead**:
+
+```rust
+// Load and merge multiple LoRAs with custom scaling weights
+pipeline.load_lora("loras/detail_enhancer.safetensors", 0.8)?;
+pipeline.load_lora("loras/cyberpunk_style.safetensors", 0.6)?;
+
+// Verify active LoRAs
+for lora in pipeline.loaded_loras() {
+    println!("Loaded LoRA: {} (weight: {})", lora.name, lora.weight);
+}
+
+// Unload all LoRAs and restore original base weights
+pipeline.unload_all_loras()?;
+```
+
+---
+
+### ControlNet (Canny Edge)
+
+```rust
+use aurora_rust_engine::{ControlNetModel, MultiControlNet, ControlNetInput, CannyDetector};
+
+let canny_detector = CannyDetector::default();
+let canny_edges = canny_detector.detect(&input_rgb)?;
+
+let controlnet = ControlNetModel::load("controlnet_canny_sdxl.safetensors", device.clone(), DType::F16)?;
+let mut multi_controlnet = MultiControlNet::new();
+multi_controlnet.add_model(controlnet);
+
+let inputs = vec![ControlNetInput {
+    hint: canny_edges,
+    conditioning_scale: 0.85,
+    start_step_percent: 0.0,
+    end_step_percent: 0.80,
+}];
+
+let output = pipeline.generate_with_controlnet(params, &multi_controlnet, &inputs, None)?;
+```
+
+---
+
+## 5. REST API & WebSocket Server Reference
+
+Aurora embeds a high-performance [Axum](https://github.com/tokio-rs/axum) web server providing REST endpoints and streaming WebSockets:
+
+```bash
+# Launch the API server on http://127.0.0.1:8080
+cargo run --release --bin server --features cuda,flash-attn
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|:---:|:---:|---|
+| `POST` | `/api/v1/generate` | Generate image from prompt (REST JSON) |
+| `POST` | `/api/v1/img2img` | Image-to-Image generation |
+| `POST` | `/api/v1/inpaint` | Mask-guided inpainting |
+| `POST` | `/api/v1/lora/load` | Dynamically merge a LoRA adapter |
+| `POST` | `/api/v1/lora/clear` | Clear all loaded LoRAs |
+| `GET` | `/api/v1/lora/list` | List active LoRA adapters |
+| `GET` | `/api/v1/models` | List available checkpoints |
+| `GET` | `/api/v1/system/info`| GPU info, VRAM, and engine status |
+| `WS` | `/api/v1/ws` | Real-time WebSocket streaming with latent previews |
+
+### JSON Request Payload Schema (`POST /api/v1/generate`)
+
+```json
+{
+  "prompt": "masterpiece, ultra-detailed, cyberpunk warrior, 8k",
+  "negative_prompt": "lowres, bad anatomy, blurry",
+  "steps": 18,
+  "guidance_scale": 6.5,
+  "width": 1024,
+  "height": 1024,
+  "seed": 42,
+  "scheduler": "dpm",
+  "vae_tiling": true,
+  "cpu_offload": true,
+  "fp8": false
+}
+```
+
+### Response Schema
+
+```json
+{
+  "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...",
+  "telemetry": {
+    "prompt_encode_ms": 1150.2,
+    "unet_total_ms": 8350.4,
+    "unet_it_per_sec": 2.15,
+    "unet_step_avg_ms": 464.0,
+    "vae_decode_ms": 1790.1,
+    "total_wallclock_ms": 12140.0
+  }
+}
+```
+
+---
+
+## 6. CLI Binaries & Benchmark Suite
+
+Aurora comes with pre-built test and benchmark executables in `src/bin/`:
+
+| Binary | Command | Description |
+|---|---|---|
+| **`grio_showcase`** | `cargo run --release --bin grio_showcase --features cuda,flash-attn,ui` | **Interactive Web UI Studio** at `http://127.0.0.1:7860` |
+| **`grand_benchmark`** | `cargo run --release --bin grand_benchmark --features cuda,flash-attn` | **SOTA 3-Aspect Grand Benchmark** (18 steps DPM-Solver++) |
+| **`server`** | `cargo run --release --bin server --features cuda,flash-attn` | High-throughput **REST / WebSocket Server** |
+| **`test_dpm_solver`** | `cargo run --release --bin test_dpm_solver --features cuda,flash-attn` | Discrete 18-step DPM-Solver++ validation harness |
+| **`comparative_benchmark`**| `cargo run --release --bin comparative_benchmark --features cuda,flash-attn` | FlashAttention vs SDPA comparative stress test |
+| **`stress_matrix_test`** | `cargo run --release --bin stress_matrix_test --features cuda,flash-attn` | 15-image endurance matrix across 5 seeds and 3 resolutions |
+| **`test_lora_merge`** | `cargo run --release --bin test_lora_merge --features cuda,flash-attn` | LoRA hot-merging & base weight restoration test |
+| **`test_img2img`** | `cargo run --release --bin test_img2img --features cuda,flash-attn` | Image-to-Image pipeline verification |
+| **`test_inpaint`** | `cargo run --release --bin test_inpaint --features cuda,flash-attn` | Mask-guided inpainting verification |
+| **`test_controlnet`** | `cargo run --release --bin test_controlnet --features cuda,flash-attn` | Canny edge Multi-ControlNet integration test |
+
+---
+
+## 7. Hardware & Performance Tuning Guide
+
+### Recommended Settings per GPU VRAM Tier
+
+| GPU VRAM | Recommended Settings | Average Speed ($1024^2$) | Peak VRAM |
+|---|---|:---:|:---:|
+| **8 GB** (RTX 3070, 4060) | `cpu_offload: true`, `vae_tiling: true` (72x72, overlap 16), `scheduler: "dpm"`, 18 steps | ~1.6 - 1.8 it/s | ~6.5 GB |
+| **12 GB** (RTX 4070, 4070 Ti) | `cpu_offload: true`, `vae_tiling: true`, `scheduler: "dpm"`, 18 steps | **2.05 - 2.21 it/s** | **~6.8 GB** |
+| **16 GB - 24 GB+** (RTX 4080, 4090) | `cpu_offload: false`, `vae_tiling: false`, `scheduler: "dpm"`, 18 steps | **3.0 - 4.5 it/s** | ~11.5 GB |
+
+### Preventing Windows WDDM Shared RAM Paging
+When dedicated GPU VRAM exceeds ~92% capacity under Windows 11, Windows WDDM automatically pages allocations into system RAM over PCIe, causing generation time to degrade from ~12s up to 60s+. 
+
+To guarantee **zero pagination**:
+1. Keep `vae_tiling: true` (Default in Aurora).
+2. Keep `cpu_offload: true` on 8GB and 12GB GPUs.
+3. Close VRAM-heavy applications (video editing, 3D games) during high-throughput batches.
+
+---
+
+## 📄 License
+
+Licensed under either of:
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.

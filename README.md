@@ -13,6 +13,8 @@
 
 `aurora-rust-engine` is a standalone, lightweight, and memory-efficient AI inference engine written entirely in pure Rust using [Candle](https://github.com/huggingface/candle), native FlashAttention-2 CUDA kernels, and hardware acceleration.
 
+👉 **Looking for full documentation? See the complete [User & Developer Guide (USER_GUIDE.md)](USER_GUIDE.md)** for SDK examples, REST API payloads, scheduler configurations, and VRAM optimization tips.
+
 It provides a robust, zero-Python alternative for running generative diffusion models (Stable Diffusion XL, Pony XL, and future DiT/Flux architectures) with deterministic execution, in-memory zero-overhead LoRA weight merging, and sub-8GB VRAM footprint.
 
 ---
