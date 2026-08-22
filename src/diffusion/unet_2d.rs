@@ -122,10 +122,11 @@ impl ResnetBlock2D {
         let mut h = self.conv1.forward(&h)?;
 
         if let (Some(t), Some(proj)) = (temb, &self.time_emb_proj) {
-            let t_proj = proj.forward(&candle_nn::ops::silu(t)?)?;
-            let (b, c, h_dim, w_dim) = h.dims4()?;
-            let t_proj = t_proj.reshape((b, c, 1, 1))?.broadcast_as((b, c, h_dim, w_dim))?;
-            h = (h + t_proj)?;
+            let t_silu = candle_nn::ops::silu(t)?;
+            let t_proj = proj.forward(&t_silu)?;
+            let (b, c, _, _) = h.dims4()?;
+            let t_proj = t_proj.reshape((b, c, 1, 1))?;
+            h = h.broadcast_add(&t_proj)?;
         }
 
         let h = self.norm2.forward(&h)?;
