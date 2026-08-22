@@ -46,6 +46,7 @@ impl VaeDecoder {
 
     /// Decode latent tensor directly in a single pass (fastest, requires ~6GB VRAM for 1024x1024)
     pub fn decode_direct(&self, latents: &Tensor) -> Result<RgbImage> {
+        let t0 = std::time::Instant::now();
         let latents = if latents.rank() == 4 {
             latents.clone()
         } else {
@@ -54,8 +55,20 @@ impl VaeDecoder {
 
         let latents_matched = latents.to_dtype(self.dtype)?;
         let scaled_latents = (&latents_matched / self.scaling_factor)?;
+        let t_prep = t0.elapsed().as_secs_f64();
+
+        let t1 = std::time::Instant::now();
         let decoded = self.vae.decode(&scaled_latents)?;
-        tensor_to_rgb_image(&decoded)
+        let t_forward = t1.elapsed().as_secs_f64();
+
+        let t2 = std::time::Instant::now();
+        let img = tensor_to_rgb_image(&decoded)?;
+        let t_img = t2.elapsed().as_secs_f64();
+
+        println!("    [Direct VAE] Prep: {:.3}s | Forward: {:.3}s | RGB Convert: {:.3}s | Total: {:.3}s",
+            t_prep, t_forward, t_img, t0.elapsed().as_secs_f64());
+
+        Ok(img)
     }
 
     /// Adaptive VAE Decoding: uses seamless tiled decoding (tile_size: 72, overlap: 16) ensuring zero VRAM paging
@@ -249,21 +262,18 @@ pub fn tensor_to_rgb_image(tensor: &Tensor) -> Result<RgbImage> {
         )));
     }
 
-    let tensor_cpu = tensor.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
-    let raw_floats = tensor_cpu.flatten_all()?.to_vec1::<f32>()?;
-    let mut rgb_buffer = vec![0u8; h * w * 3];
+    // High-Speed GPU Vectorized post-processing: ((tensor * 0.5 + 0.5) * 255.0).clamp(0, 255)
+    let half_tensor = (tensor.to_dtype(DType::F32)? * 0.5)?;
+    let normalized = (half_tensor + 0.5)?;
+    let scaled = (normalized * 255.0)?;
+    let clamped = scaled.clamp(0.0f32, 255.0f32)?;
+    let u8_tensor = clamped.to_dtype(DType::U8)?;
 
-    let plane_size = h * w;
-    for idx in 0..plane_size {
-        let r = ((raw_floats[idx] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
-        let g = ((raw_floats[plane_size + idx] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
-        let b = ((raw_floats[2 * plane_size + idx] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
-        rgb_buffer[idx * 3] = r;
-        rgb_buffer[idx * 3 + 1] = g;
-        rgb_buffer[idx * 3 + 2] = b;
-    }
+    // Transpose [3, H, W] to [H, W, 3] on GPU before direct 1D DMA transfer
+    let hw3_tensor = u8_tensor.permute((1, 2, 0))?.contiguous()?;
+    let flat_bytes = hw3_tensor.flatten_all()?.to_device(&Device::Cpu)?.to_vec1::<u8>()?;
 
-    let img: RgbImage = ImageBuffer::from_raw(w as u32, h as u32, rgb_buffer)
+    let img: RgbImage = ImageBuffer::from_raw(w as u32, h as u32, flat_bytes)
         .ok_or_else(|| candle_core::Error::Msg("Failed to construct ImageBuffer from raw RGB bytes".to_string()))?;
 
     Ok(img)

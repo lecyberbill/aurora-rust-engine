@@ -15,24 +15,26 @@ use crate::weights::{SafeTensorsArchive, WeightRouter};
 /// Configurable memory optimization controls for the pipeline
 #[derive(Debug, Clone)]
 pub struct PipelineMemoryConfig {
-    /// Enable Tiled VAE Decoding to cap VAE peak VRAM to < 400 MB (default: true for > 512x512)
+    /// Enable Tiled VAE Decoding to cap VAE peak VRAM to < 400 MB (default: false for maximum speed)
     pub vae_tiling: bool,
-    /// Custom latent tile size (default: 64 -> 512x512 pixels)
+    /// Custom latent tile size (default: 72 -> 576x576 pixels)
     pub vae_tile_size: usize,
-    /// Custom latent tile overlap (default: 8 -> 64 pixels)
     /// Custom latent tile overlap (default: 16 -> 128 pixels)
     pub vae_tile_overlap: usize,
     /// Offload text encoders (CLIP-L & OpenCLIP-G) to CPU memory (-2.6 GB VRAM)
     pub cpu_offload: bool,
+    /// Sequential model loading to prevent VRAM allocation spikes and shared memory paging (default: true)
+    pub low_vram_load: bool,
 }
 
 impl Default for PipelineMemoryConfig {
     fn default() -> Self {
         Self {
-            vae_tiling: true,
+            vae_tiling: false, // Direct GPU FP16 single-pass decoding by default for maximum speed
             vae_tile_size: 72,
-            vae_tile_overlap: 16, // Optimal 4-tile seamless cosine feathering (128px overlap)
+            vae_tile_overlap: 16, // Optimal 4-tile seamless cosine feathering (128px overlap) if tiling is explicitly enabled
             cpu_offload: true, // Default enabled for < 7GB VRAM operation
+            low_vram_load: true, // Prevent temporary VRAM spikes during VarBuilder model construction
         }
     }
 }
@@ -89,11 +91,15 @@ impl StableDiffusionXLPipeline {
             clip_g.load_tokenizer(clip_g_tok)?;
         }
 
+        // Sequential VRAM load: UNet built first, intermediate router hash map dropped automatically
         let unet_vb = router.unet_var_builder()?;
         let unet = UNetConditionModel::new_sdxl(unet_vb)?;
 
+        // VAE built second, intermediate hash map dropped automatically
         let vae_vb = router.vae_var_builder()?;
         let vae = VaeDecoder::new(vae_vb, true)?;
+        drop(router);
+        drop(archive);
 
         let scheduler_config = EulerSchedulerConfig {
             use_karras_sigmas: true,
@@ -211,6 +217,18 @@ impl StableDiffusionXLPipeline {
     /// Disable Model CPU Offloading (all models kept in GPU VRAM)
     pub fn disable_model_cpu_offload(&mut self) -> &mut Self {
         self.memory_config.cpu_offload = false;
+        self
+    }
+
+    /// Enable Low-VRAM model loading (sequential loading to prevent VRAM spikes / shared memory paging)
+    pub fn enable_low_vram_load(&mut self) -> &mut Self {
+        self.memory_config.low_vram_load = true;
+        self
+    }
+
+    /// Disable Low-VRAM model loading (loads all models simultaneously)
+    pub fn disable_low_vram_load(&mut self) -> &mut Self {
+        self.memory_config.low_vram_load = false;
         self
     }
 

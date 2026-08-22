@@ -241,7 +241,25 @@ impl<'a> WeightRouter<'a> {
     }
 
     pub fn vae_var_builder(&self) -> Result<VarBuilder<'static>> {
-        self.vae_var_builder_f32()
+        let mut tensors = HashMap::new();
+        let vae_prefix = "first_stage_model.";
+
+        for key in self.archive.keys() {
+            if let Some(compvis_key) = key.strip_prefix(vae_prefix) {
+                let diffusers_key = translate_compvis_vae_key(compvis_key);
+                let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
+                tensors.insert(diffusers_key, tensor);
+            } else if key.starts_with("encoder.") || key.starts_with("decoder.") || key.starts_with("post_quant_conv.") {
+                let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
+                tensors.insert(key.clone(), tensor);
+            }
+        }
+
+        if tensors.is_empty() {
+            return Err(LuminaError::MissingWeight("No VAE weights found in checkpoint".to_string()));
+        }
+
+        Ok(VarBuilder::from_tensors(tensors, self.dtype, &self.device))
     }
 
     pub fn vae_var_builder_f32(&self) -> Result<VarBuilder<'static>> {

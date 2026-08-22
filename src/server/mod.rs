@@ -35,6 +35,10 @@ pub struct GenerateRequest {
     #[serde(default = "default_dim")]
     pub height: usize,
     pub seed: Option<u64>,
+    /// Optional dynamic override for VAE Tiling (default: false for maximum speed)
+    pub vae_tiling: Option<bool>,
+    /// Optional dynamic override for CPU Offloading
+    pub cpu_offload: Option<bool>,
 }
 
 fn default_steps() -> usize { 30 }
@@ -134,6 +138,21 @@ pub async fn generate_handler(
     };
 
     let mut pipeline = state.pipeline.lock().await;
+    if let Some(tiling) = req.vae_tiling {
+        if tiling {
+            pipeline.enable_vae_tiling(None);
+        } else {
+            pipeline.disable_vae_tiling();
+        }
+    }
+    if let Some(offload) = req.cpu_offload {
+        if offload {
+            pipeline.enable_model_cpu_offload();
+        } else {
+            pipeline.disable_model_cpu_offload();
+        }
+    }
+
     let (image, metrics) = pipeline
         .generate_with_metrics(params, None::<fn(usize, usize, &Tensor)>)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Generation error: {:?}", e)))?;
@@ -177,20 +196,53 @@ async fn handle_ws_stream(mut socket: WebSocket, state: AppState) {
             };
 
             let mut pipeline = state.pipeline.lock().await;
-            let result = pipeline.generate_with_metrics(params, None::<fn(usize, usize, &Tensor)>);
+            if let Some(tiling) = req.vae_tiling {
+                if tiling { pipeline.enable_vae_tiling(None); } else { pipeline.disable_vae_tiling(); }
+            }
+            if let Some(offload) = req.cpu_offload {
+                if offload { pipeline.enable_model_cpu_offload(); } else { pipeline.disable_model_cpu_offload(); }
+            }
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+            // Run generation with fast latent previewer callback (1.5ms preview generation)
+            let result = pipeline.generate_with_metrics(
+                params,
+                Some(move |step: usize, total: usize, latent: &Tensor| {
+                    if let Ok(preview_img) = crate::diffusion::FastLatentPreviewer::preview_latent(latent) {
+                        let mut buf = Vec::new();
+                        let mut cur = Cursor::new(&mut buf);
+                        if preview_img.write_to(&mut cur, ImageFormat::Jpeg).is_ok() {
+                            let b64 = BASE64.encode(&buf);
+                            let _ = tx.send((step, total, b64));
+                        }
+                    }
+                }),
+            );
+
+            // Forward intermediate steps
+            while let Ok((step, total, b64)) = rx.try_recv() {
+                let msg = serde_json::json!({
+                    "type": "progress",
+                    "step": step,
+                    "total_steps": total,
+                    "preview_base64": b64,
+                });
+                let _ = socket.send(Message::Text(msg.to_string().into())).await;
+            }
+
             match result {
                 Ok((image, metrics)) => {
                     let mut png_bytes: Vec<u8> = Vec::new();
                     let mut cursor = Cursor::new(&mut png_bytes);
                     if image.write_to(&mut cursor, ImageFormat::Png).is_ok() {
-                        let resp = GenerateResponse {
-                            image_base64: BASE64.encode(&png_bytes),
-                            format: "png".to_string(),
-                            metrics: metrics.into(),
-                        };
-                        if let Ok(json_str) = serde_json::to_string(&resp) {
-                            let _ = socket.send(Message::Text(json_str.into())).await;
-                        }
+                        let resp = serde_json::json!({
+                            "type": "complete",
+                            "image_base64": BASE64.encode(&png_bytes),
+                            "format": "png",
+                            "metrics": GenerationMetricsDto::from(metrics),
+                        });
+                        let _ = socket.send(Message::Text(resp.to_string().into())).await;
                     }
                 }
                 Err(err) => {
