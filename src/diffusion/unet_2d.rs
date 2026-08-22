@@ -117,11 +117,6 @@ impl ResnetBlock2D {
     }
 
     pub fn forward(&self, xs: &Tensor, temb: Option<&Tensor>) -> Result<Tensor> {
-        let residual = match &self.conv_shortcut {
-            Some(sc) => sc.forward(xs)?,
-            None => xs.clone(),
-        };
-
         let h = self.norm1.forward(xs)?;
         let h = candle_nn::ops::silu(&h)?;
         let mut h = self.conv1.forward(&h)?;
@@ -137,7 +132,13 @@ impl ResnetBlock2D {
         let h = candle_nn::ops::silu(&h)?;
         let h = self.conv2.forward(&h)?;
 
-        residual + h
+        match &self.conv_shortcut {
+            Some(sc) => {
+                let res = sc.forward(xs)?;
+                res + h
+            }
+            None => xs + h,
+        }
     }
 }
 

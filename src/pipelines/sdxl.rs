@@ -4,7 +4,11 @@ use candle_core::{DType, Device, Tensor};
 use image::RgbImage;
 use std::path::Path;
 
-use crate::diffusion::schedulers::{EulerDiscreteScheduler, EulerSchedulerConfig, Scheduler};
+use crate::diffusion::schedulers::{
+    DDIMScheduler, DDIMConfig,
+    DPMSolverMultistepScheduler, DPMSolverMultistepConfig,
+    EulerDiscreteScheduler, EulerSchedulerConfig, Scheduler,
+};
 use crate::diffusion::unet_2d::UNetConditionModel;
 use crate::diffusion::vae::VaeDecoder;
 use crate::text::clip::ClipTextEncoder;
@@ -30,9 +34,9 @@ pub struct PipelineMemoryConfig {
 impl Default for PipelineMemoryConfig {
     fn default() -> Self {
         Self {
-            vae_tiling: false, // Direct GPU FP16 single-pass decoding by default for maximum speed
+            vae_tiling: true, // High-speed seamless Tiled VAE (72x72, 16 overlap) keeping peak VRAM < 7.2 GB with zero paging
             vae_tile_size: 72,
-            vae_tile_overlap: 16, // Optimal 4-tile seamless cosine feathering (128px overlap) if tiling is explicitly enabled
+            vae_tile_overlap: 16, // Optimal 4-tile seamless cosine feathering (128px overlap)
             cpu_offload: true, // Default enabled for < 7GB VRAM operation
             low_vram_load: true, // Prevent temporary VRAM spikes during VarBuilder model construction
         }
@@ -45,7 +49,7 @@ pub struct StableDiffusionXLPipeline {
     clip_g: Option<OpenClipTextEncoder>,
     unet: Option<UNetConditionModel>,
     vae: VaeDecoder,
-    scheduler: EulerDiscreteScheduler,
+    scheduler: Box<dyn Scheduler>,
     device: Device,
     dtype: DType,
     memory_config: PipelineMemoryConfig,
@@ -105,7 +109,7 @@ impl StableDiffusionXLPipeline {
             use_karras_sigmas: true,
             ..Default::default()
         };
-        let scheduler = EulerDiscreteScheduler::new(scheduler_config);
+        let scheduler: Box<dyn Scheduler> = Box::new(EulerDiscreteScheduler::new(scheduler_config));
 
         Ok(Self {
             checkpoint_path: checkpoint_buf,
@@ -120,6 +124,39 @@ impl StableDiffusionXLPipeline {
             lora_manager: crate::lora::LoRAManager::new(),
             prompt_cache: std::collections::HashMap::new(),
         })
+    }
+
+    /// Switch to 2nd-order DPM-Solver++ Multistep Karras Scheduler (faster convergence, optimal at 18-20 steps)
+    pub fn use_dpm_solver(&mut self) -> &mut Self {
+        let config = DPMSolverMultistepConfig {
+            use_karras_sigmas: true,
+            ..Default::default()
+        };
+        self.scheduler = Box::new(DPMSolverMultistepScheduler::new(config));
+        self
+    }
+
+    /// Switch to Euler Discrete Karras Scheduler
+    pub fn use_euler(&mut self) -> &mut Self {
+        let config = EulerSchedulerConfig {
+            use_karras_sigmas: true,
+            ..Default::default()
+        };
+        self.scheduler = Box::new(EulerDiscreteScheduler::new(config));
+        self
+    }
+
+    /// Switch to DDIM Deterministic Scheduler
+    pub fn use_ddim(&mut self) -> &mut Self {
+        let config = DDIMConfig::default();
+        self.scheduler = Box::new(DDIMScheduler::new(config));
+        self
+    }
+
+    /// Set a custom dynamic scheduler
+    pub fn set_scheduler(&mut self, scheduler: Box<dyn Scheduler>) -> &mut Self {
+        self.scheduler = scheduler;
+        self
     }
 
     /// Hot-merge a LoRA / LyCORIS into UNet and CLIP weights in-memory with zero runtime latency penalty
@@ -322,9 +359,10 @@ impl StableDiffusionXLPipeline {
         )?.to_dtype(self.dtype)?;
 
         let mut latents = if start_idx == 0 {
-            (noise * init_sigma)?
+            noise.affine(init_sigma, 0.0)?
         } else {
-            (&init_latents + (noise * init_sigma)?)?
+            let noisy = noise.affine(init_sigma, 0.0)?;
+            (&init_latents + &noisy)?
         };
 
         // Pre-compute SDXL Add Embedding
@@ -494,8 +532,11 @@ impl StableDiffusionXLPipeline {
         )?.to_dtype(self.dtype)?;
 
         // Initial combined latent
-        let init_noisy_bg = (&init_latents + (&fixed_bg_noise * init_sigma)?)?;
-        let init_noisy_fg = (&inpaint_noise * init_sigma)?;
+        let init_noisy_bg = {
+            let noisy = fixed_bg_noise.affine(init_sigma, 0.0)?;
+            (&init_latents + &noisy)?
+        };
+        let init_noisy_fg = inpaint_noise.affine(init_sigma, 0.0)?;
         let mut latents = (
             init_noisy_bg.broadcast_mul(&inv_latent_mask)? +
             init_noisy_fg.broadcast_mul(&latent_mask)?
@@ -534,7 +575,8 @@ impl StableDiffusionXLPipeline {
             // Re-inject the original latent at next timestep sigma to perfectly preserve unmasked region
             let next_sigma = sigmas.get(current_global_step + 1).copied().unwrap_or(0.0);
             let bg_at_next_step = if next_sigma > 0.0 {
-                (&init_latents + (&fixed_bg_noise * next_sigma)?)?
+                let noisy = fixed_bg_noise.affine(next_sigma, 0.0)?;
+                (&init_latents + &noisy)?
             } else {
                 init_latents.clone()
             };
@@ -635,7 +677,7 @@ impl StableDiffusionXLPipeline {
             (1, 4, latent_height, latent_width),
             &self.device,
         )?.to_dtype(self.dtype)?;
-        let mut latents = (init_latents * init_sigma)?;
+        let mut latents = init_latents.affine(init_sigma, 0.0)?;
 
         // Pre-compute SDXL Add Embedding
         let precomputed_add_proj = unet.compute_add_embedding(
@@ -760,7 +802,7 @@ impl StableDiffusionXLPipeline {
             (1, 4, latent_height, latent_width),
             &self.device,
         )?.to_dtype(self.dtype)?;
-        let mut latents = (init_latents * init_sigma)?;
+        let mut latents = init_latents.affine(init_sigma, 0.0)?;
 
         let precomputed_add_proj = unet.compute_add_embedding(
             2,

@@ -19,8 +19,8 @@ pub use server::{build_router, run_server, AppState, GenerateRequest, GenerateRe
 
 pub use diffusion::controlnet::{ControlNetModel, MultiControlNet, compute_canny_edge_map};
 pub use diffusion::schedulers::{
-    DDIMConfig, DDIMScheduler, EulerDiscreteScheduler, EulerSchedulerConfig, PredictionType,
-    Scheduler,
+    DDIMConfig, DDIMScheduler, DPMSolverMultistepConfig, DPMSolverMultistepScheduler,
+    EulerDiscreteScheduler, EulerSchedulerConfig, PredictionType, Scheduler,
 };
 pub use diffusion::unet_2d::UNetConditionModel;
 pub use diffusion::vae::{FastLatentPreviewer, VaeDecoder, tensor_to_rgb_image};

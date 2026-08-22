@@ -39,6 +39,8 @@ pub struct GenerateRequest {
     pub vae_tiling: Option<bool>,
     /// Optional dynamic override for CPU Offloading
     pub cpu_offload: Option<bool>,
+    /// Optional scheduler selection: "dpm", "euler", "ddim" (default: "euler")
+    pub scheduler: Option<String>,
 }
 
 fn default_steps() -> usize { 30 }
@@ -152,6 +154,13 @@ pub async fn generate_handler(
             pipeline.disable_model_cpu_offload();
         }
     }
+    if let Some(ref s) = req.scheduler {
+        match s.to_lowercase().as_str() {
+            "dpm" | "dpm++" | "dpmsolver" => { pipeline.use_dpm_solver(); }
+            "ddim" => { pipeline.use_ddim(); }
+            _ => { pipeline.use_euler(); }
+        }
+    }
 
     let (image, metrics) = pipeline
         .generate_with_metrics(params, None::<fn(usize, usize, &Tensor)>)
@@ -201,6 +210,13 @@ async fn handle_ws_stream(mut socket: WebSocket, state: AppState) {
             }
             if let Some(offload) = req.cpu_offload {
                 if offload { pipeline.enable_model_cpu_offload(); } else { pipeline.disable_model_cpu_offload(); }
+            }
+            if let Some(ref s) = req.scheduler {
+                match s.to_lowercase().as_str() {
+                    "dpm" | "dpm++" | "dpmsolver" => { pipeline.use_dpm_solver(); }
+                    "ddim" => { pipeline.use_ddim(); }
+                    _ => { pipeline.use_euler(); }
+                }
             }
 
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

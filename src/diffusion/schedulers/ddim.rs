@@ -75,6 +75,10 @@ impl Scheduler for DDIMScheduler {
         &self.timesteps
     }
 
+    fn sigmas(&self) -> &[f64] {
+        &[]
+    }
+
     fn scale_model_input(&self, sample: &Tensor, _timestep: usize) -> Result<Tensor> {
         // DDIM uses raw sample
         Ok(sample.clone())
