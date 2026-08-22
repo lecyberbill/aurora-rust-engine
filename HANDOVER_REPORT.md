@@ -48,7 +48,11 @@ Tested on identical prompts, seed (42), 30 steps Euler Karras, CFG 6.0, resoluti
 | **UNet Denoising (30 steps)** | 26.10s (1.15 it/s) | **14.19s - 14.74s (2.04 - 2.11 it/s)** | 🟢 **+80% to +83% faster** (+11.9s saved) |
 | **VAE RGB Post-Processing** | 0.80s | **0.35s - 0.42s** (GPU Vectorized) | 🟢 Faster byte delivery to RAM |
 | **Total Wall-Clock (Nominal)**| **26.10s** | **21.46s - 21.96s** (19.1s cached) | 🟢 **~22% faster overall** (~4.7s saved per image) |
-| **Peak Dedicated VRAM** | 6.5 GB - 8.2 GB | **6.5 GB - 7.6 GB** | 🟢 Safe for 8GB/12GB GPUs without pagi## 🎛️ 3. Full Switchability Controls (Rust API & HTTP REST)
+| **Peak Dedicated VRAM** | 6.5 GB - 8.2 GB | **6.5 GB - 7.6 GB** | 🟢 Safe for 8GB/12GB GPUs without paging |
+
+---
+
+## 🎛️ 3. Full Switchability Controls (Rust API & HTTP REST)
 
 ### In Rust Code:
 ```rust

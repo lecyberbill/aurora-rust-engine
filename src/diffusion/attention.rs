@@ -46,21 +46,24 @@ pub fn apply_conv2d_delta(conv: &mut Conv2d, key: &str, deltas: &std::collection
     Ok(())
 }
 
-/// Pure Rust Multi-Head Attention supporting Self-Attention & Cross-Attention
+/// Pure Rust Multi-Head Attention supporting Self-Attention (Fused QKV GEMM) & Cross-Attention
 #[derive(Debug)]
 pub struct CrossAttention {
     to_q: Linear,
     to_k: Linear,
     to_v: Linear,
+    fused_qkv: Option<Linear>,
     to_out: Vec<Linear>,
     heads: usize,
     head_dim: usize,
     scale: f64,
+    is_self_attention: bool,
 }
 
 impl CrossAttention {
     pub fn new(vb: VarBuilder, query_dim: usize, context_dim: Option<usize>, heads: usize, dim_head: usize) -> Result<Self> {
         let inner_dim = dim_head * heads;
+        let is_self_attention = context_dim.is_none() || context_dim == Some(query_dim);
         let context_dim = context_dim.unwrap_or(query_dim);
         let scale = 1.0 / (dim_head as f64).sqrt();
 
@@ -69,14 +72,32 @@ impl CrossAttention {
         let to_v = linear_flexible(context_dim, inner_dim, vb.pp("to_v"))?;
         let to_out_0 = linear_flexible(inner_dim, query_dim, vb.pp("to_out.0"))?;
 
+        // Construct Fused QKV weight matrix for Self-Attention (1 unified GEMM instead of 3 separate passes)
+        let fused_qkv = if is_self_attention {
+            let w_q = to_q.weight();
+            let w_k = to_k.weight();
+            let w_v = to_v.weight();
+            let fused_weight = Tensor::cat(&[w_q, w_k, w_v], 0)?;
+
+            let fused_bias = match (to_q.bias(), to_k.bias(), to_v.bias()) {
+                (Some(b_q), Some(b_k), Some(b_v)) => Some(Tensor::cat(&[b_q, b_k, b_v], 0)?),
+                _ => None,
+            };
+            Some(Linear::new(fused_weight, fused_bias))
+        } else {
+            None
+        };
+
         Ok(Self {
             to_q,
             to_k,
             to_v,
+            fused_qkv,
             to_out: vec![to_out_0],
             heads,
             head_dim: dim_head,
             scale,
+            is_self_attention,
         })
     }
 
@@ -87,21 +108,49 @@ impl CrossAttention {
         if !self.to_out.is_empty() {
             apply_linear_delta(&mut self.to_out[0], &format!("{}.to_out.0", prefix), deltas)?;
         }
+
+        // Reconstruct fused QKV projection if LoRAs modify weights
+        if self.is_self_attention {
+            let w_q = self.to_q.weight();
+            let w_k = self.to_k.weight();
+            let w_v = self.to_v.weight();
+            let fused_weight = Tensor::cat(&[w_q, w_k, w_v], 0)?;
+
+            let fused_bias = match (self.to_q.bias(), self.to_k.bias(), self.to_v.bias()) {
+                (Some(b_q), Some(b_k), Some(b_v)) => Some(Tensor::cat(&[b_q, b_k, b_v], 0)?),
+                _ => None,
+            };
+            self.fused_qkv = Some(Linear::new(fused_weight, fused_bias));
+        }
+
         Ok(())
     }
 
     pub fn forward(&self, xs: &Tensor, context: Option<&Tensor>) -> Result<Tensor> {
         let (b_size, seq_len, _) = xs.dims3()?;
-        let context = context.unwrap_or(xs);
-        let (_, context_len, _) = context.dims3()?;
 
-        let q = self.to_q.forward(xs)?;
-        let k = self.to_k.forward(context)?;
-        let v = self.to_v.forward(context)?;
+        let (q, k, v) = if context.is_none() && self.fused_qkv.is_some() {
+            // High-Speed Fused Self-Attention: 1 single cuBLAS GEMM pass
+            let qkv = self.fused_qkv.as_ref().unwrap().forward(xs)?;
+            let inner_dim = self.heads * self.head_dim;
+            let q = qkv.narrow(candle_core::D::Minus1, 0, inner_dim)?.reshape((b_size, seq_len, self.heads, self.head_dim))?;
+            let k = qkv.narrow(candle_core::D::Minus1, inner_dim, inner_dim)?.reshape((b_size, seq_len, self.heads, self.head_dim))?;
+            let v = qkv.narrow(candle_core::D::Minus1, inner_dim * 2, inner_dim)?.reshape((b_size, seq_len, self.heads, self.head_dim))?;
+            (q, k, v)
+        } else {
+            // Cross-Attention (context != xs)
+            let context = context.unwrap_or(xs);
+            let (_, context_len, _) = context.dims3()?;
 
-        let q = q.reshape((b_size, seq_len, self.heads, self.head_dim))?;
-        let k = k.reshape((b_size, context_len, self.heads, self.head_dim))?;
-        let v = v.reshape((b_size, context_len, self.heads, self.head_dim))?;
+            let q = self.to_q.forward(xs)?;
+            let k = self.to_k.forward(context)?;
+            let v = self.to_v.forward(context)?;
+
+            let q = q.reshape((b_size, seq_len, self.heads, self.head_dim))?;
+            let k = k.reshape((b_size, context_len, self.heads, self.head_dim))?;
+            let v = v.reshape((b_size, context_len, self.heads, self.head_dim))?;
+            (q, k, v)
+        };
 
         #[cfg(feature = "flash-attn")]
         {
