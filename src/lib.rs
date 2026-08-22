@@ -24,8 +24,9 @@ pub use diffusion::schedulers::{
 };
 pub use diffusion::unet_2d::UNetConditionModel;
 pub use diffusion::vae::{FastLatentPreviewer, VaeDecoder, tensor_to_rgb_image};
-pub use pipelines::{StableDiffusionPipeline, StableDiffusionXLPipeline};
-pub use text::{ClipTextEncoder, OpenClipTextEncoder};
+pub use diffusion::vae_flux::FluxVaeDecoder;
+pub use pipelines::{FluxPipeline, StableDiffusionPipeline, StableDiffusionXLPipeline};
+pub use text::{ClipTextEncoder, OpenClipTextEncoder, T5TextEncoder};
 
 #[cfg(test)]
 mod tests {

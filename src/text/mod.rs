@@ -2,6 +2,8 @@
 
 pub mod clip;
 pub mod open_clip;
+pub mod t5;
 
 pub use clip::ClipTextEncoder;
 pub use open_clip::OpenClipTextEncoder;
+pub use t5::T5TextEncoder;
