@@ -108,6 +108,8 @@ pipeline.disable_fp8();                    // Disable FP8 (FP16 mode)
 
 | Binary Name | Source Path | Output Directory / Files |
 |---|---|---|
+| `grio_showcase` | [`src/bin/grio_showcase.rs`](file:///d:/image_to_text/TransRust/src/bin/grio_showcase.rs) | `http://127.0.0.1:7860` (100% Pure Rust Web UI) |
+| `grand_benchmark` | [`src/bin/grand_benchmark.rs`](file:///d:/image_to_text/TransRust/src/bin/grand_benchmark.rs) | [`outputs/grand_benchmark/`](file:///d:/image_to_text/TransRust/outputs/grand_benchmark/) |
 | `test_dpm_solver` | [`src/bin/test_dpm_solver.rs`](file:///d:/image_to_text/TransRust/src/bin/test_dpm_solver.rs) | [`outputs/dpm_solver_benchmark/`](file:///d:/image_to_text/TransRust/outputs/dpm_solver_benchmark/) |
 | `stress_matrix_test` | [`src/bin/stress_matrix_test.rs`](file:///d:/image_to_text/TransRust/src/bin/stress_matrix_test.rs) | [`outputs/stress_test/matrix_5x3/`](file:///d:/image_to_text/TransRust/outputs/stress_test/matrix_5x3/) |
 | `comparative_benchmark` | [`src/bin/comparative_benchmark.rs`](file:///d:/image_to_text/TransRust/src/bin/comparative_benchmark.rs) | [`outputs/stress_test/rust_flash_attn/`](file:///d:/image_to_text/TransRust/outputs/stress_test/rust_flash_attn/) |
