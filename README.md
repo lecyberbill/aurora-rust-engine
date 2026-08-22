@@ -42,17 +42,28 @@ It provides a robust, zero-Python alternative for running generative diffusion m
 cargo build --release --features cuda,flash-attn
 ```
 
-### 3. Generate an Image (Text-to-Image)
+### 3. Launch the Pure Rust Interactive Studio ([Grio](https://github.com/lecyberbill/grio) Web UI)
+```bash
+cargo run --release --bin grio_showcase --features cuda,flash-attn,ui
+```
+Open **`http://127.0.0.1:7860`** to access the complete pure Rust SDXL Diffusion Studio with real-time progressive latent preview streaming, session history gallery, and GPU telemetry powered by [Grio](https://github.com/lecyberbill/grio).
+
+### 4. Run SOTA Grand Benchmark (All Optimizations Active)
+```bash
+cargo run --release --bin grand_benchmark --features cuda,flash-attn
+```
+
+### 5. Generate an Image via CLI
 ```bash
 cargo run --release --bin test_single_gen --features cuda,flash-attn
 ```
 
-### 4. Test LoRA Hot Weight Merging
+### 6. Test LoRA Hot Weight Merging
 ```bash
 cargo run --release --bin test_lora --features cuda,flash-attn
 ```
 
-### 5. Run Comprehensive 15-Model Benchmark
+### 7. Run Comprehensive 15-Model Benchmark
 ```bash
 cargo run --release --bin stress_test --features cuda,flash-attn
 ```

@@ -120,6 +120,15 @@ mod app {
                         r.item(
                             Image::new("output_preview")
                                 .label("Real-Time Latents & Final Render")
+                                .interactive(false)
+                        );
+                    });
+
+                    b.row(|r| {
+                        r.item(
+                            Gallery::new("history_gallery")
+                                .label("Session Diffusion Gallery")
+                                .columns(4)
                         );
                     });
 
@@ -205,7 +214,12 @@ mod app {
                 image.write_to(&mut cur, ImageFormat::Png)?;
                 let final_b64 = BASE64.encode(&final_buf);
                 let final_data_url = format!("data:image/png;base64,{}", final_b64);
-                ctx.set("output_preview", final_data_url);
+                ctx.set("output_preview", final_data_url.clone());
+
+                // Append to interactive session gallery
+                let mut gallery: Vec<String> = ctx.get("history_gallery").unwrap_or_default();
+                gallery.push(final_data_url);
+                ctx.set("history_gallery", gallery);
 
                 // Update observability metrics
                 ctx.set("unet_speed", format!("{:.2}", metrics.unet_it_per_sec));

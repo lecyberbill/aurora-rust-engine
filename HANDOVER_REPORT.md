@@ -145,9 +145,16 @@ Validated on **Juggernaut-XL v9 Photo** across 3 distinct aspect ratios with DPM
 
 ---
 
-## 🎯 6. Priority Roadmap for Next Steps
+## 🎯 6. Status & Completed Milestones
 
-1. **Ada Lovelace FP8 Quantization (`E4M3`)**:
-   - Leverage 4th Gen Tensor Cores for weights in FP8 to double memory bandwidth efficiency.
-2. **Pure Rust Frontend Companion (Grio at `D:\Projet\UI`)**:
-   - Seamless zero-copy memory communication & live latent previews streaming over WebSocket.unication & live latent previews streaming.
+1. ✅ **Pure Rust Frontend Companion ([Grio](https://github.com/lecyberbill/grio))**:
+   - Integrated full interactive declarative web UI in pure Rust ([`src/bin/grio_showcase.rs`](file:///d:/image_to_text/TransRust/src/bin/grio_showcase.rs)).
+   - Real-time progressive latent preview streaming, session history gallery, and zero-copy GPU execution.
+2. ✅ **SOTA DPM-Solver++ 2M Karras Scheduler**:
+   - 18 steps full photorealistic convergence in ~12.0s total wall-clock.
+3. ✅ **Zero-Paging Seamless Cosine Tiled VAE**:
+   - Dedicated VRAM strictly under 6.8 GB with 0 GB shared RAM paging.
+4. ✅ **HuggingFace Hub Direct Integration**:
+   - 100% Pure Rust automatic downloading and caching via `hf-hub`.
+5. ⏳ **DiT (Diffusion Transformers - Flux & SD3) & FP8 Compute Extensions**:
+   - Joint MMDiT blocks and T5-XXL integration.
