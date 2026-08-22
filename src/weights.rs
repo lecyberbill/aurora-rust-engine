@@ -88,6 +88,16 @@ impl SafeTensorsArchive {
                 let data: &[u8] = slice;
                 Tensor::from_slice(data, shape.as_slice(), device)?
             }
+            safetensors::Dtype::F8_E4M3 => {
+                let data: &[u8] = slice;
+                let raw_tensor = Tensor::from_slice(data, shape.as_slice(), device)?;
+                raw_tensor.to_dtype(dtype)?
+            }
+            safetensors::Dtype::F8_E5M2 => {
+                let data: &[u8] = slice;
+                let raw_tensor = Tensor::from_slice(data, shape.as_slice(), device)?;
+                raw_tensor.to_dtype(dtype)?
+            }
             other => {
                 return Err(LuminaError::Config(format!(
                     "Unsupported SafeTensors dtype {:?} for tensor {}",

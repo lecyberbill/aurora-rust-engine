@@ -29,6 +29,8 @@ pub struct PipelineMemoryConfig {
     pub cpu_offload: bool,
     /// Sequential model loading to prevent VRAM allocation spikes and shared memory paging (default: true)
     pub low_vram_load: bool,
+    /// Leverage Ada Lovelace FP8 (E4M3) weight precision to halve UNet VRAM bandwidth
+    pub fp8_weights: bool,
 }
 
 impl Default for PipelineMemoryConfig {
@@ -39,6 +41,7 @@ impl Default for PipelineMemoryConfig {
             vae_tile_overlap: 16, // Optimal 4-tile seamless cosine feathering (128px overlap)
             cpu_offload: true, // Default enabled for < 7GB VRAM operation
             low_vram_load: true, // Prevent temporary VRAM spikes during VarBuilder model construction
+            fp8_weights: false, // Optional FP8 Ada Lovelace acceleration
         }
     }
 }
@@ -266,6 +269,18 @@ impl StableDiffusionXLPipeline {
     /// Disable Low-VRAM model loading (loads all models simultaneously)
     pub fn disable_low_vram_load(&mut self) -> &mut Self {
         self.memory_config.low_vram_load = false;
+        self
+    }
+
+    /// Enable Ada Lovelace FP8 (E4M3) precision
+    pub fn enable_fp8(&mut self) -> &mut Self {
+        self.memory_config.fp8_weights = true;
+        self
+    }
+
+    /// Disable Ada Lovelace FP8 precision (standard FP16 / BF16)
+    pub fn disable_fp8(&mut self) -> &mut Self {
+        self.memory_config.fp8_weights = false;
         self
     }
 

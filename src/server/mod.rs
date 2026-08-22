@@ -39,6 +39,8 @@ pub struct GenerateRequest {
     pub vae_tiling: Option<bool>,
     /// Optional dynamic override for CPU Offloading
     pub cpu_offload: Option<bool>,
+    /// Optional dynamic override for FP8 quantization
+    pub fp8: Option<bool>,
     /// Optional scheduler selection: "dpm", "euler", "ddim" (default: "euler")
     pub scheduler: Option<String>,
 }
