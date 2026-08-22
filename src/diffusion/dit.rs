@@ -1,10 +1,17 @@
-// [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: Diffusion Transformer (DiT / Flux) backbone contract
+// [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Diffusion Transformer (MMDiT / Flux.1 / SD 3.5) core architecture
+
+pub mod blocks;
+pub mod embeddings;
+pub mod flux;
+
+pub use blocks::{DoubleStreamBlock, SingleStreamBlock};
+pub use embeddings::{apply_rope, create_rope_frequencies, AdaLNZeroModulation, TimestepEmbedder};
+pub use flux::{FluxConfig, FluxTransformer};
 
 use candle_core::{Result, Tensor};
 
-/// Trait abstraction for modern Diffusion Transformer backbones (e.g. DiT, PixArt, Flux).
+/// General abstraction for Diffusion Transformers
 pub trait DiffusionTransformer {
-    /// Forward pass through transformer blocks with text & time conditioning.
     fn forward(
         &self,
         latents: &Tensor,
