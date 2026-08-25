@@ -155,6 +155,7 @@ pub struct ClipTextEncoder {
     token_embedding: Embedding,
     position_embedding: Embedding,
     layers: Vec<ClipEncoderLayer>,
+    final_layer_norm: Option<LayerNorm>,
     causal_mask: Tensor,
     tokenizer: Option<Tokenizer>,
     device: Device,
@@ -191,12 +192,38 @@ impl ClipTextEncoder {
 
         let causal_mask = build_causal_mask(77, &dev, dtype)?;
 
+        let tokenizer = if Path::new("clip_tokenizer.json").exists() {
+            Tokenizer::from_file("clip_tokenizer.json").ok()
+        } else if Path::new("D:\\image_to_text\\Qpyt_image_gen\\diffsynth_engine\\conf\\tokenizers\\flux\\tokenizer_1\\tokenizer.json").exists() {
+            Tokenizer::from_file("D:\\image_to_text\\Qpyt_image_gen\\diffsynth_engine\\conf\\tokenizers\\flux\\tokenizer_1\\tokenizer.json").ok()
+        } else {
+            let api = hf_hub::api::sync::Api::new().ok();
+            if let Some(api) = api {
+                if let Ok(file) = api.model("openai/clip-vit-large-patch14".to_string()).get("tokenizer.json") {
+                    Tokenizer::from_file(file).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        let final_layer_norm = if vb.contains_tensor("text_model.final_layer_norm.weight") {
+            layer_norm(embed_dim, 1e-5, vb.pp("text_model.final_layer_norm")).ok()
+        } else if vb.contains_tensor("final_layer_norm.weight") {
+            layer_norm(embed_dim, 1e-5, vb.pp("final_layer_norm")).ok()
+        } else {
+            None
+        };
+
         Ok(Self {
             token_embedding,
             position_embedding,
             layers,
+            final_layer_norm,
             causal_mask,
-            tokenizer: None,
+            tokenizer,
             device: dev,
         })
     }
@@ -252,5 +279,49 @@ impl ClipTextEncoder {
         }
 
         Ok(hidden_states)
+    }
+
+    pub fn has_tokenizer(&self) -> bool {
+        self.tokenizer.is_some()
+    }
+
+    /// Encode prompt into Final Layer Pooled Embedding [1, 768] (EOT token representation for Flux vector_in)
+    pub fn encode_pooled(&self, prompt: &str) -> crate::error::Result<Tensor> {
+        let tokenizer = self.tokenizer.as_ref()
+            .ok_or_else(|| crate::error::LuminaError::Tokenizer("CLIP Tokenizer not initialized".to_string()))?;
+
+        let encoding = tokenizer.encode(prompt, true)
+            .map_err(|e| crate::error::LuminaError::Tokenizer(e.to_string()))?;
+
+        let tokens = encoding.get_ids().to_vec();
+        let eot_idx = tokens.iter().position(|&t| t == 49407).unwrap_or(tokens.len().saturating_sub(1));
+
+        let max_len = 77;
+        let mut padded = tokens.clone();
+        if padded.len() > max_len {
+            padded.truncate(max_len);
+            if let Some(last) = padded.last_mut() { *last = 49407; }
+        } else {
+            padded.resize(max_len, 49407);
+        }
+
+        let input_ids = Tensor::from_slice(&padded, (1, max_len), &self.device)?;
+        let positions = Tensor::arange(0u32, max_len as u32, &self.device)?.unsqueeze(0)?;
+
+        let tok_emb = self.token_embedding.forward(&input_ids)?;
+        let pos_emb = self.position_embedding.forward(&positions)?;
+        let mut hidden_states = (tok_emb + pos_emb)?;
+
+        for layer in &self.layers {
+            hidden_states = layer.forward(&hidden_states, Some(&self.causal_mask))?;
+        }
+
+        if let Some(ref fln) = self.final_layer_norm {
+            hidden_states = fln.forward(&hidden_states)?;
+        }
+
+        // Extract EOT token embedding: [1, 768]
+        let pooled = hidden_states.narrow(1, eot_idx.min(max_len - 1), 1)?.squeeze(1)?;
+        Ok(pooled)
     }
 }

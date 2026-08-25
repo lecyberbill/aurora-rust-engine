@@ -21,14 +21,15 @@ It provides a robust, zero-Python alternative for running generative diffusion m
 
 ## ✨ Features
 
-- **Pure Rust Native Inference**: Zero Python dependencies, zero PyTorch overhead, compiled directly to a native executable.
+- **Pure Rust Native Inference**: Zero Python dependencies, zero PyTorch overhead, compiled directly to a native standalone executable.
+- **Flux.1 [dev] & Flux.1 [schnell] Full Support**: Native implementation of Multimodal Diffusion Transformers (MMDiT) with 19 `DoubleStreamBlocks`, 38 `SingleStreamBlocks`, and exact 3D Rotary Position Embeddings (RoPE $[16, 56, 56]$).
+- **Sub-9GB VRAM Flux Sequential Block Streaming**: Executes the full 12-billion-parameter Flux.1 model in FP8 precision with on-demand block streaming, fitting entirely within standard 12GB GPUs (RTX 4070 Ti).
 - **SDXL & Pony XL Full Support**: Seamless support for all `.safetensors` single-file checkpoints from Civitai and Hugging Face.
 - **Native FlashAttention-2 Acceleration**: 9.5x faster attention computation with fused CUDA kernels under Windows MSVC and Linux.
 - **Zero-Overhead In-Memory LoRA Merging**: Instant hot-patching of UNet and CLIP weights directly in GPU/CPU memory with 0 MB extra VRAM overhead.
 - **Exact Penultimate Text Parity**: Custom penultimate hidden state extractors (`hidden_states[-2]`) for CLIP-L (Layer 11) and OpenCLIP-bigG (Layer 31) matching Hugging Face Diffusers bit-for-bit.
-- **Seamless $C^\infty$ Cosine Tiled VAE**: 4-quadrant $72\times 72$ latent decoding with 128px smooth cosine cross-fade eliminating all tile seams.
-- **Sub-8GB VRAM Footprint**: Text encoder CPU offloading and memory-mapped weight routers ensuring stable $\sim 7.5$ GB cruise VRAM on 12GB GPUs with **0% Windows shared memory swap**.
-- **Deterministic Euler Sampler**: Continuous Euler Discrete & Karras noise scheduling.
+- **Seamless $C^\infty$ Cosine Tiled VAE & Flux 16-Channel VAE**: 4-quadrant $72\times 72$ latent decoding with 128px smooth cosine cross-fade eliminating all tile seams, plus full BFL 16-channel AutoEncoder decoding.
+- **Deterministic Schedulers**: Continuous Euler Discrete, Flow Matching Rectified Euler ODE, and DPM-Solver++ 2M Karras.
 
 ---
 

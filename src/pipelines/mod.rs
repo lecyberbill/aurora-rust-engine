@@ -2,6 +2,8 @@
 
 pub mod sd15;
 pub mod sdxl;
+pub mod flux;
 
 pub use sd15::StableDiffusionPipeline;
 pub use sdxl::StableDiffusionXLPipeline;
+pub use flux::FluxPipeline;

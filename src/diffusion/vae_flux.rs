@@ -41,7 +41,7 @@ impl VaeResnetBlock {
                 out_channels,
                 1,
                 Conv2dConfig::default(),
-                vb.pp("conv_shortcut"),
+                vb.pp("nin_shortcut"),
             )?)
         } else {
             None
@@ -84,7 +84,7 @@ impl VaeUpBlock {
         let mut resnets = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
             let in_ch = if i == 0 { in_channels } else { out_channels };
-            let block = VaeResnetBlock::new(in_ch, out_channels, vb.pp(format!("resnets.{}", i)))?;
+            let block = VaeResnetBlock::new(in_ch, out_channels, vb.pp(format!("block.{}", i)))?;
             resnets.push(block);
         }
 
@@ -94,7 +94,7 @@ impl VaeUpBlock {
                 out_channels,
                 3,
                 Conv2dConfig { padding: 1, ..Default::default() },
-                vb.pp("upsamplers.0.conv"),
+                vb.pp("upsample.conv"),
             )?)
         } else {
             None
@@ -137,21 +137,24 @@ impl FluxVaeDecoder {
         let conv_in = conv2d(16, 512, 3, Conv2dConfig { padding: 1, ..Default::default() }, vb.pp("decoder.conv_in"))?;
 
         let mid_block = (
-            VaeResnetBlock::new(512, 512, vb.pp("decoder.mid_block.resnets.0"))?,
-            VaeResnetBlock::new(512, 512, vb.pp("decoder.mid_block.resnets.1"))?,
+            VaeResnetBlock::new(512, 512, vb.pp("decoder.mid.block_1"))?,
+            VaeResnetBlock::new(512, 512, vb.pp("decoder.mid.block_2"))?,
         );
 
-        let channels = [512, 512, 256, 128];
+        // In Flux VAE: up.3 = 512->512, up.2 = 512->512, up.1 = 512->256, up.0 = 256->128
+        let in_channels = [512, 512, 512, 256];
+        let out_channels = [512, 512, 256, 128];
         let mut up_blocks = Vec::with_capacity(4);
+
         for i in 0..4 {
-            let in_ch = channels[i];
-            let out_ch = if i + 1 < channels.len() { channels[i + 1] } else { 128 };
+            let in_ch = in_channels[i];
+            let out_ch = out_channels[i];
             let add_up = i < 3;
-            let block = VaeUpBlock::new(in_ch, out_ch, 3, add_up, vb.pp(format!("decoder.up_blocks.{}", i)))?;
+            let block = VaeUpBlock::new(in_ch, out_ch, 3, add_up, vb.pp(format!("decoder.up.{}", 3 - i)))?;
             up_blocks.push(block);
         }
 
-        let conv_norm_out = group_norm(32, 128, 1e-6, vb.pp("decoder.conv_norm_out"))?;
+        let conv_norm_out = group_norm(32, 128, 1e-6, vb.pp("decoder.norm_out"))?;
         let conv_out = conv2d(128, 3, 3, Conv2dConfig { padding: 1, ..Default::default() }, vb.pp("decoder.conv_out"))?;
 
         Ok(Self {
@@ -165,11 +168,14 @@ impl FluxVaeDecoder {
         })
     }
 
-    /// Single-pass full decode
+    /// Single-pass full decode in F16 precision to avoid VRAM overflow
     pub fn decode(&self, latents: &Tensor) -> Result<Tensor> {
-        // Shift and scale Flux latents
-        let latents = ((latents / FLUX_LATENT_SCALE)? + FLUX_LATENT_SHIFT)?;
-        let latents = latents.to_device(&self.device)?.to_dtype(self.dtype)?;
+        // Exact BFL Flux autoencoder de-quantization:
+        // z = (latents / scale_factor) + shift_factor
+        let latents_f32 = latents.to_dtype(DType::F32)?;
+        let scaled = (latents_f32 / FLUX_LATENT_SCALE)?;
+        let shifted = (scaled + FLUX_LATENT_SHIFT)?;
+        let latents = shifted.to_device(&self.device)?.to_dtype(self.dtype)?;
 
         let mut h = self.conv_in.forward(&latents)?;
         h = self.mid_block.0.forward(&h)?;
@@ -187,6 +193,21 @@ impl FluxVaeDecoder {
     /// Convert unpatchified latents [1, 16, H/8, W/8] to RgbImage
     pub fn decode_to_image(&self, latents: &Tensor) -> Result<RgbImage> {
         let rgb_tensor = self.decode(latents)?;
-        crate::diffusion::vae::tensor_to_rgb_image(&rgb_tensor)
+        let (_, _, h, w) = rgb_tensor.dims4()?;
+
+        // Scale RGB values from [-1, 1] to [0, 255] in high precision F32
+        let rgb = rgb_tensor.squeeze(0)?.to_dtype(DType::F32)?;
+        let normalized = ((&rgb * 0.5)? + 0.5)?;
+        let scaled = (&normalized * 255.0)?;
+        let clamped = scaled.clamp(0.0f32, 255.0f32)?;
+        let u8_tensor = clamped.to_dtype(DType::U8)?;
+
+        let hw3_tensor = u8_tensor.permute((1, 2, 0))?.contiguous()?;
+        let flat_bytes = hw3_tensor.flatten_all()?.to_device(&Device::Cpu)?.to_vec1::<u8>()?;
+
+        let img: RgbImage = image::ImageBuffer::from_raw(w as u32, h as u32, flat_bytes)
+            .ok_or_else(|| candle_core::Error::Msg("Failed to construct ImageBuffer from raw RGB bytes".to_string()))?;
+
+        Ok(img)
     }
 }

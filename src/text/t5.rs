@@ -50,6 +50,8 @@ impl T5TextEncoder {
 
         let tokenizer = if let Some(p) = tokenizer_path {
             Tokenizer::from_file(p).map_err(|e| candle_core::Error::Msg(e.to_string()))?
+        } else if Path::new("t5xxl_tokenizer.json").exists() {
+            Tokenizer::from_file("t5xxl_tokenizer.json").map_err(|e| candle_core::Error::Msg(e.to_string()))?
         } else {
             let api = hf_hub::api::sync::Api::new()
                 .map_err(|e| candle_core::Error::Msg(format!("HF API error: {}", e)))?;

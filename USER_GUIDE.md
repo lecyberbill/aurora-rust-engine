@@ -164,7 +164,7 @@ pipeline.disable_fp8();                     // Standard FP16 mode
 
 ---
 
-### Text-to-Image Generation
+### Text-to-Image Generation (SDXL)
 
 ```rust
 use aurora_rust_engine::DiffusionParams;
@@ -186,6 +186,38 @@ let (image, metrics) = pipeline.generate_with_metrics(params, Some(|step, total,
 
 image.save("output.png")?;
 println!("Generated in {:.2}s ({:.2} it/s)", metrics.total_wallclock_ms / 1000.0, metrics.unet_it_per_sec);
+```
+
+---
+
+### Text-to-Image Generation (Flux.1 [dev] & [schnell] MMDiT)
+
+`aurora-rust-engine` includes native pure-Rust support for the Black Forest Labs **Flux.1** Multimodal Diffusion Transformer (MMDiT) architecture:
+
+```rust
+use aurora_rust_engine::pipelines::flux::FluxPipeline;
+use aurora_rust_engine::traits::DiffusionParams;
+use candle_core::Device;
+
+let device = Device::new_cuda(0)?;
+
+// 1. Load Flux.1 FP8 Checkpoint (Auto-detects Dev vs Schnell and loads embedded encoders/VAE)
+let mut flux_pipeline = FluxPipeline::from_single_file("G:\\models\\flux\\flux1-dev-fp8.safetensors", device)?;
+
+// 2. Configure Diffusion Parameters (4 steps for Schnell, 20-28 steps with 3.5 guidance for Dev)
+let params = DiffusionParams {
+    prompt: "masterpiece, highly detailed, futuristic glowing robot, neon lights, 8k",
+    negative_prompt: None,
+    num_steps: 20,
+    guidance_scale: 3.5,
+    width: 1024,
+    height: 1024,
+    seed: 42,
+};
+
+// 3. Generate high-fidelity image in pure Rust (< 9GB VRAM footprint)
+let (image, metrics) = flux_pipeline.generate_with_metrics(params, None)?;
+image.save("flux_dev_robot.png")?;
 ```
 
 ---

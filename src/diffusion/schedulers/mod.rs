@@ -5,10 +5,12 @@ use candle_core::{Result, Tensor};
 pub mod euler;
 pub mod ddim;
 pub mod dpm_solver;
+pub mod flow_match;
 
 pub use euler::{EulerDiscreteScheduler, EulerSchedulerConfig, PredictionType};
 pub use ddim::{DDIMScheduler, DDIMConfig};
 pub use dpm_solver::{DPMSolverMultistepScheduler, DPMSolverMultistepConfig};
+pub use flow_match::{FlowMatchEulerScheduler, FlowMatchEulerConfig};
 
 /// Mathematical scheduler contract for stepping iterative noise diffusion models.
 pub trait Scheduler: Send + Sync {

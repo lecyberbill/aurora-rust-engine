@@ -90,13 +90,25 @@ impl SafeTensorsArchive {
             }
             safetensors::Dtype::F8_E4M3 => {
                 let data: &[u8] = slice;
-                let raw_tensor = Tensor::from_slice(data, shape.as_slice(), device)?;
-                raw_tensor.to_dtype(dtype)?
+                let lut = get_fp8_e4m3_lut();
+                let f16_data: Vec<half::f16> = data.iter().map(|&b| lut[b as usize]).collect();
+                let raw_tensor = Tensor::from_vec(f16_data, shape.as_slice(), device)?;
+                if dtype == DType::F16 {
+                    raw_tensor
+                } else {
+                    raw_tensor.to_dtype(dtype)?
+                }
             }
             safetensors::Dtype::F8_E5M2 => {
                 let data: &[u8] = slice;
-                let raw_tensor = Tensor::from_slice(data, shape.as_slice(), device)?;
-                raw_tensor.to_dtype(dtype)?
+                let lut = get_fp8_e5m2_lut();
+                let f16_data: Vec<half::f16> = data.iter().map(|&b| lut[b as usize]).collect();
+                let raw_tensor = Tensor::from_vec(f16_data, shape.as_slice(), device)?;
+                if dtype == DType::F16 {
+                    raw_tensor
+                } else {
+                    raw_tensor.to_dtype(dtype)?
+                }
             }
             other => {
                 return Err(LuminaError::Config(format!(
@@ -134,6 +146,81 @@ fn bytemuck_cast_slice<T>(bytes: &[u8]) -> &[T] {
     unsafe {
         std::slice::from_raw_parts(bytes.as_ptr() as *const T, bytes.len() / elem_size)
     }
+}
+
+static FP8_E4M3_LUT_F16: std::sync::OnceLock<[half::f16; 256]> = std::sync::OnceLock::new();
+static FP8_E5M2_LUT_F16: std::sync::OnceLock<[half::f16; 256]> = std::sync::OnceLock::new();
+
+fn get_fp8_e4m3_lut() -> &'static [half::f16; 256] {
+    FP8_E4M3_LUT_F16.get_or_init(|| {
+        let mut lut = [half::f16::ZERO; 256];
+        for b in 0..=255u8 {
+            lut[b as usize] = half::f16::from_f32(fp8_e4m3_to_f32(b));
+        }
+        lut
+    })
+}
+
+fn get_fp8_e5m2_lut() -> &'static [half::f16; 256] {
+    FP8_E5M2_LUT_F16.get_or_init(|| {
+        let mut lut = [half::f16::ZERO; 256];
+        for b in 0..=255u8 {
+            lut[b as usize] = half::f16::from_f32(fp8_e5m2_to_f32(b));
+        }
+        lut
+    })
+}
+
+/// Convert FP8 E4M3FN (OCP Standard) byte to F32
+fn fp8_e4m3_to_f32(byte: u8) -> f32 {
+    let sign = (byte >> 7) & 1;
+    let exp = (byte >> 3) & 0x0F;
+    let mant = byte & 0x07;
+
+    if exp == 0 && mant == 0 {
+        return if sign == 1 { -0.0 } else { 0.0 };
+    }
+    if exp == 0x0F && mant == 0x07 {
+        return f32::NAN; // E4M3FN NaN
+    }
+
+    let val = if exp == 0 {
+        // Subnormal: 2^(-6) * (mant / 8)
+        (mant as f32 / 8.0) * (2.0f32).powi(-6)
+    } else {
+        // Normal: 2^(exp - 7) * (1 + mant / 8)
+        (1.0 + mant as f32 / 8.0) * (2.0f32).powi(exp as i32 - 7)
+    };
+
+    if sign == 1 { -val } else { val }
+}
+
+/// Convert FP8 E5M2 byte to F32
+fn fp8_e5m2_to_f32(byte: u8) -> f32 {
+    let sign = (byte >> 7) & 1;
+    let exp = (byte >> 2) & 0x1F;
+    let mant = byte & 0x03;
+
+    if exp == 0 && mant == 0 {
+        return if sign == 1 { -0.0 } else { 0.0 };
+    }
+    if exp == 0x1F {
+        return if mant == 0 {
+            if sign == 1 { f32::NEG_INFINITY } else { f32::INFINITY }
+        } else {
+            f32::NAN
+        };
+    }
+
+    let val = if exp == 0 {
+        // Subnormal: 2^(-14) * (mant / 4)
+        (mant as f32 / 4.0) * (2.0f32).powi(-14)
+    } else {
+        // Normal: 2^(exp - 15) * (1 + mant / 4)
+        (1.0 + mant as f32 / 4.0) * (2.0f32).powi(exp as i32 - 15)
+    };
+
+    if sign == 1 { -val } else { val }
 }
 
 pub struct WeightRouter<'a> {
@@ -226,6 +313,60 @@ impl<'a> WeightRouter<'a> {
         Ok(VarBuilder::from_tensors(tensors, self.dtype, &self.device))
     }
 
+    pub fn flux_header_var_builder(&self) -> Result<VarBuilder<'static>> {
+        let mut tensors = HashMap::new();
+        let header_prefixes = ["img_in.", "txt_in.", "time_in.", "vector_in.", "guidance_in.", "final_layer."];
+
+        for key in self.archive.keys() {
+            for prefix in &header_prefixes {
+                if key.starts_with(prefix) {
+                    let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
+                    tensors.insert(key.clone(), tensor);
+                    break;
+                } else if let Some(stripped) = key.strip_prefix("model.diffusion_model.") {
+                    if stripped.starts_with(prefix) {
+                        let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
+                        tensors.insert(stripped.to_string(), tensor);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if tensors.is_empty() {
+            return Err(LuminaError::MissingWeight("No Flux.1 header weights found in checkpoint".to_string()));
+        }
+
+        Ok(VarBuilder::from_tensors(tensors, self.dtype, &self.device))
+    }
+
+    pub fn flux_var_builder(&self) -> Result<VarBuilder<'static>> {
+        let mut tensors = HashMap::new();
+        let flux_prefixes = ["double_blocks.", "single_blocks.", "img_in.", "txt_in.", "time_in.", "vector_in.", "guidance_in.", "final_layer."];
+
+        for key in self.archive.keys() {
+            for prefix in &flux_prefixes {
+                if key.starts_with(prefix) {
+                    let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
+                    tensors.insert(key.clone(), tensor);
+                    break;
+                } else if let Some(stripped) = key.strip_prefix("model.diffusion_model.") {
+                    if stripped.starts_with(prefix) {
+                        let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
+                        tensors.insert(stripped.to_string(), tensor);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if tensors.is_empty() {
+            return Err(LuminaError::MissingWeight("No Flux.1 / MMDiT weights found in checkpoint".to_string()));
+        }
+
+        Ok(VarBuilder::from_tensors(tensors, self.dtype, &self.device))
+    }
+
     pub fn unet_var_builder(&self) -> Result<VarBuilder<'static>> {
         let mut tensors = HashMap::new();
         let unet_prefix = "model.diffusion_model.";
@@ -259,6 +400,9 @@ impl<'a> WeightRouter<'a> {
                 let diffusers_key = translate_compvis_vae_key(compvis_key);
                 let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
                 tensors.insert(diffusers_key, tensor);
+            } else if let Some(stripped) = key.strip_prefix("vae.") {
+                let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
+                tensors.insert(stripped.to_string(), tensor);
             } else if key.starts_with("encoder.") || key.starts_with("decoder.") || key.starts_with("post_quant_conv.") {
                 let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
                 tensors.insert(key.clone(), tensor);
@@ -301,6 +445,8 @@ impl<'a> WeightRouter<'a> {
     pub fn clip_l_var_builder_on_device(&self, target_device: &Device, target_dtype: DType) -> Result<VarBuilder<'static>> {
         let mut tensors = HashMap::new();
         let prefixes = [
+            "text_encoders.clip_l.transformer.",
+            "text_encoders.clip_l.",
             "conditioner.embedders.0.transformer.",
             "conditioner.embedders.0.",
             "cond_stage_model.transformer.",
@@ -334,6 +480,33 @@ impl<'a> WeightRouter<'a> {
 
         if tensors.is_empty() {
             return Err(LuminaError::MissingWeight("No CLIP-L weights found in checkpoint".to_string()));
+        }
+
+        Ok(VarBuilder::from_tensors(tensors, target_dtype, target_device))
+    }
+
+    pub fn t5xxl_var_builder_on_device(&self, target_device: &Device, target_dtype: DType) -> Result<VarBuilder<'static>> {
+        let mut tensors = HashMap::new();
+        let prefixes = [
+            "text_encoders.t5xxl.transformer.",
+            "text_encoders.t5xxl.",
+            "conditioner.embedders.1.transformer.",
+            "conditioner.embedders.1.",
+            "t5xxl.",
+        ];
+
+        for key in self.archive.keys() {
+            for prefix in &prefixes {
+                if let Some(suffix) = key.strip_prefix(*prefix) {
+                    let tensor = self.archive.get_tensor(key, target_device, target_dtype)?;
+                    tensors.insert(suffix.to_string(), tensor);
+                    break;
+                }
+            }
+        }
+
+        if tensors.is_empty() {
+            return Err(LuminaError::MissingWeight("No T5-XXL weights found in checkpoint".to_string()));
         }
 
         Ok(VarBuilder::from_tensors(tensors, target_dtype, target_device))
