@@ -222,8 +222,8 @@ impl DoubleStreamBlock {
         let k = Tensor::cat(&[&k_txt, &k_img], 1)?;
         let v = Tensor::cat(&[&v_txt, &v_img], 1)?;
 
-        // 5. Joint Attention Computation (Standard high-precision SDPA)
-        let attn_out = self.standard_sdpa(&q, &k, &v)?;
+        // 5. Joint Attention Computation (FlashAttention-2 fast path or F32 SDPA fallback)
+        let attn_out = self.sdpa(&q, &k, &v)?;
 
         let attn_out = attn_out.reshape((b, txt_len + img_len, d))?;
 
@@ -293,6 +293,27 @@ impl DoubleStreamBlock {
         let ctx = probs.matmul(&v_f32)?;
 
         ctx.transpose(1, 2)?.contiguous()?.to_dtype(orig_dtype)?.reshape((b, seq, h, d))
+    }
+
+    /// Scaled dot-product attention with an optional FlashAttention-2 fast path (F16/BF16 on CUDA).
+    ///
+    /// **Manette**: `FLUX_FLASH_ATTN` (default `0`).
+    /// - `0` → always `standard_sdpa` (F32 fallback, model-safe, slower).
+    /// - `1` → use `candle_flash_attn` when available, else fall back to `standard_sdpa`.
+    ///
+    /// Flash runs in the input dtype and is only taken on CUDA. Any error safely falls back.
+    fn sdpa(&self, q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "flash-attn")]
+        {
+            let use_flash = std::env::var("FLUX_FLASH_ATTN").ok().map(|s| s == "1").unwrap_or(false);
+            if use_flash && q.device().is_cuda() && (q.dtype() == candle_core::DType::F16 || q.dtype() == candle_core::DType::BF16) {
+                let out = flash_attn(q, k, v, self.scale as f32, false);
+                if let Ok(out) = out {
+                    return Ok(out);
+                }
+            }
+        }
+        self.standard_sdpa(q, k, v)
     }
 }
 
@@ -400,8 +421,8 @@ impl SingleStreamBlock {
             (q, k)
         };
 
-        // 2. Self-Attention (computed in F32 for stability)
-        let attn_out = self.standard_sdpa(&q, &k, &v)?;
+        // 2. Self-Attention (FlashAttention-2 fast path or F32 SDPA fallback)
+        let attn_out = self.sdpa(&q, &k, &v)?;
 
         let attn_out = attn_out.reshape((b, seq, d))?;
 
@@ -430,5 +451,26 @@ impl SingleStreamBlock {
         let ctx = probs.matmul(&v_f32)?;
 
         ctx.transpose(1, 2)?.contiguous()?.to_dtype(orig_dtype)?.reshape((b, seq, h, d))
+    }
+
+    /// Scaled dot-product attention with an optional FlashAttention-2 fast path (F16/BF16 on CUDA).
+    ///
+    /// **Manette**: `FLUX_FLASH_ATTN` (default `0`).
+    /// - `0` → always `standard_sdpa` (F32 fallback, model-safe, slower).
+    /// - `1` → use `candle_flash_attn` when available, else fall back to `standard_sdpa`.
+    ///
+    /// Flash runs in the input dtype and is only taken on CUDA. Any error safely falls back.
+    fn sdpa(&self, q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "flash-attn")]
+        {
+            let use_flash = std::env::var("FLUX_FLASH_ATTN").ok().map(|s| s == "1").unwrap_or(false);
+            if use_flash && q.device().is_cuda() && (q.dtype() == candle_core::DType::F16 || q.dtype() == candle_core::DType::BF16) {
+                let out = flash_attn(q, k, v, self.scale as f32, false);
+                if let Ok(out) = out {
+                    return Ok(out);
+                }
+            }
+        }
+        self.standard_sdpa(q, k, v)
     }
 }

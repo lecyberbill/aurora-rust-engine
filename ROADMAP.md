@@ -200,3 +200,24 @@ Bringing **FLUX.2-Klein-4B** (distilled 4-step MMDiT, 3.88B params, 5 double / 2
 `target\release\test_flux_inference.exe "G:\models\flux\flux2Klein_4b.safetensors" 4 "a golden retriever dog sitting in a flower meadow, sharp detailed photo"`.
 
 **Output**: `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` — clean, photorealistic.
+
+### 🚀 Milestone 10b: MMDiT Performance — FlashAttention-2 manette (COMPLETED)
+
+A systematic profiling pass (VAE, block streaming, weight dequantisation, attention vs. linear) identified the
+denoising transformer compute as the real bottleneck. A **modular FlashAttention-2 manette** was added so
+libraries can pick the right attention backend per use case:
+
+- [x] **`sdpa()` manette** in both `DoubleStreamBlock` and `SingleStreamBlock` (`src/diffusion/dit/blocks.rs`).
+  - `FLUX_FLASH_ATTN=0` (default) → F32 `standard_sdpa` (model-safe, slower). **Unchanged behaviour**.
+  - `FLUX_FLASH_ATTN=1` → `candle_flash_attn::flash_attn` fast path (F16/BF16 on CUDA), with a safe
+    auto-fallback to F32 SDPA on any error (wrong dtype/backend). Still compiles cleanly **without** the
+    `flash-attn` cargo feature.
+  - Measured parity vs F32 path: `max_abs ≈ 0.021`, `mean_abs ≈ 0.0013` (imperceptible).
+- [x] **~2.0x speedup** on Flux.2-Klein-4B: 2.47 s vs 4.87 s per denoising step; full 4-step render drops
+  from **21 s → ~11.7 s** (VAE 1.47 s unchanged). Also verified ~2.8x on the `fluxKlein4BPro` checkpoint.
+- [x] **Streaming/weight-cache manettes evaluated & rejected**: caching blocks in FP8-resident or F16-CPU
+  gave *zero* measurable gain (the checkpoint's FP8→F16 dequantisation is already hidden by the OS page cache),
+  and a full F16 VRAM cache causes WDDM paging on 12 GB. Conclusion: the transformer compute, not block
+  streaming, is the bottleneck. Removed the dead cache manette code to keep the library lean.
+- [x] Verified the F32 fallback path is fully intact: rendering without flash produces identical-quality images
+  (21 s denoise), confirming no regression risk when the manette is off.
