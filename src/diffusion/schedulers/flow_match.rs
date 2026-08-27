@@ -53,24 +53,46 @@ impl FlowMatchEulerScheduler {
         self.step_index = 0;
         let mut sigmas = Vec::with_capacity(num_steps + 1);
 
-        // Linear interpolation for mu between (256, base_shift) and (4096, max_shift)
-        let x1: f64 = 256.0;
-        let x2: f64 = 4096.0;
-        let m = (self.config.max_shift - self.config.base_shift) / (x2 - x1);
-        let b = self.config.base_shift - m * x1;
-        let mu = (m * (image_seq_len as f64) + b).clamp(self.config.min_shift, self.config.max_shift);
-        let exp_mu = mu.exp();
+        // Official Flux.2 get_schedule: mu = compute_empirical_mu(image_seq_len, num_steps)
+        let exp_mu = if self.config.shift == 2.02 {
+            let a1: f64 = 8.73809524e-05;
+            let b1: f64 = 1.89833333;
+            let a2: f64 = 0.00016927;
+            let b2: f64 = 0.45666666;
+            let seq = image_seq_len as f64;
+            let mu = if image_seq_len > 4300 {
+                a2 * seq + b2
+            } else {
+                let m_200 = a2 * seq + b2;
+                let m_10 = a1 * seq + b1;
+                let a = (m_200 - m_10) / 190.0;
+                let b = m_200 - 200.0 * a;
+                a * (num_steps as f64) + b
+            };
+            mu.exp()
+        } else if self.config.shift > 0.0 {
+            self.config.shift
+        } else {
+            // Linear interpolation for mu between (256, base_shift) and (4096, max_shift)
+            let x1: f64 = 256.0;
+            let x2: f64 = 4096.0;
+            let m = (self.config.max_shift - self.config.base_shift) / (x2 - x1);
+            let b = self.config.base_shift - m * x1;
+            let mu = (m * (image_seq_len as f64) + b).clamp(self.config.min_shift, self.config.max_shift);
+            mu.exp()
+        };
 
+        // Exact Flux.2 get_schedule: timesteps = linspace(1, 0, num_steps + 1),
+        // then sigma = exp(mu) / (exp(mu) + (1/t - 1)^1). The terminal sigma is included
+        // by the linspace endpoint (t=0 -> sigma=0).
         for i in 0..=num_steps {
             let t = 1.0 - (i as f64 / num_steps as f64);
-            if t <= 0.0 {
-                sigmas.push(0.0);
-            } else if t >= 1.0 {
-                sigmas.push(1.0);
+            let shifted_t = if t <= 0.0 {
+                0.0
             } else {
-                let shifted_t = exp_mu / (exp_mu + (1.0 / t - 1.0));
-                sigmas.push(shifted_t);
-            }
+                exp_mu / (exp_mu + (1.0 / t - 1.0))
+            };
+            sigmas.push(shifted_t);
         }
 
         let mut timesteps = Vec::with_capacity(num_steps);

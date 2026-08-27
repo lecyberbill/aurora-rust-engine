@@ -13,6 +13,12 @@ outputs/*.png
 *.pt
 *.onnx
 
+# Local text-tokenizer JSON shards (large; downloaded/bundled at runtime)
+qwen_tokenizer.json
+
+# One-off differential dump scripts
+dump_single_block_diff.py
+
 # IDE & OS
 .vscode/
 .idea/

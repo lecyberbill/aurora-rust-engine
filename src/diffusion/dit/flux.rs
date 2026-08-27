@@ -50,6 +50,21 @@ impl FluxConfig {
         }
     }
 
+    /// Flux.2 Klein 4B configuration (5 double blocks, 20 single blocks, shared modulation)
+    pub fn klein_4b() -> Self {
+        Self {
+            in_channels: 128, // 32 latent channels * 2x2 patchify
+            out_channels: 128,
+            hidden_size: 3072,
+            num_heads: 24,
+            num_double_blocks: 5,
+            num_single_blocks: 20,
+            mlp_ratio: 6, // 3072 * 6 = 18432
+            theta: 2000.0,
+            guidance_embed: false,
+        }
+    }
+
     /// Stable Diffusion 3.5 Large (24 DoubleStreamBlocks, 1536 hidden dim)
     pub fn sd35_large() -> Self {
         Self {
@@ -138,11 +153,19 @@ impl FluxTransformer {
 
     /// Construct FluxTransformer in Streaming Mode (< 100MB VRAM header footprint)
     pub fn new_streaming(config: FluxConfig, vb: VarBuilder) -> Result<Self> {
-        let img_in = linear(config.in_channels, config.hidden_size, vb.pp("img_in"))?;
-        let txt_in = linear(4096, config.hidden_size, vb.pp("txt_in"))?;
+        let linear_layer = |in_d: usize, out_d: usize, path: VarBuilder| -> Result<Linear> {
+            linear(in_d, out_d, path.clone()).or_else(|_| candle_nn::linear_no_bias(in_d, out_d, path))
+        };
+
+        let img_in = linear_layer(config.in_channels, config.hidden_size, vb.pp("img_in"))?;
+        let txt_in_dim = if config.in_channels == 128 { 7680 } else { 4096 };
+        let txt_in = linear_layer(txt_in_dim, config.hidden_size, vb.pp("txt_in"))?;
 
         let time_embedder = TimestepEmbedder::new(config.hidden_size, 256, vb.pp("time_in"))?;
-        let vector_in = match (linear(768, config.hidden_size, vb.pp("vector_in.in_layer")), linear(config.hidden_size, config.hidden_size, vb.pp("vector_in.out_layer"))) {
+        let vector_in = match (
+            linear_layer(768, config.hidden_size, vb.pp("vector_in.in_layer")),
+            linear_layer(config.hidden_size, config.hidden_size, vb.pp("vector_in.out_layer")),
+        ) {
             (Ok(in_l), Ok(out_l)) => Some((in_l, out_l)),
             _ => None,
         };
@@ -152,8 +175,8 @@ impl FluxTransformer {
             None
         };
 
-        let final_mod = linear(config.hidden_size, config.hidden_size * 2, vb.pp("final_layer.adaLN_modulation.1"))?;
-        let final_linear = linear(config.hidden_size, config.out_channels, vb.pp("final_layer.linear"))?;
+        let final_mod = linear_layer(config.hidden_size, config.hidden_size * 2, vb.pp("final_layer.adaLN_modulation.1"))?;
+        let final_linear = linear_layer(config.hidden_size, config.out_channels, vb.pp("final_layer.linear"))?;
 
         Ok(Self {
             img_in,
@@ -197,14 +220,20 @@ impl FluxTransformer {
         let mut img_h = self.img_in.forward(img)?;
         let mut txt_h = self.txt_in.forward(txt)?;
 
-        // Compute 3D Rotary Position Embeddings (RoPE)
+        // Compute 3D/4D Rotary Position Embeddings (RoPE)
         let txt_len = txt_h.dim(1)?;
         let img_seq = img_h.dim(1)?;
         let patch_side = (img_seq as f64).sqrt() as usize;
+        let axes_dim = if self.config.in_channels == 128 {
+            vec![32, 32, 32, 32]
+        } else {
+            vec![16, 56, 56]
+        };
         let (freqs_cos, freqs_sin) = crate::diffusion::dit::embeddings::create_flux_rope_embeddings(
             txt_len,
             patch_side,
             patch_side,
+            &axes_dim,
             self.config.theta,
             img.device(),
         )?;

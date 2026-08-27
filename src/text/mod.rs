@@ -2,8 +2,10 @@
 
 pub mod clip;
 pub mod open_clip;
+pub mod qwen;
 pub mod t5;
 
 pub use clip::ClipTextEncoder;
 pub use open_clip::OpenClipTextEncoder;
+pub use qwen::Qwen3TextEncoder;
 pub use t5::T5TextEncoder;

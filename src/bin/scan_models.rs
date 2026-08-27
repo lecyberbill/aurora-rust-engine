@@ -3,35 +3,40 @@
 use std::fs;
 use std::path::Path;
 
-fn scan_dir(dir_path: &str) {
-    println!("🔍 Scanning: {}", dir_path);
-    let p = Path::new(dir_path);
-    if !p.exists() {
-        println!("   [-] Directory does not exist: {}", dir_path);
-        return;
-    }
-
+fn scan_recursive(p: &Path, depth: usize) {
+    if depth > 4 { return; }
     if let Ok(entries) = fs::read_dir(p) {
         for entry in entries.flatten() {
             let path = entry.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
             if path.is_file() {
-                let size_mb = entry.metadata().map(|m| m.len() as f64 / (1024.0 * 1024.0)).unwrap_or(0.0);
-                println!("   • [FILE] {:<50} ({:.2} MB / {:.2} GB)", path.file_name().unwrap_or_default().to_string_lossy(), size_mb, size_mb / 1024.0);
+                let ext = path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
+                if ext == "safetensors" || ext == "json" || ext == "gguf" || ext == "bin" || ext == "pt" || name.contains("token") || name.contains("qwen") || name.contains("vae") {
+                    let size_mb = entry.metadata().map(|m| m.len() as f64 / (1024.0 * 1024.0)).unwrap_or(0.0);
+                    let indent = "  ".repeat(depth);
+                    println!("{}• {:<60} ({:.2} MB)", indent, path.display(), size_mb);
+                }
             } else if path.is_dir() {
-                println!("   📁 [DIR]  {}", path.file_name().unwrap_or_default().to_string_lossy());
+                if !name.starts_with('.') && name != "target" && name != "node_modules" && name != "venv" && name != "__pycache__" {
+                    let indent = "  ".repeat(depth);
+                    println!("{}📁 {}", indent, path.display());
+                    scan_recursive(&path, depth + 1);
+                }
             }
         }
     }
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let target = if args.len() > 1 {
+        args[1].clone()
+    } else {
+        "D:\\image_to_text\\Qpyt_image_gen".to_string()
+    };
     println!("================================================================================");
-    println!("📂 Aurora Model Scanner for Flux.1 and SD3");
+    println!("📂 Aurora Deep Scanner: {}", target);
     println!("================================================================================\n");
 
-    scan_dir("G:\\models\\flux");
-    println!();
-    scan_dir("G:\\models\\SD3");
-    println!();
-    scan_dir("G:\\models\\checkpoints");
+    scan_recursive(Path::new(&target), 0);
 }

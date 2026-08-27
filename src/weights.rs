@@ -403,7 +403,7 @@ impl<'a> WeightRouter<'a> {
             } else if let Some(stripped) = key.strip_prefix("vae.") {
                 let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
                 tensors.insert(stripped.to_string(), tensor);
-            } else if key.starts_with("encoder.") || key.starts_with("decoder.") || key.starts_with("post_quant_conv.") {
+            } else if key.starts_with("encoder.") || key.starts_with("decoder.") || key.starts_with("post_quant_conv.") || key.starts_with("bn.") {
                 let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
                 tensors.insert(key.clone(), tensor);
             }

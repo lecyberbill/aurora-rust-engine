@@ -78,25 +78,33 @@ impl DoubleStreamBlock {
         let scale = 1.0 / (head_dim as f64).sqrt();
         let mlp_dim = dim * mlp_ratio;
 
+        let linear_layer = |in_d: usize, out_d: usize, path: VarBuilder| -> Result<Linear> {
+            linear(in_d, out_d, path.clone()).or_else(|_| candle_nn::linear_no_bias(in_d, out_d, path))
+        };
+
         // Image stream layers
-        let img_qkv = linear(dim, dim * 3, vb.pp("img_attn.qkv"))?;
+        let img_qkv = linear_layer(dim, dim * 3, vb.pp("img_attn.qkv"))?;
         let img_q_norm = RMSNorm::new(head_dim, vb.pp("img_attn.norm.query_norm")).ok();
         let img_k_norm = RMSNorm::new(head_dim, vb.pp("img_attn.norm.key_norm")).ok();
-        let img_proj = linear(dim, dim, vb.pp("img_attn.proj"))?;
+        let img_proj = linear_layer(dim, dim, vb.pp("img_attn.proj"))?;
         let img_mlp = (
-            linear(dim, mlp_dim, vb.pp("img_mlp.0"))?,
-            linear(mlp_dim, dim, vb.pp("img_mlp.2"))?,
+            linear_layer(dim, mlp_dim, vb.pp("img_mlp.0"))
+                .or_else(|_| linear_layer(dim, 18432, vb.pp("img_mlp.0")))?,
+            linear_layer(mlp_dim, dim, vb.pp("img_mlp.2"))
+                .or_else(|_| linear_layer(9216, dim, vb.pp("img_mlp.2")))?,
         );
         let img_mod = AdaLNZeroModulation::new(dim, dim * 6, vb.pp("img_mod"))?;
 
         // Text stream layers
-        let txt_qkv = linear(dim, dim * 3, vb.pp("txt_attn.qkv"))?;
+        let txt_qkv = linear_layer(dim, dim * 3, vb.pp("txt_attn.qkv"))?;
         let txt_q_norm = RMSNorm::new(head_dim, vb.pp("txt_attn.norm.query_norm")).ok();
         let txt_k_norm = RMSNorm::new(head_dim, vb.pp("txt_attn.norm.key_norm")).ok();
-        let txt_proj = linear(dim, dim, vb.pp("txt_attn.proj"))?;
+        let txt_proj = linear_layer(dim, dim, vb.pp("txt_attn.proj"))?;
         let txt_mlp = (
-            linear(dim, mlp_dim, vb.pp("txt_mlp.0"))?,
-            linear(mlp_dim, dim, vb.pp("txt_mlp.2"))?,
+            linear_layer(dim, mlp_dim, vb.pp("txt_mlp.0"))
+                .or_else(|_| linear_layer(dim, 18432, vb.pp("txt_mlp.0")))?,
+            linear_layer(mlp_dim, dim, vb.pp("txt_mlp.2"))
+                .or_else(|_| linear_layer(9216, dim, vb.pp("txt_mlp.2")))?,
         );
         let txt_mod = AdaLNZeroModulation::new(dim, dim * 6, vb.pp("txt_mod"))?;
 
@@ -219,25 +227,33 @@ impl DoubleStreamBlock {
 
         let attn_out = attn_out.reshape((b, txt_len + img_len, d))?;
 
-        // 6. Split back into Text and Image streams
+        // 6. Split back into Text and Image streams: tokens 0..txt_len is Text, txt_len..total is Image
         let txt_attn = attn_out.narrow(1, 0, txt_len)?;
         let img_attn = attn_out.narrow(1, txt_len, img_len)?;
 
         // 7. Apply Attention Output Projection & Gated Residual (in F32 to preserve numerical dynamic range)
-        let img_attn_proj = self.img_proj.forward(&img_attn)?;
-        let img_gate1 = img_gate1.unsqueeze(1)?;
-        let img = (img.to_dtype(candle_core::DType::F32)? + img_attn_proj.to_dtype(candle_core::DType::F32)?.broadcast_mul(&img_gate1.to_dtype(candle_core::DType::F32)?)?)?.to_dtype(orig_dtype)?;
-
         let txt_attn_proj = self.txt_proj.forward(&txt_attn)?;
         let txt_gate1 = txt_gate1.unsqueeze(1)?;
         let txt = (txt.to_dtype(candle_core::DType::F32)? + txt_attn_proj.to_dtype(candle_core::DType::F32)?.broadcast_mul(&txt_gate1.to_dtype(candle_core::DType::F32)?)?)?.clamp(-50000.0f32, 50000.0f32)?.to_dtype(orig_dtype)?;
+
+        let img_attn_proj = self.img_proj.forward(&img_attn)?;
+        let img_gate1 = img_gate1.unsqueeze(1)?;
+        let img = (img.to_dtype(candle_core::DType::F32)? + img_attn_proj.to_dtype(candle_core::DType::F32)?.broadcast_mul(&img_gate1.to_dtype(candle_core::DType::F32)?)?)?.to_dtype(orig_dtype)?;
 
         // 8. MLP Forward Passes with AdaLN-Zero Gating: (1 + scale2) * LayerNorm(x) + shift2
         let img_norm2 = norm_layer(&img)?;
         let img_scale2 = (img_scale2.unsqueeze(1)? + 1.0)?;
         let img_shift2 = img_shift2.unsqueeze(1)?;
         let img_normed2 = img_norm2.broadcast_mul(&img_scale2)?.broadcast_add(&img_shift2)?;
-        let img_mlp_h = gelu_tanh(&self.img_mlp.0.forward(&img_normed2)?)?;
+        let img_h1 = self.img_mlp.0.forward(&img_normed2)?;
+        let img_mlp_h = if img_h1.dim(2)? == 18432 {
+            // SwiGLU activation for Klein
+            let gate = candle_nn::ops::silu(&img_h1.narrow(2, 0, 9216)?)?;
+            let val = img_h1.narrow(2, 9216, 9216)?;
+            (gate * val)?
+        } else {
+            gelu_tanh(&img_h1)?
+        };
         let img_mlp_out = self.img_mlp.1.forward(&img_mlp_h)?;
         let img_gate2 = img_gate2.unsqueeze(1)?;
         let img = (img.to_dtype(candle_core::DType::F32)? + img_mlp_out.to_dtype(candle_core::DType::F32)?.broadcast_mul(&img_gate2.to_dtype(candle_core::DType::F32)?)?)?.to_dtype(orig_dtype)?;
@@ -246,7 +262,15 @@ impl DoubleStreamBlock {
         let txt_scale2 = (txt_scale2.unsqueeze(1)? + 1.0)?;
         let txt_shift2 = txt_shift2.unsqueeze(1)?;
         let txt_normed2 = txt_norm2.broadcast_mul(&txt_scale2)?.broadcast_add(&txt_shift2)?;
-        let txt_mlp_h = gelu_tanh(&self.txt_mlp.0.forward(&txt_normed2)?)?;
+        let txt_h1 = self.txt_mlp.0.forward(&txt_normed2)?;
+        let txt_mlp_h = if txt_h1.dim(2)? == 18432 {
+            // SwiGLU activation for Klein
+            let gate = candle_nn::ops::silu(&txt_h1.narrow(2, 0, 9216)?)?;
+            let val = txt_h1.narrow(2, 9216, 9216)?;
+            (gate * val)?
+        } else {
+            gelu_tanh(&txt_h1)?
+        };
         let txt_mlp_out = self.txt_mlp.1.forward(&txt_mlp_h)?;
         let txt_gate2 = txt_gate2.unsqueeze(1)?;
         let txt = (txt.to_dtype(candle_core::DType::F32)? + txt_mlp_out.to_dtype(candle_core::DType::F32)?.broadcast_mul(&txt_gate2.to_dtype(candle_core::DType::F32)?)?)?.clamp(-50000.0f32, 50000.0f32)?.to_dtype(orig_dtype)?;
@@ -290,14 +314,20 @@ impl SingleStreamBlock {
         let head_dim = dim / heads;
         let scale = 1.0 / (head_dim as f64).sqrt();
         let mlp_dim = dim * mlp_ratio;
+        let linear_layer = |in_d: usize, out_d: usize, path: VarBuilder| -> Result<Linear> {
+            linear(in_d, out_d, path.clone()).or_else(|_| candle_nn::linear_no_bias(in_d, out_d, path))
+        };
 
         // In Flux.1, linear1 projects from dim (3072) to 3*dim (Q,K,V: 9216) + mlp_dim (12288) = 21504
-        let linear1 = linear(dim, dim * 3 + mlp_dim, vb.pp("linear1"))?;
+        // In Klein 4B, linear1 projects from 3072 to 27648
+        let linear1 = linear_layer(dim, dim * 3 + mlp_dim, vb.pp("linear1"))
+            .or_else(|_| linear_layer(dim, 27648, vb.pp("linear1")))?;
         let q_norm = RMSNorm::new(head_dim, vb.pp("norm.query_norm")).ok();
         let k_norm = RMSNorm::new(head_dim, vb.pp("norm.key_norm")).ok();
 
         // linear2 projects from dim (3072) + mlp_dim (12288) = 15360 back to dim (3072)
-        let linear2 = linear(dim + mlp_dim, dim, vb.pp("linear2"))?;
+        let linear2 = linear_layer(dim + mlp_dim, dim, vb.pp("linear2"))
+            .or_else(|_| linear_layer(12288, dim, vb.pp("linear2")))?;
         let modulation = AdaLNZeroModulation::new(dim, dim * 3, vb.pp("modulation"))?;
 
         Ok(Self {
@@ -338,7 +368,15 @@ impl SingleStreamBlock {
         // 1. Single-pass linear1 projection for Q, K, V and MLP
         let h1 = self.linear1.forward(&normed)?;
         let qkv = h1.narrow(2, 0, d * 3)?;
-        let mlp_h = gelu_tanh(&h1.narrow(2, d * 3, h1.dim(2)? - d * 3)?)?;
+        let mlp_raw = h1.narrow(2, d * 3, h1.dim(2)? - d * 3)?;
+        let mlp_h = if mlp_raw.dim(2)? == 18432 {
+            // SwiGLU for Klein SingleStreamBlock: 18432 -> 9216 (9216 + 3072 QKV = 12288 input to linear2)
+            let gate = candle_nn::ops::silu(&mlp_raw.narrow(2, 0, 9216)?)?;
+            let val = mlp_raw.narrow(2, 9216, 9216)?;
+            (gate * val)?
+        } else {
+            gelu_tanh(&mlp_raw)?
+        };
 
         let qkv = qkv.reshape((b, seq, 3, self.heads, self.head_dim))?;
         let mut q = qkv.narrow(2, 0, 1)?.squeeze(2)?;

@@ -68,6 +68,36 @@ impl SequentialBlockStreamer {
             }
         }
 
+        // Inject shared global modulations if block-local ones are absent (Klein architecture)
+        if !tensors.keys().any(|k| k.starts_with("img_mod")) {
+            let t_opt = self.archive.get_tensor("double_stream_modulation_img.lin.weight", &self.device, self.dtype)
+                .or_else(|_| self.archive.get_tensor("model.diffusion_model.double_stream_modulation_img.lin.weight", &self.device, self.dtype));
+            if let Ok(t) = t_opt {
+                let t_slice = if t.dim(0)? == 18432 && t.dim(1)? == 3072 {
+                    t
+                } else if t.dim(0)? > 18432 {
+                    t.narrow(0, block_idx * 18432, 18432)?
+                } else {
+                    t
+                };
+                tensors.insert("img_mod.lin.weight".to_string(), t_slice);
+            }
+        }
+        if !tensors.keys().any(|k| k.starts_with("txt_mod")) {
+            let t_opt = self.archive.get_tensor("double_stream_modulation_txt.lin.weight", &self.device, self.dtype)
+                .or_else(|_| self.archive.get_tensor("model.diffusion_model.double_stream_modulation_txt.lin.weight", &self.device, self.dtype));
+            if let Ok(t) = t_opt {
+                let t_slice = if t.dim(0)? == 18432 && t.dim(1)? == 3072 {
+                    t
+                } else if t.dim(0)? > 18432 {
+                    t.narrow(0, block_idx * 18432, 18432)?
+                } else {
+                    t
+                };
+                tensors.insert("txt_mod.lin.weight".to_string(), t_slice);
+            }
+        }
+
         let vb = VarBuilder::from_tensors(tensors, self.dtype, &self.device);
         let block = DoubleStreamBlock::new(self.hidden_dim, self.num_heads, self.mlp_ratio, vb)?;
         block.forward(img, txt, temb, img_freqs_cos, img_freqs_sin, txt_freqs_cos, txt_freqs_sin)
@@ -99,6 +129,23 @@ impl SequentialBlockStreamer {
                 let t = self.archive.get_tensor(key, &self.device, self.dtype)
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 tensors.insert(suffix.to_string(), t);
+            }
+        }
+
+        // Inject shared single modulation if block-local modulation is absent (Klein architecture)
+        // single_stream_modulation.lin.weight is [9216, 3072] (3 params * 3072 = 9216 for SingleStreamBlock)
+        if !tensors.keys().any(|k| k.starts_with("modulation")) {
+            let t_opt = self.archive.get_tensor("single_stream_modulation.lin.weight", &self.device, self.dtype)
+                .or_else(|_| self.archive.get_tensor("model.diffusion_model.single_stream_modulation.lin.weight", &self.device, self.dtype));
+            if let Ok(t) = t_opt {
+                let t_slice = if t.dim(0)? == 9216 && t.dim(1)? == 3072 {
+                    t
+                } else if t.dim(0)? > 9216 {
+                    t.narrow(0, block_idx * 9216, 9216)?
+                } else {
+                    t
+                };
+                tensors.insert("modulation.lin.weight".to_string(), t_slice);
             }
         }
 

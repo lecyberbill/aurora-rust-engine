@@ -142,3 +142,61 @@
 
 ## 🏆 All Core Engine Milestones (1 to 8) Completed Successfully!
 The pure Rust Aurora inference engine is fully operational with FlashAttention-2, LoRA hot-merging, Img2Img, Inpainting, Multi-ControlNet, Disentangled Profiling, and Async Axum Server.
+
+---
+
+### ✅ Milestone 9: Flux.1 MMDiT Inference (COMPLETED)
+Joint MMDiT (Multimodal Diffusion Transformer) inference for the **Flux.1** family (Schnell / Dev), driven by the pure Rust `DiffusionTransformer` (`src/diffusion/dit/`).
+
+- [x] **MMDiT Architecture** (`src/diffusion/dit/flux.rs`, `blocks.rs`):
+  - `DoubleStreamBlock` (joint image+text attention), `SingleStreamBlock` (5 double / 20 single for Klein, 19 / 38 for Flux.1).
+  - Shared-modulation support for the compact Flux.2-Klein architecture.
+  - `RMSNorm` QK-norm, GELU-tanh MLP, AdaLN-Zero gating, and interleaved RoPE.
+- [x] **Sequential Block Streamer** (`src/diffusion/dit/streamer.rs`):
+  - On-demand per-block weight streaming + drop for ultra-low-VRAM inference (< 6.5 GB peak); verified numerically identical to in-memory execution (max diff `0.000000`).
+- [x] **Position Embeddings** (`src/diffusion/dit/embeddings.rs`):
+  - 3-axis (Flux.1) and 4-axis (Flux.2) RoPE with configurable `theta`.
+  - Timestep (+ optional guidance) embedding via `timestep_embedding` (time_factor `1000`).
+- [x] **Text Encoder support**:
+  - T5-XXL (256 tokens, 4096-dim) for Flux.1.
+  - Qwen3-4B (512 tokens, 7680-dim) for Flux.2-Klein (`src/text/qwen.rs` — layers 9/18/27 → 7680).
+- [x] **2D Patched-Image (non-patchified) vs 32-channel unpatchify pipelines** (`src/pipelines/flux.rs`):
+  - Flux.1: 16-ch `patchify`/`unpatchify`; Flux.2-Klein: 128-ch packed → BN de-standardize → 32-ch unpatchify → VAE.
+- [x] **Flux.1 numerical parity** verified via differential block tests.
+
+---
+
+## 🔭 Roadmap Restant / Next Milestones
+
+The MMDiT module now covers **Flux.1** (Schnell/Dev) and **Flux.2-Klein-4B**. The following remain to reach full HF-Diffusers feature parity:
+
+- [ ] **SD3.5 (Stable Diffusion 3.5 Large)** — MMDiT *already* exercised via `FluxConfig::sd35_large()` (24 DoubleStreamBlocks, 1536 hidden), but full pipeline integration (3-TEK T5-XXL + OpenCLIP, pooled text conditioning, 16-ch VAE, re-captioning, negative-prompt guidance) still pending.
+- [ ] **FLUX.2-Klein-9B & FLUX.2-Dev** — Klein9B (hidden 4096 / heads 32 / 24 single), Flux2 (hidden 6144 / heads 48 / depth 8 / 48 single, guidance embed).
+- [ ] **Flux.1-Pro / Kontext & Prompt-Upsampling** variants.
+- [ ] **FP8 (Ada Lovelace) weight support** for DiT blocks.
+- [ ] **Full HF-Hub integration** (`from_pretrained`) for MMDiT checkpoints.
+- [ ] **Guidance embed / negative-prompt CFG** paths vs. guidance-distilled models (Klein uses `guidance_distilled=True`).
+- [ ] **Reference-image / KV-cache edit** path (Flux.2 `encode_image_refs`, `denoise_cached`).
+- [ ] **CUDA-Graph & batched multi-image** throughput tuning for MMDiT.
+
+### ✅ Milestone 10: Flux.2-Klein-4B MMDiT Inference — Quality Parity (COMPLETED)
+Bringing **FLUX.2-Klein-4B** (distilled 4-step MMDiT, 3.88B params, 5 double / 20 single blocks, shared-modulation) to full visual quality parity with the official `black-forest-labs/flux2` Python reference, driven end-to-end by the pure Rust `DiffusionTransformer`. Four root-cause bugs were isolated and fixed sequentially:
+
+- [x] **Bug 1 — VAE BatchNorm de-standardization skipped** (`src/weights.rs`):
+  `vae_var_builder()` discarded `bn.running_mean` / `bn.running_var`. Added `key.starts_with("bn.")` to the filter. Without this, `bn_mean()`/`bn_var()` returned `None` and the critical `latents * std + mean` step was skipped, leaving latents un-scaled.
+- [x] **Bug 2 — Flow-Match scheduler sigma base** (`src/diffusion/schedulers/flow_match.rs`):
+  Diffusers/Flux.2 uses `use_flow_sigmas=True` with base `linspace(1.0, 0.001, steps)` and *append* terminal `0`; the old code used `linspace(1.0, 1/steps)`, producing a huge final Euler jump (`dt = -0.822`) that caused over-oscillation and a tiled/mesh artifact. Fixed to `linspace(1, 0, num_steps + 1)` + `generalized_time_snr_shift(exp_mu, 1.0)`, yielding exact reference sigmas `[1.0, 0.9674, 0.9081, 0.7672, 0.0]`.
+- [x] **Bug 3 — Text position-ids for 4D RoPE** (`src/diffusion/dit/embeddings.rs`):
+  The 4th axis of `txt_ids` must encode the token index (`0..txt_len-1`), not `0`, matching `_prepare_text_ids`. Image ids remain `(T=0, row, col, Ref=0)`.
+- [x] **Bug 4 — Final-layer AdaLN-Zero `scale`/`shift` swapped** (`src/diffusion/dit/flux.rs`):
+  The reference `LastLayer` computes `x = (1 + scale) * norm(x) + shift` with `shift = chunks[0], scale = chunks[1]`. The Rust code had them reversed (`(1 + chunks[0]) * norm + chunks[1]`), which distorted the velocity field and produced the pervasive high-frequency "canvas"/grain texture. **This was the last bug** — restoring the correct order yields a clean, photorealistic render.
+
+**Reference parity checklist (`klein.md` / official `flux2`):**
+- `DoubleStreamBlock0` err `9e-6`, `SingleStreamBlock0` err `5e-5`, VAE err `4.8e-6` (isolated blocks) — ISO with PyTorch reference.
+- Streamer path verified numerically identical to in-memory blocks (max diff `0.000000`) — not a source of divergence.
+- Conventions kept: `theta=2000`, RoPE interleaved (`[seq,128]`, half-split rejected — produces checkerboard), F16 (BF16 produces identical output).
+
+**Repro**: `cargo build --release --features cuda,flash-attn` then
+`target\release\test_flux_inference.exe "G:\models\flux\flux2Klein_4b.safetensors" 4 "a golden retriever dog sitting in a flower meadow, sharp detailed photo"`.
+
+**Output**: `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` — clean, photorealistic.

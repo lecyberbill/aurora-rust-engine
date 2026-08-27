@@ -6,7 +6,12 @@ use std::fs::File;
 use std::collections::BTreeSet;
 
 fn main() -> anyhow::Result<()> {
-    let klein_path = "G:\\models\\flux\\fluxKleinFP8_flux2Klein4bFp8.safetensors";
+    let args: Vec<String> = std::env::args().collect();
+    let klein_path = if args.len() > 1 {
+        args[1].clone()
+    } else {
+        "G:\\models\\flux\\flux2Klein_4b.safetensors".to_string()
+    };
     println!("================================================================================");
     println!("🔍 Inspecting Flux.2 Klein 4B FP8: {}", klein_path);
     println!("================================================================================");
@@ -35,7 +40,14 @@ fn main() -> anyhow::Result<()> {
 
     println!("📊 Total Tensors: {} | Total Parameters: {:.2} Billion", st.tensors().len(), total_params as f64 / 1e9);
     println!("📁 Root Prefixes: {:?}", prefixes);
-    println!("🧱 Block Count: {} DoubleStreamBlocks | {} SingleStreamBlocks", double_block_count, single_block_count);
+
+    let mut keys: Vec<String> = st.tensors().iter().map(|(k, _)| k.to_string()).collect();
+    keys.sort();
+    println!("\n📋 Complete Tensor Names List ({} tensors):", keys.len());
+    for k in &keys {
+        let view = st.tensor(k)?;
+        println!("   • {:<60} {:?}", k, view.shape());
+    }
 
     Ok(())
 }
