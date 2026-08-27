@@ -48,6 +48,20 @@ impl FluxPipeline {
     pub fn set_qwen3(&mut self, qwen: crate::text::Qwen3TextEncoder) {
         self.qwen3 = Some(qwen);
     }
+
+    /// Enable the FlashAttention-2 fast path for MMDiT blocks (~2x faster denoise on CUDA).
+    ///
+    /// Runs attention in F16/BF16 via `candle_flash_attn`, automatically falling back to the
+    /// model-safe F32 SDPA path on any error (unsupported dtype/backend). Requires the
+    /// `--features flash-attn` cargo feature; otherwise the F32 path is used regardless.
+    pub fn enable_flash_attn(&mut self) {
+        unsafe { std::env::set_var("FLUX_FLASH_ATTN", "1") };
+    }
+
+    /// Disable the FlashAttention-2 fast path and use the stable F32 attention (default).
+    pub fn disable_flash_attn(&mut self) {
+        unsafe { std::env::set_var("FLUX_FLASH_ATTN", "0") };
+    }
     /// Load Flux.1 pipeline with Sequential Block Streaming (< 6.5 GB VRAM peak)
     pub fn from_single_file_streaming<P: AsRef<Path>>(checkpoint_path: P, device: Device) -> crate::error::Result<Self> {
         let is_cuda = device.is_cuda();
