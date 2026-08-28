@@ -91,8 +91,26 @@ impl FluxPipeline {
         println!("📦 Constructing Pure Rust Flux Streaming Transformer (Ultra-Low VRAM)...");
         let has_guidance = archive.keys().any(|k| k.contains("guidance_in"));
         let is_klein = archive.keys().any(|k| k.contains("double_stream_modulation") || k.contains("img_attn.norm.key_norm.scale"));
-        
-        let config = if is_klein {
+
+        let config = if is_klein && has_guidance {
+            // Flux.2-Dev also carries `double_stream_modulation` + `single_stream_modulation`,
+            // but has a guidance embedder and 48 single blocks -> it is NOT a Klein model.
+            let mut max_s = 0;
+            for k in archive.keys() {
+                if let Some(rest) = k.strip_prefix("single_blocks.") {
+                    if let Some(idx_str) = rest.split('.').next() {
+                        if let Ok(idx) = idx_str.parse::<usize>() { max_s = max_s.max(idx + 1); }
+                    }
+                }
+            }
+            if max_s > 40 {
+                println!("✨ Detected Flux.2-Dev Scaled checkpoint (guidance embed, 8 double / 48 single, 6144 hidden)!");
+                FluxConfig::flux2_dev()
+            } else {
+                println!("✨ Detected Flux.1-Dev checkpoint (with guidance embedder)!");
+                FluxConfig::dev()
+            }
+        } else if is_klein {
             // Count double blocks and single blocks:
             let mut max_d = 0;
             let mut max_s = 0;
@@ -262,8 +280,8 @@ impl FluxPipeline {
         let w_patches = (params.width + 15) / 16;
         let image_seq_len = h_patches * w_patches;
 
-        if in_channels == 128 {
-            // Flux.2 Klein standard shift
+        if in_channels == 128 && !self.transformer.config.guidance_embed {
+            // Flux.2-Klein (distilled, no guidance): calibrated empirical mu (adjusts Euler curve)
             self.scheduler = FlowMatchEulerScheduler::new(FlowMatchEulerConfig {
                 shift: 2.02,
                 base_shift: 0.5,
@@ -287,8 +305,15 @@ impl FluxPipeline {
 
         // 1. Text conditioning: encode prompt via Mistral-3, Qwen3, or T5-XXL
         let raw_txt_tokens = if let Some(ref mut mistral) = self.mistral {
-            println!("📝 Encoding prompt with Mistral-3-Small (Layers 9, 18, 27 -> 15360/12288 dim)...");
-            let mistral_emb = mistral.encode(params.prompt, 512)?;
+            let txt_dim = if in_channels == 128 {
+                if self.transformer.config.hidden_size == 4096 { 4096 } else { 5120 } // 9B narrow, Dev full
+            } else { 0 };
+            println!("📝 Encoding prompt with Mistral-3-Small (Layers 9, 18, 27 -> intended {} dim)...", if txt_dim == 0 { 15360 } else { txt_dim });
+            let mistral_emb = if txt_dim == 0 {
+                mistral.encode(params.prompt, 512)?
+            } else {
+                mistral.encode_dim(params.prompt, 512, txt_dim)?
+            };
             mistral_emb.to_device(&self.device)?.to_dtype(self.dtype)?
         } else if let Some(ref mut qwen) = self.qwen3 {
             println!("📝 Encoding prompt with Qwen3 (512 tokens)...");
@@ -304,10 +329,9 @@ impl FluxPipeline {
         };
 
         // Align txt_tokens dimension to transformer txt_in input dimension if needed
-        let expected_txt_dim = if self.transformer.config.hidden_size == 4096 && self.transformer.config.in_channels == 128 {
-            12288 // Flux.2-Klein 9B
-        } else if self.transformer.config.in_channels == 128 {
-            7680 // Flux.2-Klein 4B
+        let expected_txt_dim = if self.transformer.config.in_channels == 128 {
+            // Flux.2: dim = 3 * layer-gather width. 9B: 3*4096 = 12288, Dev: 3*5120 = 15360.
+            self.transformer.txt_in_expected_in() // uses the actual txt_in weight width
         } else {
             4096 // Flux.1
         };

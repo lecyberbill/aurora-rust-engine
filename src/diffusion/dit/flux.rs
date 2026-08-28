@@ -17,6 +17,9 @@ pub struct FluxConfig {
     pub mlp_ratio: usize,
     pub theta: f64,
     pub guidance_embed: bool,
+    /// RoPE axis widths. Sum must equal `hidden_size / num_heads` (128 typically).
+    /// Flux.2-Klein-4B/Dev use 4 axes `[32,32,32,32]`; Flux.2-Klein-9B uses 3 axes `[16,56,56]`.
+    pub axes_dim: Vec<usize>,
 }
 
 impl FluxConfig {
@@ -32,6 +35,7 @@ impl FluxConfig {
             mlp_ratio: 4,
             theta: 10_000.0,
             guidance_embed: false,
+            axes_dim: vec![16, 56, 56],
         }
     }
 
@@ -47,6 +51,7 @@ impl FluxConfig {
             mlp_ratio: 4,
             theta: 10_000.0,
             guidance_embed: true,
+            axes_dim: vec![16, 56, 56],
         }
     }
 
@@ -62,6 +67,7 @@ impl FluxConfig {
             mlp_ratio: 6, // 3072 * 6 = 18432
             theta: 2000.0,
             guidance_embed: false,
+            axes_dim: vec![32, 32, 32, 32], // Flux.2-Klein-4B (4 axes, validated)
         }
     }
 
@@ -77,6 +83,7 @@ impl FluxConfig {
             mlp_ratio: 6,
             theta: 2000.0,
             guidance_embed: false,
+            axes_dim: vec![32, 32, 32, 32], // Flux.2-Klein-9B (4 axes; 3D [16,56,56] produced a flat grey render)
         }
     }
 
@@ -92,6 +99,7 @@ impl FluxConfig {
             mlp_ratio: 6,
             theta: 2000.0,
             guidance_embed: true,
+            axes_dim: vec![32, 32, 32, 32], // Flux.2-Dev (4 axes, validated by recognisable fox render)
         }
     }
 
@@ -107,6 +115,7 @@ impl FluxConfig {
             mlp_ratio: 4,
             theta: 10_000.0,
             guidance_embed: false,
+            axes_dim: vec![16, 56, 56], // SD3.5 (3 axes)
         }
     }
 }
@@ -253,15 +262,11 @@ impl FluxTransformer {
         let mut img_h = self.img_in.forward(img)?;
         let mut txt_h = self.txt_in.forward(txt)?;
 
-        // Compute 3D/4D Rotary Position Embeddings (RoPE)
+        // Compute 3D/4D Rotary Position Embeddings (RoPE) from the model's declared axes
         let txt_len = txt_h.dim(1)?;
         let img_seq = img_h.dim(1)?;
         let patch_side = (img_seq as f64).sqrt() as usize;
-        let axes_dim = if self.config.in_channels == 128 {
-            vec![32, 32, 32, 32]
-        } else {
-            vec![16, 56, 56]
-        };
+        let axes_dim = self.config.axes_dim.clone();
         let (freqs_cos, freqs_sin) = crate::diffusion::dit::embeddings::create_flux_rope_embeddings(
             txt_len,
             patch_side,
@@ -361,5 +366,12 @@ impl FluxTransformer {
 
     pub fn config(&self) -> &FluxConfig {
         &self.config
+    }
+
+    /// The input feature width expected by `txt_in` (w - 1 from the weight shape).
+    /// Flux.2-Klein-9B: 12288, Flux.2-Dev: 15360, Flux.1: 4096 (T5) / 7680 (Qwen3-4B).
+    pub fn txt_in_expected_in(&self) -> usize {
+        let w = self.txt_in.weight();
+        if w.dims().len() == 2 { w.dims()[1] } else { 0 }
     }
 }

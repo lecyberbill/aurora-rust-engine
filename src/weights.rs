@@ -12,9 +12,10 @@ use std::sync::Arc;
 use crate::error::{LuminaError, Result};
 
 pub struct SafeTensorsArchive {
-    _mmap: Option<Arc<Mmap>>,
-    tensors: HashMap<String, (safetensors::Dtype, Vec<usize>, usize, usize)>,
-    raw_data: *const u8,
+    // One mmap per shard file; a single-file archive simply contains one entry.
+    _mmaps: Vec<Arc<Mmap>>,
+    // Tensor name -> (dtype, shape, shard_idx, offset_into_shard, byte_len)
+    tensors: HashMap<String, (safetensors::Dtype, Vec<usize>, usize, usize, usize)>,
 }
 
 unsafe impl Send for SafeTensorsArchive {}
@@ -22,29 +23,42 @@ unsafe impl Sync for SafeTensorsArchive {}
 
 impl SafeTensorsArchive {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = File::open(path)?;
-        let mmap = unsafe { Mmap::map(&file)? };
-        let mmap_arc = Arc::new(mmap);
-        let raw_data = mmap_arc.as_ptr();
-        let bytes: &[u8] = &mmap_arc;
+        Self::open_shards(&[path.as_ref().to_path_buf()])
+    }
 
-        let st = SafeTensors::deserialize(bytes)?;
-        let mut tensors = HashMap::new();
-
-        for (name, view) in st.tensors() {
-            let data_offset = view.data().as_ptr() as usize - raw_data as usize;
-            let data_len = view.data().len();
-            tensors.insert(
-                name,
-                (view.dtype(), view.shape().to_vec(), data_offset, data_len),
-            );
+    /// Open a set of shard files (HF multi-file checkpoints) as a single logical archive.
+    /// Each tensor must live entirely in exactly one shard; the archive resolves which.
+    pub fn open_shards<P: AsRef<Path>>(paths: &[P]) -> Result<Self> {
+        if paths.is_empty() {
+            return Err(LuminaError::Config("open_shards: no shard paths provided".into()));
         }
 
-        Ok(Self {
-            _mmap: Some(mmap_arc),
-            tensors,
-            raw_data,
-        })
+        let mut mmaps = Vec::with_capacity(paths.len());
+        let mut tensors = HashMap::new();
+
+        for (shard_idx, p) in paths.iter().enumerate() {
+            let file = File::open(p)?;
+            let mmap = unsafe { Mmap::map(&file)? };
+            let mmap_arc = Arc::new(mmap);
+            let raw_data = mmap_arc.as_ptr();
+            let bytes: &[u8] = &mmap_arc;
+
+            let st = SafeTensors::deserialize(bytes)?;
+            for (name, view) in st.tensors() {
+                let data_offset = view.data().as_ptr() as usize - raw_data as usize;
+                let data_len = view.data().len();
+                let meta = (view.dtype(), view.shape().to_vec(), shard_idx, data_offset, data_len);
+                let dup = tensors.insert(name.clone(), meta).is_some();
+                if dup {
+                    return Err(LuminaError::Config(format!(
+                        "open_shards: duplicate tensor '{}' across shards", name
+                    )));
+                }
+            }
+            mmaps.push(mmap_arc);
+        }
+
+        Ok(Self { _mmaps: mmaps, tensors })
     }
 
     pub fn tensor_names(&self) -> Vec<String> {
@@ -52,12 +66,15 @@ impl SafeTensorsArchive {
     }
 
     pub fn get_tensor(&self, name: &str, device: &Device, dtype: DType) -> Result<Tensor> {
-        let (st_dtype, shape, offset, len) = self
+        let (st_dtype, shape, shard_idx, offset, len) = self
             .tensors
             .get(name)
             .ok_or_else(|| LuminaError::MissingWeight(format!("Tensor '{}' not found in archive", name)))?;
 
-        let slice = unsafe { std::slice::from_raw_parts(self.raw_data.add(*offset), *len) };
+        let shard = self._mmaps.get(*shard_idx)
+            .ok_or_else(|| LuminaError::Config(format!("Shard index {} not present", shard_idx)))?;
+        let raw_data = shard.as_ptr();
+        let slice = unsafe { std::slice::from_raw_parts(raw_data.add(*offset), *len) };
         let tensor = match st_dtype {
             safetensors::Dtype::F32 => {
                 let data: &[f32] = bytemuck_cast_slice(slice);
@@ -135,8 +152,9 @@ impl SafeTensorsArchive {
             };
 
             if let Some(scale_key) = found_scale {
-                let (s_dtype, s_shape, s_offset, s_len) = &self.tensors[&scale_key];
-                let s_slice = unsafe { std::slice::from_raw_parts(self.raw_data.add(*s_offset), *s_len) };
+                let (s_dtype, s_shape, s_shard_idx, s_offset, s_len) = &self.tensors[&scale_key];
+                let s_shard = self._mmaps.get(*s_shard_idx).ok_or_else(|| LuminaError::Config("shard missing".into()))?;
+                let s_slice = unsafe { std::slice::from_raw_parts(s_shard.as_ptr().add(*s_offset), *s_len) };
                 let scale_val = match s_dtype {
                     safetensors::Dtype::F32 => {
                         let data: &[f32] = bytemuck_cast_slice(s_slice);
@@ -173,6 +191,12 @@ impl SafeTensorsArchive {
 
     pub fn contains(&self, name: &str) -> bool {
         self.tensors.contains_key(name)
+    }
+
+    /// Return the raw (stored) dtype and shape of a tensor without decoding it.
+    /// Useful to distinguish FP8 / NVFP4 / BF16 checkpoints for diagnostics.
+    pub fn raw_info(&self, name: &str) -> Option<(safetensors::Dtype, Vec<usize>)> {
+        self.tensors.get(name).map(|(d, s, _, _, _)| (*d, s.clone()))
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &String> {

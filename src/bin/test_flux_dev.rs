@@ -1,4 +1,4 @@
-// [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: Verification of Flux.2-Klein-9B Streaming Inference under < 8GB VRAM
+// [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: Verification of Flux.2-Dev (guidance) Streaming Inference
 
 use candle_core::{DType, Device, Result};
 use std::path::{Path, PathBuf};
@@ -10,15 +10,13 @@ use aurora_rust_engine::diffusion::vae_flux::FluxVaeDecoder;
 
 fn main() -> Result<()> {
     println!("================================================================================");
-    println!("🚀 AURORA PURE RUST FLUX.2-KLEIN-9B STREAMING VERIFICATION");
-    println!("   • 4096 Hidden Dim, 8 Double Blocks, 24 Single Blocks");
-    println!("   • Ultra-Low VRAM Sequential Streamer (< 7.5 GB Peak VRAM)");
+    println!("🚀 AURORA PURE RUST FLUX.2-DEV STREAMING VERIFICATION");
+    println!("   • 6144 Hidden, 8 Double Blocks, 48 Single Blocks, Guidance Embed");
     println!("================================================================================");
 
     let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-    let checkpoint = "G:\\models\\flux\\flux-2-klein-9b.safetensors";
-    let mistral_path = "G:\\models\\clip\\mistral3SmallFlux2Fp4_mistral3SmallFlux2.safetensors";
-    let qwen8b_dir = "G:\\models\\clip\\Qwen3-8B";
+    let checkpoint = "G:\\models\\flux\\flux2DevFp8Scaled_fp8Scaled.safetensors";
+    let mistral_path = "G:\\models\\clip\\mistral_3_small_flux2_fp8.safetensors";
     let vae_path = "G:\\models\\vae\\flux2-vae.safetensors";
 
     if !Path::new(checkpoint).exists() {
@@ -26,37 +24,24 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    println!("\n📥 Loading Flux.2-Klein-9B Checkpoint with Sequential Streamer...");
+    println!("\n📥 Loading Flux.2-Dev Checkpoint with Sequential Streamer...");
     let t_start = Instant::now();
     let mut pipeline = FluxPipeline::from_single_file_streaming(checkpoint, device.clone())
         .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-
     pipeline.enable_flash_attn();
 
-    // Attach Qwen3-8B text encoder (Flux.2-Klein-9B official) from multi-file shards.
-    if Path::new(qwen8b_dir).is_dir() {
-        let mut shards: Vec<String> = std::fs::read_dir(qwen8b_dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|x| x == "safetensors").unwrap_or(false))
-            .map(|p| p.to_string_lossy().to_string())
-            .collect();
-        shards.sort();
-        println!("📥 Attaching Qwen3-8B Text Encoder from {} shards...", shards.len());
-        let refs: Vec<&str> = shards.iter().map(|s| s.as_str()).collect();
-        let archive = SafeTensorsArchive::open_shards(&refs)
-            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-        let qwen = aurora_rust_engine::text::Qwen3TextEncoder::from_archive(
-            &archive,
-            Some(std::path::Path::new("qwen_tokenizer.json")),
-            &Device::Cpu,
+    if Path::new(mistral_path).exists() {
+        println!("📥 Attaching Mistral-3-Small Prompt Encoder (CPU, FP8 dequant)...");
+        let mistral = aurora_rust_engine::text::Mistral3TextEncoder::from_safetensors(
+            mistral_path,
+            Some(std::path::Path::new("mistral_tokenizer.json")),
+            Device::Cpu,
             DType::F16,
         ).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-        pipeline.set_qwen3(qwen);
-        println!("✅ Qwen3-8B Text Encoder Attached!");
+        pipeline.set_mistral(mistral);
+        println!("✅ Mistral-3-Small Attached!");
     }
 
-    // Attach Flux 2 VAE Decoder
     if Path::new(vae_path).exists() {
         println!("📥 Attaching Flux.2 32-Channel VAE Decoder (GPU/F16)...");
         let vae_archive = SafeTensorsArchive::open(PathBuf::from(vae_path))
@@ -72,14 +57,14 @@ fn main() -> Result<()> {
     println!("✅ Pipeline initialization completed in {:.2}s", t_start.elapsed().as_secs_f64());
 
     let prompt = "a gorgeous portrait of an arctic fox with sapphire blue eyes in a mystical snowy forest at twilight, cinematic lighting, 8k";
-    println!("\n🎨 Generating Image with FLUX.2-Klein-9B (4 Steps)...");
+    println!("\n🎨 Generating Image with FLUX.2-Dev (8 Steps, Guidance)...");
     println!("📝 Prompt: \"{}\"", prompt);
 
     let params = DiffusionParams {
         prompt,
         negative_prompt: None,
-        num_steps: 4,
-        guidance_scale: 1.0,
+        num_steps: 20,
+        guidance_scale: 3.5,
         width: 1024,
         height: 1024,
         seed: 42,
@@ -88,12 +73,12 @@ fn main() -> Result<()> {
     let (image, metrics) = pipeline.generate_with_metrics(params, None::<fn(usize, usize, &candle_core::Tensor)>)
         .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
-    let out_path = "outputs/flux_showcase/flux_klein_9b_1024_seed42.png";
+    let out_path = "outputs/flux_showcase/flux_dev_1024_seed42.png";
     image.save(out_path)
         .map_err(|e| candle_core::Error::Msg(format!("Failed to save output: {}", e)))?;
 
     println!("\n================================================================================");
-    println!("🎉 FLUX.2-Klein-9B Generation Finished Successfully!");
+    println!("🎉 FLUX.2-Dev Generation Finished Successfully!");
     println!("📁 Output Path: {}", out_path);
     println!("📊 Performance Telemetry:");
     println!("   • Active Steps:           {}", metrics.unet_steps);
@@ -102,6 +87,5 @@ fn main() -> Result<()> {
     println!("   • VAE & Unpatchify:       {:.2}s", metrics.vae_decode_ms / 1000.0);
     println!("   • Total Wall-Clock:       {:.2}s", metrics.total_wallclock_ms / 1000.0);
     println!("================================================================================\n");
-
     Ok(())
 }

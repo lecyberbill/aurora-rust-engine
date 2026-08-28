@@ -319,6 +319,7 @@ impl Mistral3TextEncoder {
             let scale_key = format!("{}{}.weight_scale", p, proj_name);
             let scale2_key = format!("{}{}.weight_scale_2", p, proj_name);
 
+            // NVFP4 (packed U8 + block scales + per-tensor scale) — Flux.2 official mistral-alpha
             if let (Ok(qx), Ok(bs), Ok(s2)) = (
                 archive.get_tensor(&weight_key, &Device::Cpu, DType::U8),
                 archive.get_tensor(&scale_key, &Device::Cpu, DType::F32),
@@ -326,18 +327,14 @@ impl Mistral3TextEncoder {
             ) {
                 let s2_val = s2.to_vec0::<f32>()?;
                 let dequant = dequantize_nvfp4(&qx, &bs, s2_val, dtype, device)?;
-                Ok(Linear::new(dequant, None))
-            } else if let (Ok(w_f32), Ok(s)) = (
-                archive.get_tensor(&weight_key, device, DType::F32),
-                archive.get_tensor(&scale_key, device, DType::F32),
-            ) {
-                let dequant = w_f32.broadcast_mul(&s)?.to_dtype(dtype)?;
-                Ok(Linear::new(dequant, None))
-            } else {
-                let w = archive.get_tensor(&weight_key, device, dtype)
-                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-                Ok(Linear::new(w, None))
+                return Ok(Linear::new(dequant, None));
             }
+
+            // FP8-E4M3 / F16 / BF16: get_tensor already dequantises FP8->F16 AND applies the
+            // per-tensor `weight_scale`. Do NOT multiply again (that would double-scale).
+            let w = archive.get_tensor(&weight_key, device, dtype)
+                .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+            Ok(Linear::new(w, None))
         };
 
         let q_proj = load_linear("self_attn.q_proj")?;
@@ -355,7 +352,17 @@ impl Mistral3TextEncoder {
     }
 
     /// Encode prompt and extract specified layer features (Layers 10, 20, 30) with on-demand layer streaming
+    /// Encode prompt and extract specified layer features (Layers 10, 20, 30) with on-demand layer streaming.
+    ///
+    /// `layer_dim` is the feature width kept per extracted layer: 4096 for Flux.2-Klein-9B
+    /// (3*4096 = 12288) and 5120 for Flux.2-Dev (3*5120 = 15360). Default behaviour (0) selects
+    /// the model's hidden width (5120) and produces 15360.
     pub fn encode(&self, prompt: &str, max_tokens: usize) -> Result<Tensor> {
+        self.encode_dim(prompt, max_tokens, 0)
+    }
+
+    /// Like [`encode`](Self::encode) but with an explicit per-layer output width.
+    pub fn encode_dim(&self, prompt: &str, max_tokens: usize, layer_dim: usize) -> Result<Tensor> {
         let tokenizer = self.tokenizer.as_ref().ok_or_else(|| {
             candle_core::Error::Msg("Mistral Tokenizer not loaded".to_string())
         })?;
@@ -393,11 +400,13 @@ impl Mistral3TextEncoder {
             }
         }
 
-        let l10 = l10.unwrap_or(h.clone()).narrow(2, 0, 4096)?;
-        let l20 = l20.unwrap_or(h.clone()).narrow(2, 0, 4096)?;
-        let l30 = l30.unwrap_or(h.clone()).narrow(2, 0, 4096)?;
+        let full_dim = h.dim(2)?;
+        let keep = if layer_dim == 0 { full_dim } else { layer_dim.min(full_dim) };
+        let l10 = l10.unwrap_or(h.clone()).narrow(2, 0, keep)?;
+        let l20 = l20.unwrap_or(h.clone()).narrow(2, 0, keep)?;
+        let l30 = l30.unwrap_or(h.clone()).narrow(2, 0, keep)?;
 
-        // Concat sliced layers 10, 20, 30 along channel dimension: [1, seq_len, 4096*3 = 12288]
+        // Concat sliced layers 10, 20, 30 along channel dimension: [1, seq_len, keep*3]
         Tensor::cat(&[&l10, &l20, &l30], 2)
     }
 
