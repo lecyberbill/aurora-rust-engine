@@ -4,7 +4,7 @@ use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{embedding, linear, Embedding, Linear, Module, VarBuilder};
 use tokenizers::Tokenizer;
 use std::path::Path;
-use crate::weights::SafeTensorsArchive;
+use crate::weights::{SafeTensorsArchive, WeightsSource};
 
 /// Auto-detected architecture spec for a Qwen3 text encoder, read from the checkpoint weights.
 ///
@@ -26,7 +26,7 @@ pub struct QwenTextConfig {
 
 impl QwenTextConfig {
     /// Infer the architecture from the checkpoint's actual weight shapes.
-    pub fn detect(archive: &SafeTensorsArchive) -> Result<Self> {
+    pub fn detect(archive: &dyn WeightsSource) -> Result<Self> {
         let err = |m: &str| candle_core::Error::Msg(format!("QwenTextConfig::detect: {}", m));
 
         // embed_tokens.weight -> [vocab_size, hidden_dim]
@@ -329,7 +329,7 @@ impl Qwen3TextEncoder {
     /// Build from a checkpoint archive: detect architecture, materialise the VarBuilder, and
     /// construct the encoder. This is the recommended entry point (handles 4B & 8B automatically).
     pub fn from_archive(
-        archive: &SafeTensorsArchive,
+        archive: &dyn WeightsSource,
         tokenizer_path: Option<&Path>,
         device: &Device,
         dtype: DType,
@@ -337,7 +337,7 @@ impl Qwen3TextEncoder {
         let config = QwenTextConfig::detect(archive)?;
         let mut tensors = std::collections::HashMap::new();
         for key in archive.keys() {
-            if let Ok(t) = archive.get_tensor(key, device, dtype) {
+            if let Ok(t) = archive.get_tensor(&key, device, dtype) {
                 tensors.insert(key.to_string(), t);
             }
         }

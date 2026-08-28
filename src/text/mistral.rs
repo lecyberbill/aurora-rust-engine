@@ -5,6 +5,8 @@ use candle_nn::{embedding, linear, Embedding, Linear, Module, VarBuilder};
 use tokenizers::Tokenizer;
 use std::path::Path;
 use std::collections::HashMap;
+use std::sync::Arc;
+use crate::weights::WeightsSource;
 
 /// Precomputed 16-entry Lookup Table for NVIDIA FP4 (E2M1) format
 const E2M1_LUT: [f32; 16] = [
@@ -284,7 +286,7 @@ impl MistralDecoderLayer {
 /// Pure Rust Mistral-3-Small Multi-Layer Text Encoder with Low-RAM Sequential Streaming
 pub struct Mistral3TextEncoder {
     embed_tokens: Embedding,
-    archive: std::sync::Arc<crate::weights::SafeTensorsArchive>,
+    archive: std::sync::Arc<dyn crate::weights::WeightsSource>,
     num_layers: usize,
     tokenizer: Option<Tokenizer>,
     device: Device,
@@ -419,7 +421,17 @@ impl Mistral3TextEncoder {
     ) -> Result<Self> {
         let archive = crate::weights::SafeTensorsArchive::open(path.as_ref().to_path_buf())
             .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        Self::from_weights(Arc::new(archive), tokenizer_path, device, dtype)
+    }
 
+    /// Build from any [`WeightsSource`] (safetensors single/multi-shard, or GGUF). This is the
+    /// format-agnostic entry point so the brick can be assembled from a chosen model origin.
+    pub fn from_weights(
+        archive: Arc<dyn WeightsSource>,
+        tokenizer_path: Option<&Path>,
+        device: Device,
+        dtype: DType,
+    ) -> Result<Self> {
         // 1. Embedding
         let embed_weight = archive.get_tensor("model.embed_tokens.weight", &device, dtype)
             .or_else(|_| archive.get_tensor("embed_tokens.weight", &device, dtype))
@@ -434,7 +446,7 @@ impl Mistral3TextEncoder {
 
         Ok(Self {
             embed_tokens,
-            archive: std::sync::Arc::new(archive),
+            archive,
             num_layers: 30,
             tokenizer,
             device,

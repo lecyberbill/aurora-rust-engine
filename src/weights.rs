@@ -7,9 +7,46 @@ use memmap2::Mmap;
 use safetensors::SafeTensors;
 use std::collections::HashMap;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use crate::error::{LuminaError, Result};
+
+/// Unified, format-agnostic access to model weights.
+///
+/// Every brick (text encoders, DiT transformer, VAE) consumes this trait rather than a concrete
+/// format struct. Implementations exist for single & multi-file **safetensors** archives and can be
+/// added for **GGUF** (llama.cpp) or any other container — so the caller assembles interchangeable
+/// parts without touching per-format code.
+pub trait WeightsSource: Send + Sync {
+    /// Decode a named tensor onto `device` at `dtype`. FP8 / NVFP4 / scaled-FP8 dequantisation is the
+    /// responsibility of the implementation.
+    fn get_tensor(&self, name: &str, device: &Device, dtype: DType) -> Result<Tensor>;
+
+    /// Whether a tensor with this exact name exists.
+    fn contains(&self, name: &str) -> bool;
+
+    /// Raw (stored) dtype and shape, without decoding. Useful for architecture detection.
+    fn raw_info(&self, name: &str) -> Option<(safetensors::Dtype, Vec<usize>)>;
+
+    /// All tensor names in this source.
+    fn keys(&self) -> Vec<String>;
+
+    /// Short human-readable description (e.g. "safetensors xN shards", "gguf").
+    fn describe(&self) -> String {
+        "weights".to_string()
+    }
+}
+
+/// Blanket impl so any `WeightsSource` can be consumed by reference (e.g. `&dyn WeightsSource`).
+impl<'a> WeightsSource for &'a dyn WeightsSource {
+    fn get_tensor(&self, name: &str, device: &Device, dtype: DType) -> Result<Tensor> {
+        (**self).get_tensor(name, device, dtype)
+    }
+    fn contains(&self, name: &str) -> bool { (**self).contains(name) }
+    fn raw_info(&self, name: &str) -> Option<(safetensors::Dtype, Vec<usize>)> { (**self).raw_info(name) }
+    fn keys(&self) -> Vec<String> { (**self).keys() }
+    fn describe(&self) -> String { (**self).describe() }
+}
 
 pub struct SafeTensorsArchive {
     // One mmap per shard file; a single-file archive simply contains one entry.
@@ -59,6 +96,21 @@ impl SafeTensorsArchive {
         }
 
         Ok(Self { _mmaps: mmaps, tensors })
+    }
+
+    /// Open every `*.safetensors` shard found in a directory (HuggingFace multi-file layout),
+    /// sorted by name for deterministic shard ordering. Returns an error if none are found.
+    pub fn open_shards_dir<P: AsRef<Path>>(dir: P) -> Result<Self> {
+        let mut shards: Vec<PathBuf> = std::fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("safetensors"))
+            .collect();
+        shards.sort();
+        if shards.is_empty() {
+            return Err(LuminaError::Config("open_shards_dir: no .safetensors shards found".into()));
+        }
+        Self::open_shards(&shards)
     }
 
     pub fn tensor_names(&self) -> Vec<String> {
@@ -819,4 +871,26 @@ fn translate_compvis_vae_key(key: &str) -> String {
     mapped = mapped.replace(".nin_shortcut.", ".conv_shortcut.");
 
     mapped
+}
+
+impl WeightsSource for SafeTensorsArchive {
+    fn get_tensor(&self, name: &str, device: &Device, dtype: DType) -> Result<Tensor> {
+        SafeTensorsArchive::get_tensor(self, name, device, dtype)
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        SafeTensorsArchive::contains(self, name)
+    }
+
+    fn raw_info(&self, name: &str) -> Option<(safetensors::Dtype, Vec<usize>)> {
+        SafeTensorsArchive::raw_info(self, name)
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.tensors.keys().cloned().collect()
+    }
+
+    fn describe(&self) -> String {
+        format!("safetensors ({} shards)", self._mmaps.len())
+    }
 }

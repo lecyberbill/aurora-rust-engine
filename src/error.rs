@@ -33,6 +33,9 @@ pub enum LuminaError {
 
     #[error("Pipeline error: {0}")]
     Pipeline(String),
+
+    #[error("{context}")]
+    Context { context: String, #[source] source: Box<LuminaError> },
 }
 
 pub type Result<T> = std::result::Result<T, LuminaError>;

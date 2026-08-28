@@ -3,6 +3,8 @@
 pub mod device;
 pub mod diffusion;
 pub mod error;
+pub mod gguf;
+pub mod hub;
 pub mod lora;
 pub mod pipelines;
 pub mod server;

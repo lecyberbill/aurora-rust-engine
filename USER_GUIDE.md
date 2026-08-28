@@ -108,7 +108,7 @@ fn main() -> anyhow::Result<()> {
 
     // Option A: Load from a local single-file checkpoint (.safetensors)
     let mut pipeline = StableDiffusionXLPipeline::from_single_file(
-        "G:/models/checkpoints/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors",
+        "<MODELS_DIR>/checkpoints/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors",
         device.clone(),
     )?;
 
@@ -122,6 +122,81 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
+#### Multi-Format Weight Bricks (`WeightsSource`)
+
+All model producers (text encoders, DiT transformer, VAE) read weights through a single
+format-agnostic trait, `WeightsSource`. You never hard-code a format; you pick a **brick** that
+implements the trait and hand it to the encoder. Every brick exposes the same methods —
+`get_tensor`, `contains`, `raw_info`, `keys`:
+
+```rust
+use aurora_rust_engine::weights::{SafeTensorsArchive, WeightsSource};
+use aurora_rust_engine::gguf::GgufWeights;
+use aurora_rust_engine::text::Qwen3TextEncoder;
+use candle_core::{Device, DType};
+
+// Brick 1 — single safeTensors file (.safetensors)
+let archive = SafeTensorsArchive::open("<MODELS_DIR>/qwen3_4b.safetensors")?;
+
+// Brick 2 — multi-shard safeTensors (HF checkpoint split into model-0000N-of-0000M.safetensors)
+// Open ALL *.safetensors in a directory as one logical archive, in sorted order.
+let archive = SafeTensorsArchive::open_shards_dir("<MODELS_DIR>/FLUX.2-klein-9B_text_encoder")?;
+// (or explicit list: SafeTensorsArchive::open_shards(&[a, b, c])?)
+
+// Brick 3 — GGUF (llama.cpp) quantized weights, dequantized on the fly
+let gguf = GgufWeights::open("<MODELS_DIR>/flux-unsloth-fp16.gguf")?;
+
+// All bricks share the trait, so the SAME encoder takes any of them:
+let qwen = Qwen3TextEncoder::from_archive(&archive, Some(tokenizer_path), &Device::Cpu, DType::F16)?;
+```
+
+The auto-detecting architecture (`QwenTextConfig::detect`, `MistralTextEncoder::from_weights`) reads
+shapes from whichever brick you hand it, so 4B (Qwen3-4B, 7680), 9B (Qwen3-8B, 12288) and Dev
+(Mistral-3-Small, 15360) are addressed uniformly.
+
+---
+
+### Model Origins (`ModelHub`) — Local, HuggingFace, Civitai
+
+`ModelHub` is the second brick that separates **where a model comes from** from **how it is read**.
+It resolves a `ModelOrigin` into local paths, downloading HF/mirror files when needed. Local paths
+(the Civitai workflow — the user points at a file already on disk) are used as-is with no download:
+
+```rust
+use aurora_rust_engine::hub::{ModelHub, ModelOrigin};
+use aurora_rust_engine::weights::SafeTensorsArchive;
+
+let hub = ModelHub::from_env()?;                 // respects HF_ENDPOINT / HF_HOME / HF_TOKEN
+let hub = ModelHub::with_cache_dir("<MODELS_DIR>/.cache")?;
+let hub = ModelHub::with_endpoint("https://hf-mirror.com", "<MODELS_DIR>/.cache")?; // Citai-like mirror
+
+// Origin A — a local file (e.g. downloaded from Civitai). No download, no network.
+let dir = hub.resolve(&ModelOrigin::Local("<MODELS_DIR>/community/model_v1.safetensors".into()))?;
+
+// Origin B — a HF (or mirror) repo, downloading any missing files into the cache.
+let dir = hub.resolve(&ModelOrigin::Hf {
+    repo: "Qwen/Qwen3-8B".into(),
+    files: vec!["model-00001-of-00005.safetensors".into(),
+                "model-00002-of-00005.safetensors".into(),
+                "model-00003-of-00005.safetensors".into(),
+                "model-00004-of-00005.safetensors".into(),
+                "model-00005-of-00005.safetensors".into()],
+    revision: None, // or Some("main" / a commit hash)
+})?;
+
+let archive = SafeTensorsArchive::open_shards_dir(&dir)?;
+```
+
+Environment controls (set them in your shell, no code change):
+- `HF_ENDPOINT` — any HuggingFace-compatible mirror (e.g. a Citai/CF mirror).
+- `HF_HOME` / `HF_HUB_CACHE` — where resolved files are cached.
+- `HF_TOKEN` — authenticate for gated or private repos.
+
+> **Design philosophy.** Aurora assembles bricks: an **origin** (`ModelHub`) supplies a path, a
+> **weight format** (`WeightsSource`) reads it, and an **encoder** consumes it. To support a new
+> community format you only implement `WeightsSource` once; to point at a new hub you only add a
+> `ModelOrigin` variant — nothing downstream changes.
 
 ---
 
@@ -239,7 +314,7 @@ use candle_core::Device;
 let device = Device::new_cuda(0)?;
 
 // 1. Load Flux.2-Klein Checkpoint with Sequential Block Streaming (< 7.5GB VRAM Peak)
-let mut flux_pipeline = FluxPipeline::from_single_file_streaming("G:\\models\\flux\\fluxKlein4BPro_v10.safetensors", device.clone())?;
+let mut flux_pipeline = FluxPipeline::from_single_file_streaming("<MODELS_DIR>/flux/fluxKlein4BPro_v10.safetensors", device.clone())?;
 flux_pipeline.enable_flash_attn();
 
 // 2. Attach Qwen3 Prompt Encoder and Flux.2 32-Channel VAE Decoder
@@ -260,6 +335,65 @@ let params = DiffusionParams {
 let (image, metrics) = flux_pipeline.generate_with_metrics(params, None::<fn(usize, usize, &candle_core::Tensor)>)?;
 image.save("flux_lion.png")?;
 ```
+
+#### Flux.2-Klein-9B (Qwen3-8B, multi-file shards)
+
+The **Flux.2-Klein-9B** model is auto-detected from its checkpoint key counts
+(8 double / 24 single blocks, 4096 hidden). Its official text encoder is **Qwen3-8B**
+(hidden 4096 -> **12288** conditioning dim), which ships as a **multi-file safetensors shard split**
+on HuggingFace. `aurora-rust-engine` loads every shard in a directory transparently:
+
+```rust
+use aurora_rust_engine::weights::SafeTensorsArchive;
+use aurora_rust_engine::text::Qwen3TextEncoder;
+
+// 1. Point at the directory containing HF shards (model-00001-of-0000N.safetensors, ...).
+//    All *.safetensors files are opened as one logical archive (no single-file checkpoints exist).
+let enc_dir = std::path::Path::new("<MODELS_DIR>/FLUX.2-klein-9B_text_encoder");
+let archive = SafeTensorsArchive::open_shards_dir(enc_dir)?;
+
+// 2. The architecture (hidden 4096, 36 layers, heads/kv, vocab 151936) and the 12288-dim
+//    text context (3 concatenated layers) are auto-detected from the weights — no hardcoding.
+let qwen8b = Qwen3TextEncoder::from_archive(&archive, Some(std::path::Path::new("qwen_tokenizer.json")),
+    &Device::Cpu, DType::F16)?;
+flux_pipeline.set_qwen3(qwen8b);
+
+// 3. Klein-9B is guidance-distilled, 4 steps, CFG 1.0 (like Klein-4B).
+let params = DiffusionParams {
+    prompt: "a gorgeous portrait of an arctic fox with sapphire blue eyes in a snowy forest at twilight, 8k",
+    negative_prompt: None,
+    num_steps: 4, guidance_scale: 1.0, width: 1024, height: 1024, seed: 42,
+};
+let (image, _) = flux_pipeline.generate_with_metrics(params, None::<fn(usize, usize, &candle_core::Tensor)>)?;
+image.save("flux_klein_9b_fox.png")?;
+```
+
+#### Flux.2-Dev (Mistral-3-Small, guidance)
+
+**Flux.2-Dev** is a *guidance* model (like Flux.1-Dev): it has a `guidance_in` embedder and 48 single
+blocks, so it is auto-detected distinctly from the Klein family. Its official text encoder is
+**Mistral-3-Small** (hidden 5120 -> **15360** conditioning dim = 3 layers preserved in full). It runs
+with a non-unit `guidance_scale` and typically 8-28 steps:
+
+```rust
+use aurora_rust_engine::text::Mistral3TextEncoder;
+
+let mistral = Mistral3TextEncoder::from_safetensors(
+    "<MODELS_DIR>/mistral_3_small_flux2_fp8.safetensors",
+    Some(std::path::Path::new("mistral_tokenizer.json")), Device::Cpu, DType::F16)?;
+flux_pipeline.set_mistral(mistral);
+
+let params = DiffusionParams {
+    prompt: "a gorgeous portrait of an arctic fox with sapphire blue eyes in a snowy forest at twilight, 8k",
+    negative_prompt: None,
+    num_steps: 20, guidance_scale: 3.5, width: 1024, height: 1024, seed: 42,
+};
+```
+
+> **Note** — Replace `<MODELS_DIR>` with your local models directory. The Rust library itself contains
+> no hardcoded paths; models are supplied at call time. The Dev pipeline currently renders a
+> recognisable fox with a residual "stained-glass" grain; Klein-4B/9B are fully photorealistic.
+> Dev polish is tracked in the ROADMAP.
 
 ---
 

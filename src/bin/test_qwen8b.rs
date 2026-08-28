@@ -8,11 +8,10 @@ fn main() -> anyhow::Result<()> {
     let dtype = DType::F16;
 
     let shards = [
-        "G:\\models\\clip\\Qwen3-8B\\model-00001-of-00005.safetensors",
-        "G:\\models\\clip\\Qwen3-8B\\model-00002-of-00005.safetensors",
-        "G:\\models\\clip\\Qwen3-8B\\model-00003-of-00005.safetensors",
-        "G:\\models\\clip\\Qwen3-8B\\model-00004-of-00005.safetensors",
-        "G:\\models\\clip\\Qwen3-8B\\model-00005-of-00005.safetensors",
+        "G:\\models\\clip\\FLUX.2-klein-9B_text_encoder\\model-00001-of-00004.safetensors",
+        "G:\\models\\clip\\FLUX.2-klein-9B_text_encoder\\model-00002-of-00004.safetensors",
+        "G:\\models\\clip\\FLUX.2-klein-9B_text_encoder\\model-00003-of-00004.safetensors",
+        "G:\\models\\clip\\FLUX.2-klein-9B_text_encoder\\model-00004-of-00004.safetensors",
     ];
     println!("📥 Loading Qwen3-8B from {} shards...", shards.len());
     let archive = SafeTensorsArchive::open_shards(&shards)?;

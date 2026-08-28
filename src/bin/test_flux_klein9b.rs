@@ -18,7 +18,7 @@ fn main() -> Result<()> {
     let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
     let checkpoint = "G:\\models\\flux\\flux-2-klein-9b.safetensors";
     let mistral_path = "G:\\models\\clip\\mistral3SmallFlux2Fp4_mistral3SmallFlux2.safetensors";
-    let qwen8b_dir = "G:\\models\\clip\\Qwen3-8B";
+    let qwen8b_dir = "G:\\models\\clip\\FLUX.2-klein-9B_text_encoder";
     let vae_path = "G:\\models\\vae\\flux2-vae.safetensors";
 
     if !Path::new(checkpoint).exists() {
@@ -35,16 +35,8 @@ fn main() -> Result<()> {
 
     // Attach Qwen3-8B text encoder (Flux.2-Klein-9B official) from multi-file shards.
     if Path::new(qwen8b_dir).is_dir() {
-        let mut shards: Vec<String> = std::fs::read_dir(qwen8b_dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|x| x == "safetensors").unwrap_or(false))
-            .map(|p| p.to_string_lossy().to_string())
-            .collect();
-        shards.sort();
-        println!("📥 Attaching Qwen3-8B Text Encoder from {} shards...", shards.len());
-        let refs: Vec<&str> = shards.iter().map(|s| s.as_str()).collect();
-        let archive = SafeTensorsArchive::open_shards(&refs)
+        println!("📥 Attaching Qwen3-8B Text Encoder from {} shards...", qwen8b_dir);
+        let archive = SafeTensorsArchive::open_shards_dir(qwen8b_dir)
             .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         let qwen = aurora_rust_engine::text::Qwen3TextEncoder::from_archive(
             &archive,
