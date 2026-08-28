@@ -79,6 +79,24 @@ impl FluxPipeline {
     pub fn disable_flash_attn(&mut self) {
         unsafe { std::env::set_var("FLUX_FLASH_ATTN", "0") };
     }
+
+    /// Build the Flux.2 scheduler config matching the model's family:
+    /// - guidance (Flux.2-Dev): keep the default static shift=3.0 schedule (empirically the
+    ///   calibrated Flux.1/Dev curve; experimentally dynamic shifting regressed quality).
+    /// - distilled (Flux.2-Klein-4B/9B): empirical-mu calibrated schedule.
+    fn flux2_scheduler_config(&self) -> FlowMatchEulerConfig {
+        if self.transformer.config.guidance_embed {
+            FlowMatchEulerConfig::default()
+        } else {
+            FlowMatchEulerConfig {
+                shift: 2.02,
+                base_shift: 0.5,
+                max_shift: 1.15,
+                min_shift: 0.5,
+                use_dynamic_shifting: false,
+            }
+        }
+    }
     /// Load Flux.1 pipeline with Sequential Block Streaming (< 6.5 GB VRAM peak)
     pub fn from_single_file_streaming<P: AsRef<Path>>(checkpoint_path: P, device: Device) -> crate::error::Result<Self> {
         let is_cuda = device.is_cuda();
@@ -280,14 +298,8 @@ impl FluxPipeline {
         let w_patches = (params.width + 15) / 16;
         let image_seq_len = h_patches * w_patches;
 
-        if in_channels == 128 && !self.transformer.config.guidance_embed {
-            // Flux.2-Klein (distilled, no guidance): calibrated empirical mu (adjusts Euler curve)
-            self.scheduler = FlowMatchEulerScheduler::new(FlowMatchEulerConfig {
-                shift: 2.02,
-                base_shift: 0.5,
-                max_shift: 1.15,
-                min_shift: 0.5,
-            });
+        if in_channels == 128 {
+            self.scheduler = FlowMatchEulerScheduler::new(self.flux2_scheduler_config());
         }
         self.scheduler.set_timesteps_with_seq_len(num_steps, image_seq_len)?;
 
@@ -499,12 +511,7 @@ impl FluxPipeline {
         let image_seq_len = h_patches * w_patches;
 
         if in_channels == 128 {
-            self.scheduler = FlowMatchEulerScheduler::new(FlowMatchEulerConfig {
-                shift: 2.02,
-                base_shift: 0.5,
-                max_shift: 1.15,
-                min_shift: 0.5,
-            });
+            self.scheduler = FlowMatchEulerScheduler::new(self.flux2_scheduler_config());
         }
         self.scheduler.set_timesteps_with_seq_len(num_steps, image_seq_len)?;
 
@@ -707,12 +714,7 @@ impl FluxPipeline {
         let image_seq_len = h_patches * w_patches;
 
         if in_channels == 128 {
-            self.scheduler = FlowMatchEulerScheduler::new(FlowMatchEulerConfig {
-                shift: 2.02,
-                base_shift: 0.5,
-                max_shift: 1.15,
-                min_shift: 0.5,
-            });
+            self.scheduler = FlowMatchEulerScheduler::new(self.flux2_scheduler_config());
         }
         self.scheduler.set_timesteps_with_seq_len(num_steps, image_seq_len)?;
 

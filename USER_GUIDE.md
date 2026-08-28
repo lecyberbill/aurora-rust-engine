@@ -63,6 +63,18 @@ cd aurora-rust-engine
 cargo build --release --features cuda,flash-attn
 ```
 
+#### Windows: building FlashAttention-2
+
+`candle-flash-attn` compiles CUDA kernels via `nvcc`, which requires the MSVC C/C++ compiler
+(`cl.exe`) on `PATH`. On Windows this is **not** set by default, so `nvcc` fails with
+`Cannot find compiler 'cl.exe' in PATH`. Activate the MSVC developer environment first:
+
+```bat
+@cmd /c "call ""C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"" x64 && set ""CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8"" && cargo build --release --features cuda,flash-attn"
+```
+
+Adjust the Visual Studio path / CUDA version to your install. On Linux/macOS no such step is needed.
+
 ---
 
 ## 3. Running the Interactive Web UI (Grio)

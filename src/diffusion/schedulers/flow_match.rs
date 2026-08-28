@@ -10,6 +10,10 @@ pub struct FlowMatchEulerConfig {
     pub base_shift: f64,
     pub max_shift: f64,
     pub min_shift: f64,
+    /// Resolution-dependent timestep shifting. When true, `mu` is interpolated between
+    /// `base_shift` (256 seq) and `max_shift` (4096 seq) based on the image sequence length — the
+    /// Flux.2-Dev behaviour. Grounded (non-distilled) models such as Flux.2-Dev require this.
+    pub use_dynamic_shifting: bool,
 }
 
 impl Default for FlowMatchEulerConfig {
@@ -19,6 +23,7 @@ impl Default for FlowMatchEulerConfig {
             base_shift: 0.5,
             max_shift: 1.15,
             min_shift: 0.5,
+            use_dynamic_shifting: false,
         }
     }
 }
@@ -54,7 +59,15 @@ impl FlowMatchEulerScheduler {
         let mut sigmas = Vec::with_capacity(num_steps + 1);
 
         // Official Flux.2 get_schedule: mu = compute_empirical_mu(image_seq_len, num_steps)
-        let exp_mu = if self.config.shift == 2.02 {
+        let exp_mu = if self.config.use_dynamic_shifting {
+            // Flux.2-Dev: resolution-dependent mu = get_lin_function(base_shift, max_shift)(seq_len).
+            let x1: f64 = 256.0;
+            let x2: f64 = 4096.0;
+            let m = (self.config.max_shift - self.config.base_shift) / (x2 - x1);
+            let b = self.config.base_shift - m * x1;
+            let mu = (m * (image_seq_len as f64) + b).clamp(self.config.min_shift, self.config.max_shift);
+            mu.exp()
+        } else if self.config.shift == 2.02 {
             let a1: f64 = 8.73809524e-05;
             let b1: f64 = 1.89833333;
             let a2: f64 = 0.00016927;

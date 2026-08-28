@@ -16,19 +16,19 @@ fn main() -> Result<()> {
     println!("================================================================================");
 
     let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-    let checkpoint = "G:\\models\\flux\\flux-2-klein-9b.safetensors";
+    let checkpoint = std::env::var("CKPT").unwrap_or_else(|_| "G:\\models\\flux\\flux-2-klein-9b.safetensors".into());
     let mistral_path = "G:\\models\\clip\\mistral3SmallFlux2Fp4_mistral3SmallFlux2.safetensors";
     let qwen8b_dir = "G:\\models\\clip\\FLUX.2-klein-9B_text_encoder";
     let vae_path = "G:\\models\\vae\\flux2-vae.safetensors";
 
-    if !Path::new(checkpoint).exists() {
+    if !Path::new(&checkpoint).exists() {
         eprintln!("[-] Checkpoint not found: {}", checkpoint);
         return Ok(());
     }
 
     println!("\n📥 Loading Flux.2-Klein-9B Checkpoint with Sequential Streamer...");
     let t_start = Instant::now();
-    let mut pipeline = FluxPipeline::from_single_file_streaming(checkpoint, device.clone())
+    let mut pipeline = FluxPipeline::from_single_file_streaming(&checkpoint, device.clone())
         .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
     pipeline.enable_flash_attn();
@@ -80,8 +80,8 @@ fn main() -> Result<()> {
     let (image, metrics) = pipeline.generate_with_metrics(params, None::<fn(usize, usize, &candle_core::Tensor)>)
         .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
-    let out_path = "outputs/flux_showcase/flux_klein_9b_1024_seed42.png";
-    image.save(out_path)
+    let out_path = std::env::var("OUT").unwrap_or_else(|_| "outputs/flux_showcase/flux_klein_9b_1024_seed42.png".into());
+    image.save(&out_path)
         .map_err(|e| candle_core::Error::Msg(format!("Failed to save output: {}", e)))?;
 
     println!("\n================================================================================");

@@ -408,7 +408,9 @@ impl Mistral3TextEncoder {
         let l20 = l20.unwrap_or(h.clone()).narrow(2, 0, keep)?;
         let l30 = l30.unwrap_or(h.clone()).narrow(2, 0, keep)?;
 
-        // Concat sliced layers 10, 20, 30 along channel dimension: [1, seq_len, keep*3]
+        // Concat sliced layers 10, 20, 30 along channel dimension: [1, seq_len, keep*3].
+        // NOTE: Flux.2-Dev feeds Mistral-3 hidden states at their NATIVE amplitude (~rms 0.4) — the
+        // text projection (context_embedder) was trained on these raw values. Do NOT normalise.
         Tensor::cat(&[&l10, &l20, &l30], 2)
     }
 
