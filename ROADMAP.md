@@ -179,7 +179,9 @@ The MMDiT module now covers **Flux.1** (Schnell/Dev) and **Flux.2-Klein-4B**. Th
 
 ---
 
-### ✅ Milestone 11: Scaling to FLUX.2-Klein-9B & FLUX.2-Dev (COMPLETED)
+---
+
+### 🔬 Milestone 11: Scaling to FLUX.2-Klein-9B & FLUX.2-Dev (IN PROGRESS / ACTIVE CALIBRATION)
 Enabling execution of large-scale MMDiT models on modest VRAM (< 8GB) using the sequential block streamer, automatic architecture dimensioning, and zero-WDDM-paging execution:
 - [x] **Architectural Profiles & Auto-Detection** (`src/pipelines/flux.rs` & `src/diffusion/dit/flux.rs`):
   - **Flux.2-Klein-9B**: `hidden_dim = 4096`, `num_heads = 32`, `num_double_blocks = 8`, `num_single_blocks = 24`, `mlp_ratio = 6` (SwiGLU `24576 / 12288`), text input projection `12288 -> 4096`.
@@ -189,10 +191,12 @@ Enabling execution of large-scale MMDiT models on modest VRAM (< 8GB) using the 
   - Direct zero-copy loading of FP8 (`F8_E4M3` / `F8_E5M2`) Safetensors weights into CPU host memory with per-block streaming and `weight_scale` dequantisation into CUDA F16.
 - [x] **Dynamic VRAM Budgeting**:
   - Sequential block streamer bounds resident peak VRAM to **< 7.5 GB** during execution of 9B models (`test_flux_klein9b.rs` runs smoothly on single consumer GPU).
+- [ ] **Visual Parity & Artifact Convergence**:
+  - Investigating visual quality on Klein-9B and Flux.2-Dev checkpoints (current inference produces high-frequency grain texture; mathematical calibration of 9B text conditioning and modulation scale in progress).
 
 ---
 
-### ✅ Milestone 12: FLUX.2 Img2Img & Inpainting / Outpainting Pipeline (COMPLETED)
+### 🔬 Milestone 12: FLUX.2 Img2Img & Inpainting / Outpainting Pipeline (IN PROGRESS / ARCHITECTURE READY)
 Extending MMDiT image generation with full contextual image manipulation:
 - [x] **Pure Rust 32-Channel & 16-Channel `FluxVaeEncoder`** (`src/diffusion/vae_flux.rs`):
   - Complete 4-stage DownEncoder (`128->128->256->512->512`), asymmetric zero-padding `[0, 1, 0, 1]` downsampling convs, mid-block self-attention, and `quant_conv` projection.
@@ -205,15 +209,15 @@ Extending MMDiT image generation with full contextual image manipulation:
     $$x_0 = \frac{\text{patchify}(\text{encode}(x)) - \mu_{\text{bn}}}{\sqrt{\sigma^2_{\text{bn}} + 10^{-4}}}$$
   - Flow Matching Euler noise interpolation at $t_{\text{start}} = \lfloor N \cdot (1 - \text{strength}) \rfloor$:
     $$x_{\text{start}} = (1 - \sigma(t_{\text{start}})) \cdot x_0 + \sigma(t_{\text{start}}) \cdot \epsilon_{\text{noise}}$$
-  - Validated end-to-end with photorealistic lion transformation (`flux2_img2img_lion_crown.png`).
 - [x] **FLUX.2 Inpainting & Mask Preservation** (`src/pipelines/flux.rs` : `generate_inpaint`):
   - Area-averaged latent mask downsampling with in-step background latent re-injection:
     $$z_t = (1 - M) \odot z_{\text{orig}, t} + M \odot z_{\text{denoised}, t}$$
-  - Validated with targeted crown synthesis preserving unmasked pixels at 100% fidelity (`flux2_inpaint_lion_crown.png`).
+- [ ] **End-to-End Visual Quality on Flux.2 Models**:
+  - Full end-to-end photorealistic validation on Flux.2 family awaiting final Klein-9B / Dev conditioning convergence.
 
 ---
 
-### ✅ Milestone 10: Flux.2-Klein-4B MMDiT Inference — Quality Parity (COMPLETED)
+### ✅ Milestone 10: Flux.2-Klein-4B MMDiT Inference — Quality Parity (COMPLETED & VERIFIED)
 Bringing **FLUX.2-Klein-4B** (distilled 4-step MMDiT, 3.88B params, 5 double / 20 single blocks, shared-modulation) to full visual quality parity with the official `black-forest-labs/flux2` Python reference, driven end-to-end by the pure Rust `DiffusionTransformer`. Four root-cause bugs were isolated and fixed sequentially:
 
 - [x] **Bug 1 — VAE BatchNorm de-standardization skipped** (`src/weights.rs`):
@@ -223,7 +227,7 @@ Bringing **FLUX.2-Klein-4B** (distilled 4-step MMDiT, 3.88B params, 5 double / 2
 - [x] **Bug 3 — Text position-ids for 4D RoPE** (`src/diffusion/dit/embeddings.rs`):
   The 4th axis of `txt_ids` must encode the token index (`0..txt_len-1`), not `0`, matching `_prepare_text_ids`. Image ids remain `(T=0, row, col, Ref=0)`.
 - [x] **Bug 4 — Final-layer AdaLN-Zero `scale`/`shift` swapped** (`src/diffusion/dit/flux.rs`):
-  The reference `LastLayer` computes `x = (1 + scale) * norm(x) + shift` with `shift = chunks[0], scale = chunks[1]`. The Rust code had them reversed (`(1 + chunks[0]) * norm + chunks[1]`), which distorted the velocity field and produced the pervasive high-frequency "canvas"/grain texture. **This was the last bug** — restoring the correct order yields a clean, photorealistic render.
+  The reference `LastLayer` computes `x = (1 + scale) * norm(x) + shift` with `shift = chunks[0], scale = chunks[1]`. The Rust code had them reversed (`(1 + chunks[0]) * norm + chunks[1]`), which distorted the velocity field and produced the pervasive high-frequency "canvas"/grain texture. Restoring the correct order yields a clean, photorealistic render on Klein-4B.
 
 **Reference parity checklist (`klein.md` / official `flux2`):**
 - `DoubleStreamBlock0` err `9e-6`, `SingleStreamBlock0` err `5e-5`, VAE err `4.8e-6` (isolated blocks) — ISO with PyTorch reference.
@@ -231,9 +235,9 @@ Bringing **FLUX.2-Klein-4B** (distilled 4-step MMDiT, 3.88B params, 5 double / 2
 - Conventions kept: `theta=2000`, RoPE interleaved (`[seq,128]`, half-split rejected — produces checkerboard), F16 (BF16 produces identical output).
 
 **Repro**: `cargo build --release --features cuda,flash-attn` then
-`target\release\test_flux_inference.exe "G:\models\flux\flux2Klein_4b.safetensors" 4 "a golden retriever dog sitting in a flower meadow, sharp detailed photo"`.
+`target\release\test_flux_inference.exe "G:\models\flux\fluxKlein4BPro_v10.safetensors" 4 "a gorgeous portrait of an arctic fox with sapphire blue eyes in a mystical snowy forest at twilight, cinematic lighting, 8k"`.
 
-**Output**: `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` — clean, photorealistic.
+**Output**: `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` — 100% clean, photorealistic.
 
 ### 🚀 Milestone 10b: MMDiT Performance — FlashAttention-2 manette (COMPLETED)
 
@@ -249,29 +253,24 @@ libraries can pick the right attention backend per use case:
   - Measured parity vs F32 path: `max_abs ≈ 0.021`, `mean_abs ≈ 0.0013` (imperceptible).
 - [x] **~2.0x speedup** on Flux.2-Klein-4B: 2.47 s vs 4.87 s per denoising step; full 4-step render drops
   from **21 s → ~11.7 s** (VAE 1.47 s unchanged). Also verified ~2.8x on the `fluxKlein4BPro` checkpoint.
-- [x] **Streaming/weight-cache manettes evaluated & rejected**: caching blocks in FP8-resident or F16-CPU
-  gave *zero* measurable gain (the checkpoint's FP8→F16 dequantisation is already hidden by the OS page cache),
-  and a full F16 VRAM cache causes WDDM paging on 12 GB. Conclusion: the transformer compute, not block
-  streaming, is the bottleneck. Removed the dead cache manette code to keep the library lean.
 - [x] Verified the F32 fallback path is fully intact: rendering without flash produces identical-quality images
   (21 s denoise), confirming no regression risk when the manette is off.
 
 ---
 
-### ✅ Milestone 13: FLUX.2-Klein-9B MMDiT & Mistral-3-Small Streaming (COMPLETED)
-Bringing **FLUX.2-Klein-9B** (8 double blocks, 24 single blocks, 4096 hidden dim, NVFP4/FP8) and **Mistral-3-Small** text conditioning to full operational stability under pure Rust:
+### 🔬 Milestone 13: FLUX.2-Klein-9B MMDiT & Mistral-3-Small Streaming (IN PROGRESS / ACTIVE CALIBRATION)
+Bringing **FLUX.2-Klein-9B** (8 double blocks, 24 single blocks, 4096 hidden dim, NVFP4/FP8/BF16) and **Mistral-3-Small** text conditioning to full operational stability under pure Rust:
 
 - [x] **Low-RAM Layer-Streaming Dequantizer for Mistral-3** (`src/text/mistral.rs`):
   - On-demand streaming dequantization (`load_layer`) using `SafeTensorsArchive` in `Arc`.
   - Drops peak host RAM from **53.5 GB down to < 3.8 GB**, completely eliminating memory spikes on 64 GB systems.
   - Supports dual NVFP4 (cuBLAS unswizzled layout) and FP8 E4M3/E5M2 block dequantization on CPU.
 - [x] **Mistral-3 Conditioning & Chat Format Alignment**:
-  - `<s>[SYSTEM_PROMPT]...[/SYSTEM_PROMPT][INST]{prompt}[/INST]` with EOS token ID 2 padding.
+  - `[INST]{prompt}[/INST]` with EOS token ID 2 padding.
   - RoPE $\theta = 10^8$ with upper-triangular causal attention masking.
-  - Exact 3-stage hidden state extraction (Layers 10, 20, 30 / 0-indexed 9, 19, 29) sliced to $4096 \times 3 = 12288$ dimensions for `txt_in`.
+  - 3-stage hidden state extraction (Layers 10, 20, 30 / 0-indexed 9, 19, 29) sliced to $4096 \times 3 = 12288$ dimensions for `txt_in`.
 - [x] **Sequential Block Streaming for 9B Parameters**:
   - Shared modulation routing for `double_stream_modulation_img` $[24576, 4096]$ and `single_stream_modulation` $[12288, 4096]$.
   - Single-block streaming bounded to **< 7.5 GB peak VRAM** on consumer GPUs (RTX 4070 Ti).
-- [x] **Flow Matching ODE Parity Verification**:
-  - Correct single-factor $\sigma$ Fourier embedding in `TimestepEmbedder`.
-  - Non-regression verified across all SDXL, FlashAttention-2, and Klein-4B pipelines with 100% test pass.
+- [ ] **Visual Parity Convergence on 9B**:
+  - Architecture and streaming execution operate cleanly without crash, but generated images exhibit high-frequency grain texture. Active calibration underway on text projection slices, RoPE axes geometry, and FP8 dynamic activation scales.
