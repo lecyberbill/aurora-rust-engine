@@ -118,12 +118,56 @@ impl SafeTensorsArchive {
             }
         };
 
-        if (tensor.dtype() == DType::F32 || tensor.dtype() == DType::F16 || tensor.dtype() == DType::BF16)
-            && tensor.dtype() != dtype
-        {
-            Ok(tensor.to_dtype(dtype)?)
+        // Support Scaled FP8 checkpoints (e.g. Klein-9B and Flux2-Dev scaled FP8):
+        // If a weight has a corresponding `{name}_scale` or `{name}.weight_scale` or `{name}.scale_weight`
+        let scaled_tensor = if let Some(base_name) = name.strip_suffix(".weight") {
+            let scale_key_1 = format!("{}.weight_scale", base_name);
+            let scale_key_2 = format!("{}.scale_weight", base_name);
+            let scale_key_3 = format!("{}_scale", name);
+            let found_scale = if self.tensors.contains_key(&scale_key_1) {
+                Some(scale_key_1)
+            } else if self.tensors.contains_key(&scale_key_2) {
+                Some(scale_key_2)
+            } else if self.tensors.contains_key(&scale_key_3) {
+                Some(scale_key_3)
+            } else {
+                None
+            };
+
+            if let Some(scale_key) = found_scale {
+                let (s_dtype, s_shape, s_offset, s_len) = &self.tensors[&scale_key];
+                let s_slice = unsafe { std::slice::from_raw_parts(self.raw_data.add(*s_offset), *s_len) };
+                let scale_val = match s_dtype {
+                    safetensors::Dtype::F32 => {
+                        let data: &[f32] = bytemuck_cast_slice(s_slice);
+                        Tensor::from_slice(data, s_shape.as_slice(), device)?
+                    }
+                    safetensors::Dtype::F16 => {
+                        let data: &[f16] = bytemuck_cast_slice(s_slice);
+                        Tensor::from_slice(data, s_shape.as_slice(), device)?.to_dtype(DType::F32)?
+                    }
+                    safetensors::Dtype::BF16 => {
+                        let data: &[bf16] = bytemuck_cast_slice(s_slice);
+                        Tensor::from_slice(data, s_shape.as_slice(), device)?.to_dtype(DType::F32)?
+                    }
+                    _ => Tensor::ones((1,), DType::F32, device)?,
+                };
+                let tensor_f32 = tensor.to_dtype(DType::F32)?;
+                let scaled = tensor_f32.broadcast_mul(&scale_val)?;
+                scaled.to_dtype(dtype)?
+            } else {
+                tensor
+            }
         } else {
-            Ok(tensor)
+            tensor
+        };
+
+        if (scaled_tensor.dtype() == DType::F32 || scaled_tensor.dtype() == DType::F16 || scaled_tensor.dtype() == DType::BF16)
+            && scaled_tensor.dtype() != dtype
+        {
+            Ok(scaled_tensor.to_dtype(dtype)?)
+        } else {
+            Ok(scaled_tensor)
         }
     }
 
@@ -403,7 +447,7 @@ impl<'a> WeightRouter<'a> {
             } else if let Some(stripped) = key.strip_prefix("vae.") {
                 let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
                 tensors.insert(stripped.to_string(), tensor);
-            } else if key.starts_with("encoder.") || key.starts_with("decoder.") || key.starts_with("post_quant_conv.") || key.starts_with("bn.") {
+            } else if key.starts_with("encoder.") || key.starts_with("decoder.") || key.starts_with("quant_conv.") || key.starts_with("post_quant_conv.") || key.starts_with("bn.") {
                 let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
                 tensors.insert(key.clone(), tensor);
             }

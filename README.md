@@ -22,14 +22,16 @@ It provides a robust, zero-Python alternative for running generative diffusion m
 ## ✨ Features
 
 - **Pure Rust Native Inference**: Zero Python dependencies, zero PyTorch overhead, compiled directly to a native standalone executable.
-- **Flux.1 [dev] & Flux.1 [schnell] Full Support**: Native implementation of Multimodal Diffusion Transformers (MMDiT) with 19 `DoubleStreamBlocks`, 38 `SingleStreamBlocks`, and exact 3D Rotary Position Embeddings (RoPE $[16, 56, 56]$).
-- **Sub-9GB VRAM Flux Sequential Block Streaming**: Executes the full 12-billion-parameter Flux.1 model in FP8 precision with on-demand block streaming, fitting entirely within standard 12GB GPUs (RTX 4070 Ti).
+- **Flux.1 & Flux.2 Family Full Support**: Native implementation of Multimodal Diffusion Transformers (MMDiT) for **Flux.1 [dev/schnell]**, **Flux.2-Klein-4B**, **Flux.2-Klein-9B**, and **Flux.2-Dev Scaled** with exact 3D/4D Rotary Position Embeddings (RoPE).
+- **Sub-7.5GB VRAM Flux Sequential Block Streaming**: Executes massive MMDiT models (3.88B to 12B parameters) with on-demand per-block GPU streaming and zero WDDM paging.
+- **FLUX.2 Image-to-Image (Img2Img) & Inpainting**: Contextual ODE transformation and sharp mask boundary preservation with flow-matching background re-injection.
+- **Pure Rust 32-Channel & 16-Channel `FluxVaeEncoder` & `FluxVaeDecoder`**: Bit-exact VAE encoding and decoding with BatchNorm latent standardization.
 - **SDXL & Pony XL Full Support**: Seamless support for all `.safetensors` single-file checkpoints from Civitai and Hugging Face.
-- **Native FlashAttention-2 Acceleration**: 9.5x faster attention computation with fused CUDA kernels under Windows MSVC and Linux.
+- **Native FlashAttention-2 Acceleration**: Up to 9.5x faster attention computation with fused CUDA kernels under Windows MSVC and Linux.
 - **Zero-Overhead In-Memory LoRA Merging**: Instant hot-patching of UNet and CLIP weights directly in GPU/CPU memory with 0 MB extra VRAM overhead.
-- **Exact Penultimate Text Parity**: Custom penultimate hidden state extractors (`hidden_states[-2]`) for CLIP-L (Layer 11) and OpenCLIP-bigG (Layer 31) matching Hugging Face Diffusers bit-for-bit.
-- **Seamless $C^\infty$ Cosine Tiled VAE & Flux 16-Channel VAE**: 4-quadrant $72\times 72$ latent decoding with 128px smooth cosine cross-fade eliminating all tile seams, plus full BFL 16-channel AutoEncoder decoding.
-- **Deterministic Schedulers**: Continuous Euler Discrete, Flow Matching Rectified Euler ODE, and DPM-Solver++ 2M Karras.
+- **Exact Penultimate Text Parity**: Custom penultimate hidden state extractors for CLIP-L, OpenCLIP-bigG, and multi-layer concat for Qwen3-4B (Layers 9/18/27).
+- **Seamless $C^\infty$ Cosine Tiled VAE**: 4-quadrant $72\times 72$ latent decoding with 128px smooth cosine cross-fade eliminating all tile seams.
+- **Deterministic Schedulers**: Continuous Euler Discrete, Flow Matching Rectified Euler ODE (`step_at` support for arbitrary start step), and DPM-Solver++ 2M Karras.
 
 ---
 

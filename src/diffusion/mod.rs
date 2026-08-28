@@ -14,4 +14,4 @@ pub use dit::DiffusionTransformer;
 pub use schedulers::{DDIMScheduler, EulerDiscreteScheduler, FlowMatchEulerScheduler, Scheduler};
 pub use unet_2d::UNetConditionModel;
 pub use vae::{FastLatentPreviewer, VaeDecoder, tensor_to_rgb_image};
-pub use vae_flux::FluxVaeDecoder;
+pub use vae_flux::{FluxVaeDecoder, FluxVaeEncoder};

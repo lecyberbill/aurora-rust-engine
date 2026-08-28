@@ -69,14 +69,15 @@ impl SequentialBlockStreamer {
         }
 
         // Inject shared global modulations if block-local ones are absent (Klein architecture)
+        let double_mod_dim = self.hidden_dim * 6;
         if !tensors.keys().any(|k| k.starts_with("img_mod")) {
             let t_opt = self.archive.get_tensor("double_stream_modulation_img.lin.weight", &self.device, self.dtype)
                 .or_else(|_| self.archive.get_tensor("model.diffusion_model.double_stream_modulation_img.lin.weight", &self.device, self.dtype));
             if let Ok(t) = t_opt {
-                let t_slice = if t.dim(0)? == 18432 && t.dim(1)? == 3072 {
+                let t_slice = if t.dim(0)? == double_mod_dim {
                     t
-                } else if t.dim(0)? > 18432 {
-                    t.narrow(0, block_idx * 18432, 18432)?
+                } else if t.dim(0)? > double_mod_dim {
+                    t.narrow(0, block_idx * double_mod_dim, double_mod_dim)?
                 } else {
                     t
                 };
@@ -87,10 +88,10 @@ impl SequentialBlockStreamer {
             let t_opt = self.archive.get_tensor("double_stream_modulation_txt.lin.weight", &self.device, self.dtype)
                 .or_else(|_| self.archive.get_tensor("model.diffusion_model.double_stream_modulation_txt.lin.weight", &self.device, self.dtype));
             if let Ok(t) = t_opt {
-                let t_slice = if t.dim(0)? == 18432 && t.dim(1)? == 3072 {
+                let t_slice = if t.dim(0)? == double_mod_dim {
                     t
-                } else if t.dim(0)? > 18432 {
-                    t.narrow(0, block_idx * 18432, 18432)?
+                } else if t.dim(0)? > double_mod_dim {
+                    t.narrow(0, block_idx * double_mod_dim, double_mod_dim)?
                 } else {
                     t
                 };
@@ -133,15 +134,15 @@ impl SequentialBlockStreamer {
         }
 
         // Inject shared single modulation if block-local modulation is absent (Klein architecture)
-        // single_stream_modulation.lin.weight is [9216, 3072] (3 params * 3072 = 9216 for SingleStreamBlock)
+        let single_mod_dim = self.hidden_dim * 3;
         if !tensors.keys().any(|k| k.starts_with("modulation")) {
             let t_opt = self.archive.get_tensor("single_stream_modulation.lin.weight", &self.device, self.dtype)
                 .or_else(|_| self.archive.get_tensor("model.diffusion_model.single_stream_modulation.lin.weight", &self.device, self.dtype));
             if let Ok(t) = t_opt {
-                let t_slice = if t.dim(0)? == 9216 && t.dim(1)? == 3072 {
+                let t_slice = if t.dim(0)? == single_mod_dim {
                     t
-                } else if t.dim(0)? > 9216 {
-                    t.narrow(0, block_idx * 9216, 9216)?
+                } else if t.dim(0)? > single_mod_dim {
+                    t.narrow(0, block_idx * single_mod_dim, single_mod_dim)?
                 } else {
                     t
                 };

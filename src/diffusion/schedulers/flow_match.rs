@@ -105,6 +105,32 @@ impl FlowMatchEulerScheduler {
         Ok(())
     }
 
+    pub fn set_step_index(&mut self, idx: usize) {
+        self.step_index = idx;
+    }
+
+    pub fn step_index(&self) -> usize {
+        self.step_index
+    }
+
+    /// Single ODE integration step at specific step_idx:
+    /// x_{t-1} = x_t + (sigma_{next} - sigma_curr) * model_velocity
+    pub fn step_at(&self, step_idx: usize, model_output: &Tensor, sample: &Tensor) -> Result<Tensor> {
+        if step_idx >= self.sigmas.len() - 1 {
+            return Ok(sample.clone());
+        }
+
+        let sigma_curr = self.sigmas[step_idx];
+        let sigma_next = self.sigmas[step_idx + 1];
+        let dt = sigma_next - sigma_curr;
+
+        // x_{next} = sample + dt * velocity
+        let orig_dtype = sample.dtype();
+        let dt_tensor = Tensor::from_slice(&[dt as f32], (1,), sample.device())?.to_dtype(orig_dtype)?;
+        let step_delta = model_output.broadcast_mul(&dt_tensor)?;
+        sample + step_delta
+    }
+
     /// Single ODE integration step:
     /// x_{t-1} = x_t + (sigma_{next} - sigma_curr) * model_velocity
     pub fn step(&mut self, model_output: &Tensor, _timestep: usize, sample: &Tensor) -> Result<Tensor> {
@@ -122,7 +148,7 @@ impl FlowMatchEulerScheduler {
         let orig_dtype = sample.dtype();
         let dt_tensor = Tensor::from_slice(&[dt as f32], (1,), sample.device())?.to_dtype(orig_dtype)?;
         let step_delta = model_output.broadcast_mul(&dt_tensor)?;
-        (sample + step_delta)
+        sample + step_delta
     }
 }
 

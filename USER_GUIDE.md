@@ -12,12 +12,14 @@
 3. [Running the Interactive Web UI (Grio)](#3-running-the-interactive-web-ui-grio)
 4. [Using Aurora in Rust Applications (SDK Reference)](#4-using-aurora-in-rust-applications-sdk-reference)
    - [Loading Models (Local & HuggingFace Hub)](#loading-models-local--huggingface-hub)
-   - [Configuring Schedulers (DPM-Solver++, Euler, DDIM)](#configuring-schedulers-dpm-solver-euler-ddim)
+   - [Configuring Schedulers (DPM-Solver++, Euler, Flow-Matching)](#configuring-schedulers-dpm-solver-euler-ddim)
    - [Memory & VRAM Management Modes](#memory--vram-management-modes)
    - [Attention Backend Manette (FlashAttention-2)](#attention-backend-manette-flashattention-2)
-   - [Text-to-Image Generation](#text-to-image-generation)
-   - [Image-to-Image (Img2Img)](#image-to-image-img2img)
-   - [Inpainting & Mask-Guided Diffusion](#inpainting--mask-guided-diffusion)
+   - [Text-to-Image Generation (SDXL & FLUX.1/FLUX.2)](#text-to-image-generation-flux1--flux2-mmdit-family)
+   - [FLUX.2 Image-to-Image (Img2Img)](#flux2-image-to-image-img2img-transformation)
+   - [FLUX.2 Inpainting & Masked Diffusion](#flux2-inpainting--masked-diffusion)
+   - [SDXL Image-to-Image (Img2Img)](#image-to-image-img2img)
+   - [SDXL Inpainting & Mask-Guided Diffusion](#inpainting--mask-guided-diffusion)
    - [Hot LoRA Merging](#hot-lora-merging)
    - [ControlNet (Canny Edge)](#controlnet-canny-edge)
 5. [REST API & WebSocket Server Reference](#5-rest-api--websocket-server-reference)
@@ -223,34 +225,89 @@ println!("Generated in {:.2}s ({:.2} it/s)", metrics.total_wallclock_ms / 1000.0
 
 ---
 
-### Text-to-Image Generation (Flux.1 [dev] & [schnell] MMDiT)
+### Text-to-Image Generation (Flux.1 & Flux.2 MMDiT Family)
 
-`aurora-rust-engine` includes native pure-Rust support for the Black Forest Labs **Flux.1** Multimodal Diffusion Transformer (MMDiT) architecture:
+`aurora-rust-engine` includes native pure-Rust support for the Black Forest Labs **Flux.1 [dev/schnell]** and **Flux.2-Klein [4B/9B] / Flux.2-Dev** Multimodal Diffusion Transformer (MMDiT) architectures:
 
 ```rust
 use aurora_rust_engine::pipelines::flux::FluxPipeline;
 use aurora_rust_engine::traits::DiffusionParams;
+use aurora_rust_engine::diffusion::vae_flux::FluxVaeDecoder;
+use aurora_rust_engine::text::Qwen3TextEncoder;
 use candle_core::Device;
 
 let device = Device::new_cuda(0)?;
 
-// 1. Load Flux.1 FP8 Checkpoint (Auto-detects Dev vs Schnell and loads embedded encoders/VAE)
-let mut flux_pipeline = FluxPipeline::from_single_file("G:\\models\\flux\\flux1-dev-fp8.safetensors", device)?;
+// 1. Load Flux.2-Klein Checkpoint with Sequential Block Streaming (< 7.5GB VRAM Peak)
+let mut flux_pipeline = FluxPipeline::from_single_file_streaming("G:\\models\\flux\\fluxKlein4BPro_v10.safetensors", device.clone())?;
+flux_pipeline.enable_flash_attn();
 
-// 2. Configure Diffusion Parameters (4 steps for Schnell, 20-28 steps with 3.5 guidance for Dev)
+// 2. Attach Qwen3 Prompt Encoder and Flux.2 32-Channel VAE Decoder
+// (Auto-detected if embedded in checkpoint, or attached externally via .safetensors)
+
+// 3. Configure Diffusion Parameters (4 steps for Schnell / Klein, 20-28 steps for Dev)
 let params = DiffusionParams {
-    prompt: "masterpiece, highly detailed, futuristic glowing robot, neon lights, 8k",
+    prompt: "a magnificent lion sitting on a rock in savanna during sunset, cinematic lighting, 8k",
     negative_prompt: None,
-    num_steps: 20,
-    guidance_scale: 3.5,
+    num_steps: 4,
+    guidance_scale: 1.0,
     width: 1024,
     height: 1024,
     seed: 42,
 };
 
-// 3. Generate high-fidelity image in pure Rust (< 9GB VRAM footprint)
-let (image, metrics) = flux_pipeline.generate_with_metrics(params, None)?;
-image.save("flux_dev_robot.png")?;
+// 4. Generate high-fidelity image in pure Rust (< 7.5GB VRAM footprint)
+let (image, metrics) = flux_pipeline.generate_with_metrics(params, None::<fn(usize, usize, &candle_core::Tensor)>)?;
+image.save("flux_lion.png")?;
+```
+
+---
+
+### FLUX.2 Image-to-Image (Img2Img) Transformation
+
+```rust
+use aurora_rust_engine::traits::Img2ImgParams;
+
+let init_image = image::open("flux_lion.png")?.to_rgb8();
+
+let params = Img2ImgParams {
+    prompt: "a majestic lion wearing a golden crown and diamond armor sitting on a rock during sunset, photorealistic, 8k",
+    negative_prompt: None,
+    image: init_image,
+    strength: 0.65, // Denoising strength: 0.0 = original image, 1.0 = completely regenerated
+    num_steps: 4,
+    guidance_scale: 1.0,
+    seed: 42,
+};
+
+let (transformed_image, metrics) = flux_pipeline.generate_img2img(params, None::<fn(usize, usize, &candle_core::Tensor)>)?;
+transformed_image.save("flux2_img2img_lion_crown.png")?;
+```
+
+---
+
+### FLUX.2 Inpainting & Masked Diffusion
+
+```rust
+use aurora_rust_engine::traits::InpaintParams;
+
+let base_image = image::open("flux_lion.png")?.to_rgb8();
+let mask_image = image::open("lion_head_mask.png")?.to_luma8(); // 255 = area to inpaint, 0 = keep unchanged
+
+let params = InpaintParams {
+    prompt: "a majestic lion wearing an intricate glowing golden crown with emerald gems, photorealistic, 8k",
+    negative_prompt: None,
+    image: base_image,
+    mask: mask_image,
+    mask_blur: 0,
+    strength: 0.85,
+    num_steps: 4,
+    guidance_scale: 1.0,
+    seed: 42,
+};
+
+let (inpainted_image, metrics) = flux_pipeline.generate_inpaint(params, None::<fn(usize, usize, &candle_core::Tensor)>)?;
+inpainted_image.save("flux2_inpaint_lion_crown.png")?;
 ```
 
 ---

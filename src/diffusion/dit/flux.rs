@@ -65,6 +65,36 @@ impl FluxConfig {
         }
     }
 
+    /// Flux.2 Klein 9B configuration (8 double blocks, 24 single blocks, shared modulation, 4096 hidden)
+    pub fn klein_9b() -> Self {
+        Self {
+            in_channels: 128, // 32 latent channels * 2x2 patchify
+            out_channels: 128,
+            hidden_size: 4096,
+            num_heads: 32,
+            num_double_blocks: 8,
+            num_single_blocks: 24,
+            mlp_ratio: 6,
+            theta: 2000.0,
+            guidance_embed: false,
+        }
+    }
+
+    /// Flux.2 Dev configuration (8 double blocks, 48 single blocks, 6144 hidden, guidance embed)
+    pub fn flux2_dev() -> Self {
+        Self {
+            in_channels: 128,
+            out_channels: 128,
+            hidden_size: 6144,
+            num_heads: 48,
+            num_double_blocks: 8,
+            num_single_blocks: 48,
+            mlp_ratio: 6,
+            theta: 2000.0,
+            guidance_embed: true,
+        }
+    }
+
     /// Stable Diffusion 3.5 Large (24 DoubleStreamBlocks, 1536 hidden dim)
     pub fn sd35_large() -> Self {
         Self {
@@ -158,8 +188,11 @@ impl FluxTransformer {
         };
 
         let img_in = linear_layer(config.in_channels, config.hidden_size, vb.pp("img_in"))?;
-        let txt_in_dim = if config.in_channels == 128 { 7680 } else { 4096 };
-        let txt_in = linear_layer(txt_in_dim, config.hidden_size, vb.pp("txt_in"))?;
+        let txt_in = linear_layer(config.hidden_size, config.hidden_size, vb.pp("txt_in"))
+            .or_else(|_| linear_layer(4096, config.hidden_size, vb.pp("txt_in")))
+            .or_else(|_| linear_layer(7680, config.hidden_size, vb.pp("txt_in")))
+            .or_else(|_| linear_layer(12288, config.hidden_size, vb.pp("txt_in")))
+            .or_else(|_| linear_layer(15360, config.hidden_size, vb.pp("txt_in")))?;
 
         let time_embedder = TimestepEmbedder::new(config.hidden_size, 256, vb.pp("time_in"))?;
         let vector_in = match (

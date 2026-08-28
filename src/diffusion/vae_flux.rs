@@ -9,7 +9,7 @@ pub const FLUX_LATENT_SHIFT: f64 = 0.1159;
 
 /// ResNet Block for VAE Decoder
 #[derive(Debug, Clone)]
-struct VaeResnetBlock {
+pub struct VaeResnetBlock {
     norm1: GroupNorm,
     conv1: Conv2d,
     norm2: GroupNorm,
@@ -37,8 +37,8 @@ impl VaeResnetBlock {
         )?;
         let conv_shortcut = if in_channels != out_channels {
             Some(
-                conv2d(in_channels, out_channels, 1, Conv2dConfig::default(), vb.pp("nin_shortcut"))
-                    .or_else(|_| conv2d(in_channels, out_channels, 1, Conv2dConfig::default(), vb.pp("conv_shortcut")))?
+                conv2d(in_channels, out_channels, 1, Conv2dConfig::default(), vb.pp("conv_shortcut"))
+                    .or_else(|_| conv2d(in_channels, out_channels, 1, Conv2dConfig::default(), vb.pp("nin_shortcut")))?
             )
         } else {
             None
@@ -71,7 +71,7 @@ impl VaeResnetBlock {
 
 /// Self-Attention Block for VAE Decoder mid-block
 #[derive(Debug, Clone)]
-struct VaeAttentionBlock {
+pub struct VaeAttentionBlock {
     group_norm: GroupNorm,
     to_q: Linear,
     to_k: Linear,
@@ -130,7 +130,7 @@ impl VaeAttentionBlock {
 
 /// Up-sampling Block for VAE Decoder
 #[derive(Debug, Clone)]
-struct VaeUpBlock {
+pub struct VaeUpBlock {
     resnets: Vec<VaeResnetBlock>,
     upsampler: Option<Conv2d>,
 }
@@ -140,15 +140,15 @@ impl VaeUpBlock {
         let mut resnets = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
             let in_ch = if i == 0 { in_channels } else { out_channels };
-            let block = VaeResnetBlock::new(in_ch, out_channels, vb.pp(format!("block.{}", i)))
-                .or_else(|_| VaeResnetBlock::new(in_ch, out_channels, vb.pp(format!("resnets.{}", i))))?;
+            let block = VaeResnetBlock::new(in_ch, out_channels, vb.pp(format!("resnets.{}", i)))
+                .or_else(|_| VaeResnetBlock::new(in_ch, out_channels, vb.pp(format!("block.{}", i))))?;
             resnets.push(block);
         }
 
         let upsampler = if add_upsample {
             Some(
-                conv2d(out_channels, out_channels, 3, Conv2dConfig { padding: 1, ..Default::default() }, vb.pp("upsample.conv"))
-                    .or_else(|_| conv2d(out_channels, out_channels, 3, Conv2dConfig { padding: 1, ..Default::default() }, vb.pp("upsamplers.0.conv")))?
+                conv2d(out_channels, out_channels, 3, Conv2dConfig { padding: 1, ..Default::default() }, vb.pp("upsamplers.0.conv"))
+                    .or_else(|_| conv2d(out_channels, out_channels, 3, Conv2dConfig { padding: 1, ..Default::default() }, vb.pp("upsample.conv")))?
             )
         } else {
             None
@@ -168,6 +168,190 @@ impl VaeUpBlock {
             h = up.forward(&h)?;
         }
         Ok(h)
+    }
+}
+
+/// Down-sampling Block for VAE Encoder
+#[derive(Debug, Clone)]
+pub struct VaeDownBlock {
+    resnets: Vec<VaeResnetBlock>,
+    downsampler: Option<Conv2d>,
+}
+
+impl VaeDownBlock {
+    pub fn new(in_channels: usize, out_channels: usize, num_layers: usize, add_downsample: bool, vb: VarBuilder) -> Result<Self> {
+        let mut resnets = Vec::with_capacity(num_layers);
+        for i in 0..num_layers {
+            let in_ch = if i == 0 { in_channels } else { out_channels };
+            let block = VaeResnetBlock::new(in_ch, out_channels, vb.pp(format!("resnets.{}", i)))
+                .or_else(|_| VaeResnetBlock::new(in_ch, out_channels, vb.pp(format!("block.{}", i))))?;
+            resnets.push(block);
+        }
+
+        let downsampler = if add_downsample {
+            Some(
+                conv2d(
+                    out_channels,
+                    out_channels,
+                    3,
+                    Conv2dConfig { stride: 2, padding: 0, ..Default::default() },
+                    vb.pp("downsamplers.0.conv"),
+                ).or_else(|_| {
+                    conv2d(
+                        out_channels,
+                        out_channels,
+                        3,
+                        Conv2dConfig { stride: 2, padding: 0, ..Default::default() },
+                        vb.pp("downsample.conv"),
+                    )
+                })?
+            )
+        } else {
+            None
+        };
+
+        Ok(Self { resnets, downsampler })
+    }
+
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let mut h = xs.clone();
+        for resnet in &self.resnets {
+            h = resnet.forward(&h)?;
+        }
+        if let Some(ref down) = self.downsampler {
+            // Asymmetric padding for stride 2 convolution: pad [0, 1, 0, 1]
+            h = h.pad_with_zeros(3, 0, 1)?;
+            h = h.pad_with_zeros(2, 0, 1)?;
+            h = down.forward(&h)?;
+        }
+        Ok(h)
+    }
+}
+
+/// Pure Rust 16-Channel / 32-Channel VAE Encoder for Flux.1, Flux.2, and SD 3.5
+#[derive(Debug, Clone)]
+pub struct FluxVaeEncoder {
+    conv_in: Conv2d,
+    down_blocks: Vec<VaeDownBlock>,
+    mid_block: (VaeResnetBlock, Option<VaeAttentionBlock>, VaeResnetBlock),
+    conv_norm_out: GroupNorm,
+    conv_out: Conv2d,
+    quant_conv: Option<Conv2d>,
+    bn_mean: Option<Tensor>,
+    bn_var: Option<Tensor>,
+    is_flux2: bool,
+    device: Device,
+    dtype: DType,
+}
+
+impl FluxVaeEncoder {
+    pub fn new(vb: VarBuilder) -> Result<Self> {
+        let device = vb.device().clone();
+        let dtype = vb.dtype();
+
+        let conv_in = conv2d(3, 128, 3, Conv2dConfig { padding: 1, ..Default::default() }, vb.pp("encoder.conv_in"))?;
+
+        // Flux VAE Encoder: 0: 128->128, 1: 128->256, 2: 256->512, 3: 512->512
+        let in_channels = [128, 128, 256, 512];
+        let out_channels = [128, 256, 512, 512];
+        let mut down_blocks = Vec::with_capacity(4);
+
+        for i in 0..4 {
+            let in_ch = in_channels[i];
+            let out_ch = out_channels[i];
+            let add_down = i < 3;
+            let block = VaeDownBlock::new(in_ch, out_ch, 2, add_down, vb.pp(format!("encoder.down_blocks.{}", i)))
+                .or_else(|_| VaeDownBlock::new(in_ch, out_ch, 2, add_down, vb.pp(format!("encoder.down.{}", i))))?;
+            down_blocks.push(block);
+        }
+
+        let mid_attn = VaeAttentionBlock::new(512, vb.pp("encoder.mid_block.attentions.0"))
+            .or_else(|_| VaeAttentionBlock::new(512, vb.pp("encoder.mid.attn_1")))
+            .ok();
+
+        let mid_block = (
+            VaeResnetBlock::new(512, 512, vb.pp("encoder.mid_block.resnets.0"))
+                .or_else(|_| VaeResnetBlock::new(512, 512, vb.pp("encoder.mid.block_1")))?,
+            mid_attn,
+            VaeResnetBlock::new(512, 512, vb.pp("encoder.mid_block.resnets.1"))
+                .or_else(|_| VaeResnetBlock::new(512, 512, vb.pp("encoder.mid.block_2")))?,
+        );
+
+        let conv_norm_out = group_norm(32, 512, 1e-6, vb.pp("encoder.conv_norm_out"))
+            .or_else(|_| group_norm(32, 512, 1e-6, vb.pp("encoder.norm_out")))?;
+
+        // Flux 2 has 64 out channels (mean + logvar for 32 latent channels)
+        // Flux 1 has 32 out channels (mean + logvar for 16 latent channels)
+        let (conv_out, is_flux2) = if let Ok(c) = conv2d(512, 64, 3, Conv2dConfig { padding: 1, ..Default::default() }, vb.pp("encoder.conv_out")) {
+            (c, true)
+        } else {
+            (conv2d(512, 32, 3, Conv2dConfig { padding: 1, ..Default::default() }, vb.pp("encoder.conv_out"))?, false)
+        };
+
+        let quant_conv = conv2d(64, 64, 1, Conv2dConfig::default(), vb.pp("quant_conv"))
+            .or_else(|_| conv2d(32, 32, 1, Conv2dConfig::default(), vb.pp("quant_conv")))
+            .ok();
+
+        let bn_mean = vb.get(128, "bn.running_mean").or_else(|_| vb.get(32, "bn.running_mean")).ok();
+        let bn_var = vb.get(128, "bn.running_var").or_else(|_| vb.get(32, "bn.running_var")).ok();
+
+        Ok(Self {
+            conv_in,
+            down_blocks,
+            mid_block,
+            conv_norm_out,
+            conv_out,
+            quant_conv,
+            bn_mean,
+            bn_var,
+            is_flux2,
+            device,
+            dtype,
+        })
+    }
+
+    /// Encode input image tensor [-1.0, 1.0] [1, 3, H, W] into latents [1, C, H/8, W/8]
+    pub fn encode(&self, image: &Tensor) -> Result<Tensor> {
+        let mut h = self.conv_in.forward(image)?;
+
+        for block in &self.down_blocks {
+            h = block.forward(&h)?;
+        }
+
+        h = self.mid_block.0.forward(&h)?;
+        if let Some(ref attn) = self.mid_block.1 {
+            h = attn.forward(&h)?;
+        }
+        h = self.mid_block.2.forward(&h)?;
+
+        h = self.conv_norm_out.forward(&h)?;
+        h = candle_nn::ops::silu(&h)?;
+        h = self.conv_out.forward(&h)?;
+
+        if let Some(ref qc) = self.quant_conv {
+            h = qc.forward(&h)?;
+        }
+
+        // Take mode / mean (first half of latent channels: 0..32 for Flux2, 0..16 for Flux1)
+        let latent_channels = if self.is_flux2 { 32 } else { 16 };
+        let mean = h.narrow(1, 0, latent_channels)?;
+
+        if self.is_flux2 {
+            Ok(mean)
+        } else {
+            // Flux 1 scaling factor: (mean - shift_factor) * scale_factor
+            let shifted = (mean.to_dtype(DType::F32)? - FLUX_LATENT_SHIFT)?;
+            let scaled = (shifted * FLUX_LATENT_SCALE)?;
+            scaled.to_dtype(self.dtype)
+        }
+    }
+
+    pub fn bn_mean(&self) -> Option<&Tensor> {
+        self.bn_mean.as_ref()
+    }
+
+    pub fn bn_var(&self) -> Option<&Tensor> {
+        self.bn_var.as_ref()
     }
 }
 
@@ -205,19 +389,23 @@ impl FluxVaeDecoder {
         let bn_mean = vb.get(128, "bn.running_mean").or_else(|_| vb.get(32, "bn.running_mean")).ok();
         let bn_var = vb.get(128, "bn.running_var").or_else(|_| vb.get(32, "bn.running_var")).ok();
 
-        let mid_attn = VaeAttentionBlock::new(512, vb.pp("decoder.mid.attn_1"))
-            .or_else(|_| VaeAttentionBlock::new(512, vb.pp("decoder.mid_block.attentions.0")))
+        let mid_attn = VaeAttentionBlock::new(512, vb.pp("decoder.mid_block.attentions.0"))
+            .or_else(|_| VaeAttentionBlock::new(512, vb.pp("decoder.mid.attn_1")))
             .ok();
 
         let mid_block = (
-            VaeResnetBlock::new(512, 512, vb.pp("decoder.mid.block_1"))
-                .or_else(|_| VaeResnetBlock::new(512, 512, vb.pp("decoder.mid_block.resnets.0")))?,
+            VaeResnetBlock::new(512, 512, vb.pp("decoder.mid_block.resnets.0"))
+                .or_else(|_| VaeResnetBlock::new(512, 512, vb.pp("decoder.mid.block_1")))?,
             mid_attn,
-            VaeResnetBlock::new(512, 512, vb.pp("decoder.mid.block_2"))
-                .or_else(|_| VaeResnetBlock::new(512, 512, vb.pp("decoder.mid_block.resnets.1")))?,
+            VaeResnetBlock::new(512, 512, vb.pp("decoder.mid_block.resnets.1"))
+                .or_else(|_| VaeResnetBlock::new(512, 512, vb.pp("decoder.mid.block_2")))?,
         );
 
-        // In Flux VAE: up.3 = 512->512, up.2 = 512->512, up.1 = 512->256, up.0 = 256->128
+        // In Flux VAE Diffusers format:
+        // up_blocks.0: 512 -> 512 (add_up: true)
+        // up_blocks.1: 512 -> 512 (add_up: true)
+        // up_blocks.2: 512 -> 256 (add_up: true)
+        // up_blocks.3: 256 -> 128 (add_up: false)
         let in_channels = [512, 512, 512, 256];
         let out_channels = [512, 512, 256, 128];
         let mut up_blocks = Vec::with_capacity(4);
@@ -226,13 +414,13 @@ impl FluxVaeDecoder {
             let in_ch = in_channels[i];
             let out_ch = out_channels[i];
             let add_up = i < 3;
-            let block = VaeUpBlock::new(in_ch, out_ch, 3, add_up, vb.pp(format!("decoder.up.{}", 3 - i)))
-                .or_else(|_| VaeUpBlock::new(in_ch, out_ch, 3, add_up, vb.pp(format!("decoder.up_blocks.{}", i))))?;
+            let block = VaeUpBlock::new(in_ch, out_ch, 3, add_up, vb.pp(format!("decoder.up_blocks.{}", i)))
+                .or_else(|_| VaeUpBlock::new(in_ch, out_ch, 3, add_up, vb.pp(format!("decoder.up.{}", 3 - i))))?;
             up_blocks.push(block);
         }
 
-        let conv_norm_out = group_norm(32, 128, 1e-6, vb.pp("decoder.norm_out"))
-            .or_else(|_| group_norm(32, 128, 1e-6, vb.pp("decoder.conv_norm_out")))?;
+        let conv_norm_out = group_norm(32, 128, 1e-6, vb.pp("decoder.conv_norm_out"))
+            .or_else(|_| group_norm(32, 128, 1e-6, vb.pp("decoder.norm_out")))?;
         let conv_out = conv2d(128, 3, 3, Conv2dConfig { padding: 1, ..Default::default() }, vb.pp("decoder.conv_out"))?;
 
         Ok(Self {

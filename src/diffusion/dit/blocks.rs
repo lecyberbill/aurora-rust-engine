@@ -87,11 +87,13 @@ impl DoubleStreamBlock {
         let img_q_norm = RMSNorm::new(head_dim, vb.pp("img_attn.norm.query_norm")).ok();
         let img_k_norm = RMSNorm::new(head_dim, vb.pp("img_attn.norm.key_norm")).ok();
         let img_proj = linear_layer(dim, dim, vb.pp("img_attn.proj"))?;
+        let swiglu_in_dim = dim * 6;
+        let swiglu_mid_dim = dim * 3;
         let img_mlp = (
             linear_layer(dim, mlp_dim, vb.pp("img_mlp.0"))
-                .or_else(|_| linear_layer(dim, 18432, vb.pp("img_mlp.0")))?,
+                .or_else(|_| linear_layer(dim, swiglu_in_dim, vb.pp("img_mlp.0")))?,
             linear_layer(mlp_dim, dim, vb.pp("img_mlp.2"))
-                .or_else(|_| linear_layer(9216, dim, vb.pp("img_mlp.2")))?,
+                .or_else(|_| linear_layer(swiglu_mid_dim, dim, vb.pp("img_mlp.2")))?,
         );
         let img_mod = AdaLNZeroModulation::new(dim, dim * 6, vb.pp("img_mod"))?;
 
@@ -102,9 +104,9 @@ impl DoubleStreamBlock {
         let txt_proj = linear_layer(dim, dim, vb.pp("txt_attn.proj"))?;
         let txt_mlp = (
             linear_layer(dim, mlp_dim, vb.pp("txt_mlp.0"))
-                .or_else(|_| linear_layer(dim, 18432, vb.pp("txt_mlp.0")))?,
+                .or_else(|_| linear_layer(dim, swiglu_in_dim, vb.pp("txt_mlp.0")))?,
             linear_layer(mlp_dim, dim, vb.pp("txt_mlp.2"))
-                .or_else(|_| linear_layer(9216, dim, vb.pp("txt_mlp.2")))?,
+                .or_else(|_| linear_layer(swiglu_mid_dim, dim, vb.pp("txt_mlp.2")))?,
         );
         let txt_mod = AdaLNZeroModulation::new(dim, dim * 6, vb.pp("txt_mod"))?;
 
@@ -246,10 +248,11 @@ impl DoubleStreamBlock {
         let img_shift2 = img_shift2.unsqueeze(1)?;
         let img_normed2 = img_norm2.broadcast_mul(&img_scale2)?.broadcast_add(&img_shift2)?;
         let img_h1 = self.img_mlp.0.forward(&img_normed2)?;
-        let img_mlp_h = if img_h1.dim(2)? == 18432 {
-            // SwiGLU activation for Klein
-            let gate = candle_nn::ops::silu(&img_h1.narrow(2, 0, 9216)?)?;
-            let val = img_h1.narrow(2, 9216, 9216)?;
+        let img_mlp_h = if img_h1.dim(2)? > self.heads * self.head_dim * 4 {
+            // SwiGLU activation for Klein (dim * 6 input, dim * 3 output)
+            let mid_dim = img_h1.dim(2)? / 2;
+            let gate = candle_nn::ops::silu(&img_h1.narrow(2, 0, mid_dim)?)?;
+            let val = img_h1.narrow(2, mid_dim, mid_dim)?;
             (gate * val)?
         } else {
             gelu_tanh(&img_h1)?
@@ -263,10 +266,11 @@ impl DoubleStreamBlock {
         let txt_shift2 = txt_shift2.unsqueeze(1)?;
         let txt_normed2 = txt_norm2.broadcast_mul(&txt_scale2)?.broadcast_add(&txt_shift2)?;
         let txt_h1 = self.txt_mlp.0.forward(&txt_normed2)?;
-        let txt_mlp_h = if txt_h1.dim(2)? == 18432 {
-            // SwiGLU activation for Klein
-            let gate = candle_nn::ops::silu(&txt_h1.narrow(2, 0, 9216)?)?;
-            let val = txt_h1.narrow(2, 9216, 9216)?;
+        let txt_mlp_h = if txt_h1.dim(2)? > self.heads * self.head_dim * 4 {
+            // SwiGLU activation for Klein (dim * 6 input, dim * 3 output)
+            let mid_dim = txt_h1.dim(2)? / 2;
+            let gate = candle_nn::ops::silu(&txt_h1.narrow(2, 0, mid_dim)?)?;
+            let val = txt_h1.narrow(2, mid_dim, mid_dim)?;
             (gate * val)?
         } else {
             gelu_tanh(&txt_h1)?
@@ -340,15 +344,20 @@ impl SingleStreamBlock {
         };
 
         // In Flux.1, linear1 projects from dim (3072) to 3*dim (Q,K,V: 9216) + mlp_dim (12288) = 21504
-        // In Klein 4B, linear1 projects from 3072 to 27648
+        // In Klein 4B, linear1 projects from 3072 to 27648 (3*dim + 6*dim = 9*dim = 27648)
+        // In Klein 9B, linear1 projects from 4096 to 36864 (9 * 4096 = 36864)
+        let swiglu_in_proj = dim * 3 + dim * 6; // dim * 9
+        let swiglu_mid_in = dim + dim * 3;     // dim * 4
         let linear1 = linear_layer(dim, dim * 3 + mlp_dim, vb.pp("linear1"))
-            .or_else(|_| linear_layer(dim, 27648, vb.pp("linear1")))?;
+            .or_else(|_| linear_layer(dim, swiglu_in_proj, vb.pp("linear1")))?;
         let q_norm = RMSNorm::new(head_dim, vb.pp("norm.query_norm")).ok();
         let k_norm = RMSNorm::new(head_dim, vb.pp("norm.key_norm")).ok();
 
         // linear2 projects from dim (3072) + mlp_dim (12288) = 15360 back to dim (3072)
+        // In Klein 4B, linear2 projects from 12288 back to 3072 (4 * 3072 = 12288)
+        // In Klein 9B, linear2 projects from 16384 back to 4096 (4 * 4096 = 16384)
         let linear2 = linear_layer(dim + mlp_dim, dim, vb.pp("linear2"))
-            .or_else(|_| linear_layer(12288, dim, vb.pp("linear2")))?;
+            .or_else(|_| linear_layer(swiglu_mid_in, dim, vb.pp("linear2")))?;
         let modulation = AdaLNZeroModulation::new(dim, dim * 3, vb.pp("modulation"))?;
 
         Ok(Self {
@@ -390,10 +399,11 @@ impl SingleStreamBlock {
         let h1 = self.linear1.forward(&normed)?;
         let qkv = h1.narrow(2, 0, d * 3)?;
         let mlp_raw = h1.narrow(2, d * 3, h1.dim(2)? - d * 3)?;
-        let mlp_h = if mlp_raw.dim(2)? == 18432 {
-            // SwiGLU for Klein SingleStreamBlock: 18432 -> 9216 (9216 + 3072 QKV = 12288 input to linear2)
-            let gate = candle_nn::ops::silu(&mlp_raw.narrow(2, 0, 9216)?)?;
-            let val = mlp_raw.narrow(2, 9216, 9216)?;
+        let mlp_h = if mlp_raw.dim(2)? > d * 4 {
+            // SwiGLU for Klein SingleStreamBlock: dim * 6 -> dim * 3
+            let mid_dim = mlp_raw.dim(2)? / 2;
+            let gate = candle_nn::ops::silu(&mlp_raw.narrow(2, 0, mid_dim)?)?;
+            let val = mlp_raw.narrow(2, mid_dim, mid_dim)?;
             (gate * val)?
         } else {
             gelu_tanh(&mlp_raw)?
