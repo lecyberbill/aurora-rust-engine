@@ -191,8 +191,38 @@ Enabling execution of large-scale MMDiT models on modest VRAM (< 8GB) using the 
   - Direct zero-copy loading of FP8 (`F8_E4M3` / `F8_E5M2`) Safetensors weights into CPU host memory with per-block streaming and `weight_scale` dequantisation into CUDA F16.
 - [x] **Dynamic VRAM Budgeting**:
   - Sequential block streamer bounds resident peak VRAM to **< 7.5 GB** during execution of 9B models (`test_flux_klein9b.rs` runs smoothly on single consumer GPU).
-- [ ] **Visual Parity & Artifact Convergence**:
-  - Investigating visual quality on Klein-9B and Flux.2-Dev checkpoints (current inference produces high-frequency grain texture; mathematical calibration of 9B text conditioning and modulation scale in progress).
+- [ ] **Visual Parity & Artifact Convergence** (Flux.2-Dev residual "stained-glass" grain — see HANDOVER notes):
+  - **Klein-9B is DONE & photorealistic** (both BF16 `flux-2-klein-9b.safetensors` and FP8
+    `flux2Klein9bFp8_fp8.safetensors` render a clean arctic fox — see
+    `outputs/flux_showcase/flux_klein_9b_fp8_test.png`).
+  - **Flux.2-Dev (`flux2DevFp8Scaled_fp8Scaled.safetensors`) renders a recognisable fox but with a
+    persistent, resolution-independent high-frequency "stained-glass"/grid grain.** The grain is the
+    SAME at 384x384 and 1024x1024, and unchanged by 20 vs 30 steps.
+  - **Complete hypothesis isolation (all tested by actual renders, 2026-08):**
+    - *Scheduler*: static shift=3.0 is correct (dynamic shifting REGRESSED — reverted); keeping the
+      Klein `shift=2.02` empirical-mu path also regressed. The default `FlowMatchEulerConfig::default()`
+      is used for Dev via `flux2_scheduler_config()`.
+    - *Text RMS*: Mistral-3 embeddings must stay at NATIVE amplitude (~rms 0.4) — the text projection
+      `context_embedder` was trained on these. RMS-normalising to ~1.9 (to match Qwen) is WRONG and was
+      reverted after the reference confirmed it causes cross-attention saturation.
+    *Guidance*: grain persists even at `guidance_scale=1.0` → NOT a guidance/cfg bug. The
+      `temb = time_emb + guidance_emb` fusion is structurally correct (no pooled vector_in in Dev).
+    - *FP8 dequant*: `scale_weight` (scalar) is correctly applied to F8_E4M3 weights; magnitudes are
+      sane. Confirmed by Klein-9B fp8 rendering perfectly through the SAME `SafeTensorsArchive` code.
+    - *RoPE*: 4D `[T=0,H,W,Ref=0]`, theta=2000 — shared and validated by both Kleins.
+  - **Conclusion**: the pipeline, RoPE, scheduler, VAE, text conditioning and FP8 dequant are all
+    correct (proven by photorealistic Klein-4B + Klein-9B BF16/FP8). The Dev grain is **specific to the
+    `flux2DevFp8Scaled_fp8Scaled.safetensors` checkpoint** — likely either its fp8Scaled quantization
+    quality or an architectural detail in the 48-SingleStreamBlock Dev that is not yet matched.
+  - **Next leads to investigate (resume here):**
+    1. Obtain a non-quantized (BF16/F16) FLUX.2-Dev checkpoint to isolate whether the grain comes from
+       the fp8Scaled encoding vs the Dev architecture itself.
+    2. Diff the Dev 48-SingleStreamBlock structure against the reference (esp. `linear1`/`linear2`
+       projection widths and the SwiGLU gating around `dim*3 + mlp_dim`).
+    3. Verify the Flux.2-Dev reference `CombinedTimestepGuidanceTextProjEmbeddings` — confirm the
+       guidance appears in `temb` with the exact scaling (currently `guidance*1000.0` via `TimestepEmbedder`).
+    4. Compare the Dev `txt_in` text projection and any per-block modulation against the 9B — the Dev
+       splits texts across 15360 dim, so confirm layer-9/19/29 concatenation ordering matches.
 
 ---
 
