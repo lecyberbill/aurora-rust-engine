@@ -257,7 +257,10 @@ Extending MMDiT image generation with full contextual image manipulation:
   - Area-averaged latent mask downsampling with in-step background latent re-injection:
     $$z_t = (1 - M) \odot z_{\text{orig}, t} + M \odot z_{\text{denoised}, t}$$
 - [ ] **End-to-End Visual Quality on Flux.2 Models**:
-  - Full end-to-end photorealistic validation on Flux.2 family awaiting final Klein-9B / Dev conditioning convergence.
+  - Klein-9B img2img **verified photorealistic** (`test_flux_img2img_9b.rs` → crowned lion from a fox).
+  - Klein-9B inpainting **verified photorealistic** (`test_flux_inpaint_9b.rs` → emerald crown in a circular mask,
+    rest of image preserved).
+  - Full end-to-end validation on Flux.2 family awaiting final Dev conditioning convergence (see Dev grain notes).
 
 ---
 
