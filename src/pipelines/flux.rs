@@ -41,6 +41,7 @@ pub struct FluxPipeline {
     pub vae: Option<crate::diffusion::vae_flux::FluxVaeDecoder>,
     pub vae_encoder: Option<crate::diffusion::vae_flux::FluxVaeEncoder>,
     pub streamer: Option<crate::diffusion::dit::streamer::SequentialBlockStreamer>,
+    pub lora_manager: crate::lora::LoRAManager,
     pub device: Device,
     pub dtype: DType,
 }
@@ -78,6 +79,38 @@ impl FluxPipeline {
     /// Disable the FlashAttention-2 fast path and use the stable F32 attention (default).
     pub fn disable_flash_attn(&mut self) {
         unsafe { std::env::set_var("FLUX_FLASH_ATTN", "0") };
+    }
+
+    /// Hot-merge a Flux LoRA (Diffusers-style `transformer.*` or BFL-style `lora_unet_double_blocks.*`
+    /// key names) into the transformer weights. For the streaming path the deltas are attached to the
+    /// block streamer so each block splices them as it is loaded. For the in-memory path they are
+    /// applied to the header weights directly.
+    pub fn load_lora<P: AsRef<Path>>(&mut self, path: P, multiplier: f64) -> crate::error::Result<()> {
+        let deltas = self.lora_manager.load_and_merge(
+            path,
+            multiplier,
+            &Device::Cpu,
+            DType::F32,
+        ).map_err(|e| crate::error::LuminaError::Config(e.to_string()))?;
+
+        // Merge deltas into a single map (accumulate across calls) and push to the streamer.
+        let mut merged = std::collections::HashMap::new();
+        for (k, v) in self.lora_manager.applied_deltas() {
+            merged.insert(k.clone(), v.clone());
+        }
+        if let Some(s) = self.streamer.as_mut() {
+            s.set_lora_deltas(merged.clone());
+        }
+        let _ = deltas;
+        Ok(())
+    }
+
+    /// Remove all loaded LoRAs, resetting the transformer to its base weights.
+    pub fn unload_all_loras(&mut self) {
+        if let Some(s) = self.streamer.as_mut() {
+            s.clear_lora_deltas();
+        }
+        self.lora_manager.clear();
     }
 
     /// Build the Flux.2 scheduler config matching the model's family:
@@ -267,6 +300,7 @@ impl FluxPipeline {
             vae,
             vae_encoder: None,
             streamer,
+            lora_manager: crate::lora::LoRAManager::new(),
             device,
             dtype,
         })

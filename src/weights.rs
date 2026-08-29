@@ -403,6 +403,87 @@ impl<'a> WeightRouter<'a> {
         Ok(tensor)
     }
 
+    /// Apply LoRA deltas to a single transformer weight, handling the fused QKV projection.
+    ///
+    /// Flux MMDiT stores Q,K,V in ONE linear (`img_attn.qkv.weight`, shape `[3*dim, in]`). LoRAs may
+    /// target a single projection (`attn.to_q`, `.to_k`, `.to_v`), producing a delta of shape
+    /// `[dim, in]`. Such deltas carry a `@Q` / `@K` / `@V` tag in their key. A plain delta (shape
+    /// `[3*dim, in]`, BFL format) is applied directly. This reconciles both.
+    pub fn apply_flux_delta_to_tensor(
+        &self,
+        key: &str,
+        tensor: Tensor,
+        target_device: &Device,
+        target_dtype: DType,
+    ) -> Result<Tensor> {
+        apply_flux_deltas_to_tensor(&self.lora_deltas, key, tensor, target_device, target_dtype)
+    }
+}
+
+/// Standalone helper used by the sequential streamer (which has `&HashMap<String, Tensor>` rather
+/// than a `&WeightRouter`) to splice LoRA deltas into a transformer weight during per-block loading.
+pub fn apply_flux_deltas_to_tensor(
+    deltas: &HashMap<String, Tensor>,
+    key: &str,
+    tensor: Tensor,
+    target_device: &Device,
+    target_dtype: DType,
+) -> Result<Tensor> {
+    let weight_key = if !key.ends_with(".weight") { format!("{key}.weight") } else { key.to_string() };
+    let weight_key_stripped = weight_key.strip_suffix(".weight").unwrap_or(&weight_key).to_string();
+
+    // Plain (already fused / BFL) delta that matches the whole tensor.
+    if let Some(delta) = deltas.get(&weight_key) {
+        let d = delta.to_device(target_device)?.to_dtype(target_dtype)?;
+        if d.shape() == tensor.shape() {
+            return Ok((&tensor + &d)?);
+        }
+    }
+
+    // Sliced QKV deltas: find "@Q"/"@K"/"@V" entries and place each into its fused slab.
+    let fused = if tensor.dims().len() == 2 { tensor.dim(0)? } else { 0 };
+    let slab_of = |tag: &str| {
+        let base = weight_key.strip_suffix(".weight").unwrap_or(&weight_key);
+        let tagged = format!("{base}{tag}.weight");
+        deltas.get(&tagged).filter(|d| d.dims().len() == 2).map(|d| d.dim(0).unwrap_or(0))
+    };
+    let mut slice_dim: Option<usize> = None;
+    for tag in ["@Q", "@K", "@V"] {
+        if let Some(sz) = slab_of(tag) {
+            slice_dim = Some(sz);
+            break;
+        }
+    }
+    let Some(slab) = slice_dim else { return Ok(tensor); };
+    if fused < slab * 3 {
+        return Ok(tensor); // not a fused 3-slab projection; nothing to splice
+    }
+
+    let base = tensor.to_device(target_device)?.to_dtype(target_dtype)?;
+    let in_dim = base.dim(1)?;
+    let mut slabs = Vec::new();
+    for tag in ["@Q", "@K", "@V"] {
+        let tagged = format!("{weight_key_stripped}{tag}.weight");
+        let existing_slab = match tag {
+            "@Q" => base.narrow(0, 0, slab)?,
+            "@K" => base.narrow(0, slab, slab)?,
+            _ => base.narrow(0, slab * 2, slab)?,
+        };
+        if let Some(delta) = deltas.get(&tagged) {
+            let d = delta.to_device(target_device)?.to_dtype(target_dtype)?;
+            if d.dims() == [slab, in_dim] {
+                slabs.push((&existing_slab + &d)?);
+            } else {
+                slabs.push(existing_slab);
+            }
+        } else {
+            slabs.push(existing_slab);
+        }
+    }
+    Tensor::cat(&slabs, 0).map_err(LuminaError::Candle)
+}
+
+impl<'a> WeightRouter<'a> {
     pub fn var_builder_for_prefix(&self, primary_prefix: &str, alt_prefixes: &[&str]) -> Result<VarBuilder<'static>> {
         let mut tensors = HashMap::new();
 

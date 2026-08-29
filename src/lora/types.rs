@@ -7,6 +7,9 @@ pub enum LoRATarget {
     UNet,
     ClipL,
     ClipG,
+    /// Flux MMDiT transformer (double/single stream blocks). Deltas are keyed with BFL-style names
+    /// such as `double_blocks.0.img_attn.qkv.weight` / `single_blocks.0.linear1.weight`.
+    Flux,
 }
 
 #[derive(Debug, Clone)]

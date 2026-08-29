@@ -5,7 +5,7 @@ use candle_nn::VarBuilder;
 use std::collections::HashMap;
 use std::sync::Arc;
 use crate::diffusion::dit::blocks::{DoubleStreamBlock, SingleStreamBlock};
-use crate::weights::SafeTensorsArchive;
+use crate::weights::{SafeTensorsArchive, apply_flux_deltas_to_tensor};
 
 /// Stream-loads individual MMDiT blocks into GPU VRAM on-demand and drops them after computation
 pub struct SequentialBlockStreamer {
@@ -15,6 +15,9 @@ pub struct SequentialBlockStreamer {
     hidden_dim: usize,
     num_heads: usize,
     mlp_ratio: usize,
+    /// Optional LoRA deltas (BFL-style names, possibly `@Q`/`@K`/`@V`-tagged) to splice into each
+    /// block's weights as it is streamed in.
+    lora_deltas: Option<Arc<HashMap<String, Tensor>>>,
 }
 
 impl SequentialBlockStreamer {
@@ -33,7 +36,19 @@ impl SequentialBlockStreamer {
             hidden_dim,
             num_heads,
             mlp_ratio,
+            lora_deltas: None,
         }
+    }
+
+    /// Attach LoRA deltas (BFL-style names, possibly `@Q`/`@K`/`@V`-tagged) to splice into each
+    /// streamed block's weights.
+    pub fn set_lora_deltas(&mut self, lora_deltas: HashMap<String, Tensor>) {
+        self.lora_deltas = Some(Arc::new(lora_deltas));
+    }
+
+    /// Clear any attached LoRA deltas.
+    pub fn clear_lora_deltas(&mut self) {
+        self.lora_deltas = None;
     }
 
     /// Load and execute a single DoubleStreamBlock on GPU, then return result
@@ -64,6 +79,10 @@ impl SequentialBlockStreamer {
             if let Some(suffix) = matched_suffix {
                 let t = self.archive.get_tensor(key, &self.device, self.dtype)
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                let t = if let Some(deltas) = &self.lora_deltas {
+                    apply_flux_deltas_to_tensor(deltas, &format!("{prefix}{suffix}"), t, &self.device, self.dtype)
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?
+                } else { t };
                 tensors.insert(suffix.to_string(), t);
             }
         }
@@ -129,6 +148,10 @@ impl SequentialBlockStreamer {
             if let Some(suffix) = matched_suffix {
                 let t = self.archive.get_tensor(key, &self.device, self.dtype)
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                let t = if let Some(deltas) = &self.lora_deltas {
+                    apply_flux_deltas_to_tensor(deltas, &format!("{prefix}{suffix}"), t, &self.device, self.dtype)
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?
+                } else { t };
                 tensors.insert(suffix.to_string(), t);
             }
         }

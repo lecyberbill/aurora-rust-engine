@@ -108,6 +108,13 @@ impl LoRALoader {
 }
 
 fn resolve_target_and_param(base_name: &str) -> (LoRATarget, String) {
+    if base_name.starts_with("transformer.") {
+        // Diffusers-style Flux LoRA: transformer.transformer_blocks.N.attn.to_q ...
+        return resolve_diffusers_flux_name(base_name);
+    } else if base_name.starts_with("lora_unet_") && base_name.contains("_blocks_") {
+        // BFL-style / Kohya Flux LoRA: lora_unet_double_blocks.N.img_attn_qkv ...
+        return resolve_bfl_flux_name(base_name);
+    }
     if base_name.starts_with("lora_unet_") {
         let unet_raw = base_name.strip_prefix("lora_unet_").unwrap();
         let param = translate_kohya_unet_name(unet_raw);
@@ -132,6 +139,91 @@ fn resolve_target_and_param(base_name: &str) -> (LoRATarget, String) {
     } else {
         (LoRATarget::UNet, format!("unet.{}.weight", base_name))
     }
+}
+
+/// Flux Diffusers-style mapping: `transformer.transformer_blocks.{i}.attn.to_q` (etc.).
+/// Returns BFL-style names; QKV projections are annotated with a `@Q`/`@K`/`@V` slice tag so the
+/// consumer places the delta into the correct slab of the fused `*.qkv.weight`.
+fn resolve_diffusers_flux_name(base: &str) -> (LoRATarget, String) {
+    let raw = base.strip_prefix("transformer.").unwrap_or(base);
+    let mut parts = raw.splitn(3, '.');
+    let _ = parts.next(); // "transformer_blocks" | "single_transformer_blocks"
+    let idx_str = parts.next().unwrap_or("0");
+    let rest = parts.next().unwrap_or("");
+    let idx = idx_str.parse::<usize>().unwrap_or(0);
+
+    let double = base.contains("transformer_blocks") && !base.contains("single_transformer_blocks");
+    let bprefix = if double { format!("double_blocks.{idx}") } else { format!("single_blocks.{idx}") };
+
+    let mapped = if double {
+        match rest {
+            r if r.starts_with("attn.to_q") => Some(format!("{bprefix}.img_attn.qkv@Q")),
+            r if r.starts_with("attn.to_k") => Some(format!("{bprefix}.img_attn.qkv@K")),
+            r if r.starts_with("attn.to_v") => Some(format!("{bprefix}.img_attn.qkv@V")),
+            r if r.starts_with("attn.to_out.0") => Some(format!("{bprefix}.img_attn.proj")),
+            r if r.starts_with("attn.to_add_out") => Some(format!("{bprefix}.txt_attn.proj")),
+            r if r.starts_with("attn.add_k_proj") => Some(format!("{bprefix}.txt_attn.qkv@K")),
+            r if r.starts_with("attn.add_q_proj") => Some(format!("{bprefix}.txt_attn.qkv@Q")),
+            r if r.starts_with("attn.add_v_proj") => Some(format!("{bprefix}.txt_attn.qkv@V")),
+            r if r.starts_with("attn.add_out_proj") => Some(format!("{bprefix}.txt_attn.proj")),
+            r if r.starts_with("ff.net.0.proj") => Some(format!("{bprefix}.img_mlp.0")),
+            r if r.starts_with("ff.net.2") => Some(format!("{bprefix}.img_mlp.2")),
+            r if r.starts_with("ff.net.0") || r.starts_with("ff.net.1") => Some(format!("{bprefix}.img_mlp.0")),
+            r if r.starts_with("norm1.linear") => Some(format!("{bprefix}.img_mod.lin")),
+            r if r.starts_with("norm1_context.linear") => Some(format!("{bprefix}.txt_mod.lin")),
+            _ => None,
+        }
+    } else {
+        match rest {
+            // Single-stream `linear1` fuses [Q|K|V|MLP]; skip attn QKV slices (splicing is fragile),
+            // but keep unambiguous single-stream projections.
+            r if r.starts_with("attn.to_out.0") => Some(format!("{bprefix}.proj_out")),
+            r if r.starts_with("proj_mlp") => Some(format!("{bprefix}.linear2")),
+            r if r.starts_with("norm.linear") => Some(format!("{bprefix}.modulation.lin")),
+            _ => None,
+        }
+    };
+
+    match mapped {
+        Some(p) => (LoRATarget::Flux, format!("{}.weight", p)),
+        None => (LoRATarget::Flux, format!("{}.{}.weight", bprefix, rest.replace('.', "_"))),
+    }
+}
+
+/// Flux BFL-style mapping: `lora_unet_double_blocks.{i}.img_attn_qkv` (etc.) — already BFL names.
+fn resolve_bfl_flux_name(base: &str) -> (LoRATarget, String) {
+    let raw = base.strip_prefix("lora_unet_").unwrap_or(base);
+
+    // Split into the block-scope prefix (double_blocks.{i} / single_blocks.{i}) and the rest.
+    let (scope, rest) = if let Some(pos) = raw.find("_blocks_") {
+        let scope_end = raw[pos..].find('_').map(|p| pos + p).unwrap_or(raw.len());
+        let scope = raw[..scope_end].replace("double_blocks", "double_blocks").replace("single_blocks", "single_blocks");
+        let rest = raw[scope_end..].trim_start_matches('_');
+        (scope, rest)
+    } else {
+        (raw.to_string(), "")
+    };
+
+    // Normalise underscored sub-tokens into dotted BFL names.
+    let mut mapped = rest.replace('_', ".");
+    for (u, d) in [
+        ("img.attn.qkv", "img_attn.qkv"),
+        ("txt.attn.qkv", "txt_attn.qkv"),
+        ("img.attn.proj", "img_attn.proj"),
+        ("txt.attn.proj", "txt_attn.proj"),
+        ("img.mlp.", "img_mlp."),
+        ("txt.mlp.", "txt_mlp."),
+        ("img.mod.lin", "img_mod.lin"),
+        ("txt.mod.lin", "txt_mod.lin"),
+        ("modulation.lin", "modulation.lin"),
+        ("norm.query.norm", "norm.query_norm"),
+        ("norm.key.norm", "norm.key_norm"),
+        ("query.norm", "norm.query_norm"),
+        ("key.norm", "norm.key_norm"),
+    ] {
+        mapped = mapped.replace(u, d);
+    }
+    (LoRATarget::Flux, format!("{}.{}.weight", scope, mapped))
 }
 
 fn translate_kohya_unet_name(name: &str) -> String {
