@@ -440,47 +440,49 @@ pub fn apply_flux_deltas_to_tensor(
         }
     }
 
-    // Sliced QKV deltas: find "@Q"/"@K"/"@V" entries and place each into its fused slab.
-    let fused = if tensor.dims().len() == 2 { tensor.dim(0)? } else { 0 };
-    let slab_of = |tag: &str| {
-        let base = weight_key.strip_suffix(".weight").unwrap_or(&weight_key);
-        let tagged = format!("{base}{tag}.weight");
-        deltas.get(&tagged).filter(|d| d.dims().len() == 2).map(|d| d.dim(0).unwrap_or(0))
-    };
-    let mut slice_dim: Option<usize> = None;
-    for tag in ["@Q", "@K", "@V"] {
-        if let Some(sz) = slab_of(tag) {
-            slice_dim = Some(sz);
-            break;
-        }
+    // Sliced QKV deltas. Rows-sliced (`@Q`/`@K`/`@V`, shape [slab, in]) target a fused projection
+    // (Q|K|V stacked on rows, e.g. `*.qkv` = [3*dim, in] or single-stream `linear1` = [9*dim, in]).
+    let base0 = tensor.to_device(target_device)?.to_dtype(target_dtype)?;
+    if base0.dims().len() != 2 {
+        return Ok(tensor); // only 2D Linear/Conv weights are spliced
     }
-    let Some(slab) = slice_dim else { return Ok(tensor); };
-    if fused < slab * 3 {
-        return Ok(tensor); // not a fused 3-slab projection; nothing to splice
+    let (out, cols) = (base0.dim(0)?, base0.dim(1)?);
+
+    let row_slab = ["@Q", "@K", "@V"].iter().find_map(|&t| deltas.get(&format!("{weight_key_stripped}{t}.weight")).map(|d| d.dim(0).unwrap_or(0)));
+
+    if let Some(slab) = row_slab {
+        if out < slab * 3 { return Ok(tensor); }
+        // Preserve remaining rows (e.g. single-stream linear1 = [Q|K|V|MLP] has 9*slab rows); rebuild
+        // with Q,K,V spliced and any extra rows untouched.
+        let build_slab = |tag: &str, base: &Tensor| -> Result<Tensor> {
+            let tagged = format!("{weight_key_stripped}{tag}.weight");
+            let existing = match tag {
+                "@Q" => base.narrow(0, 0, slab).map_err(LuminaError::Candle)?,
+                "@K" => base.narrow(0, slab, slab).map_err(LuminaError::Candle)?,
+                _ => base.narrow(0, slab * 2, slab).map_err(LuminaError::Candle)?,
+            };
+            if let Some(delta) = deltas.get(&tagged) {
+                let d = delta.to_device(target_device).map_err(LuminaError::Candle)?.to_dtype(target_dtype).map_err(LuminaError::Candle)?;
+                if d.dims() == [slab, cols] {
+                    Ok((&existing + &d).map_err(LuminaError::Candle)?)
+                } else {
+                    Ok(existing)
+                }
+            } else {
+                Ok(existing)
+            }
+        };
+        let q = build_slab("@Q", &base0)?;
+        let k = build_slab("@K", &base0)?;
+        let v = build_slab("@V", &base0)?;
+        if out == slab * 3 {
+            return Tensor::cat(&[&q, &k, &v], 0).map_err(LuminaError::Candle);
+        }
+        let tail = base0.narrow(0, slab * 3, out - slab * 3).map_err(LuminaError::Candle)?;
+        Tensor::cat(&[&q, &k, &v, &tail], 0).map_err(LuminaError::Candle);
     }
 
-    let base = tensor.to_device(target_device)?.to_dtype(target_dtype)?;
-    let in_dim = base.dim(1)?;
-    let mut slabs = Vec::new();
-    for tag in ["@Q", "@K", "@V"] {
-        let tagged = format!("{weight_key_stripped}{tag}.weight");
-        let existing_slab = match tag {
-            "@Q" => base.narrow(0, 0, slab)?,
-            "@K" => base.narrow(0, slab, slab)?,
-            _ => base.narrow(0, slab * 2, slab)?,
-        };
-        if let Some(delta) = deltas.get(&tagged) {
-            let d = delta.to_device(target_device)?.to_dtype(target_dtype)?;
-            if d.dims() == [slab, in_dim] {
-                slabs.push((&existing_slab + &d)?);
-            } else {
-                slabs.push(existing_slab);
-            }
-        } else {
-            slabs.push(existing_slab);
-        }
-    }
-    Tensor::cat(&slabs, 0).map_err(LuminaError::Candle)
+    Ok(tensor)
 }
 
 impl<'a> WeightRouter<'a> {

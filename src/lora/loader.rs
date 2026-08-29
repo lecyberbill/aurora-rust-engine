@@ -175,8 +175,10 @@ fn resolve_diffusers_flux_name(base: &str) -> (LoRATarget, String) {
         }
     } else {
         match rest {
-            // Single-stream `linear1` fuses [Q|K|V|MLP]; skip attn QKV slices (splicing is fragile),
-            // but keep unambiguous single-stream projections.
+            // Single-stream `linear1` = [Q|K|V|MLP] fused along ROWS (shape [dim*9, dim]); slice rows.
+            r if r.starts_with("attn.to_q") => Some(format!("{bprefix}.linear1@Q")),
+            r if r.starts_with("attn.to_k") => Some(format!("{bprefix}.linear1@K")),
+            r if r.starts_with("attn.to_v") => Some(format!("{bprefix}.linear1@V")),
             r if r.starts_with("attn.to_out.0") => Some(format!("{bprefix}.proj_out")),
             r if r.starts_with("proj_mlp") => Some(format!("{bprefix}.linear2")),
             r if r.starts_with("norm.linear") => Some(format!("{bprefix}.modulation.lin")),
