@@ -79,6 +79,20 @@
   - Instant $< 10$s patch application with **0 MB additional VRAM allocation** during inference.
   - Seamless unloading (`unload_all_loras`) with bit-for-bit base weight recovery.
 
+### ✅ Milestone 3b: LoRA on the Flux.MMDiT family (COMPLETED & VERIFIED)
+- [x] **Flux LoRA key remapping** (`src/lora/loader.rs`): handles **both** conventions —
+  Diffusers (`transformer.transformer_blocks.{i}.attn.to_q`, `single_transformer_blocks.{i}.attn.to_k`)
+  and BFL/native (`lora_unet_double_blocks.{i}.img_attn_qkv`, `lora_unet_single_blocks.{i}.linear1`),
+  mapping to BFL-style `double_blocks.{i}.*` / `single_blocks.{i}.*` names.
+- [x] **Fused QKV/linear1 splicing** (`src/weights.rs` `apply_flux_deltas_to_tensor`): places a single
+  projection delta into the correct slab of the row-fused `img_attn.qkv` (`[3*d, in]`) and single-stream
+  `linear1` (`[9*d, in]`, Q|K|V|MLP, preserving the MLP tail).
+- [x] **Low-VRAM streaming injection** (`src/diffusion/dit/streamer.rs`): deltas are spliced into each
+  block's weights as it is streamed in — **0 MB additional VRAM**, compatible with sub-8GB inference.
+- [x] **Pipeline API** (`src/pipelines/flux.rs`): `FluxPipeline::load_lora()` / `unload_all_loras()`.
+- [x] **End-to-end verified**: a Flux.1 LoRA visibly changes the render vs the baseline
+  (`outputs/flux_showcase/flux_lora_applied.png`).
+
 ---
 
 ### ✅ Milestone 4: Image-to-Image (Img2Img) Pipeline (COMPLETED)

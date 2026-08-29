@@ -524,6 +524,34 @@ for lora in pipeline.loaded_loras() {
 pipeline.unload_all_loras()?;
 ```
 
+#### LoRA on the Flux MMDiT family (Flux.1 / Flux.2-Klein)
+
+The same `load_lora` / `unload_all_loras` API also works on the Flux MMDiT pipeline (`FluxPipeline`),
+and accepts **both** common LoRA key conventions transparently:
+
+- **Diffusers style** — `transformer.transformer_blocks.{i}.attn.to_q` / `single_transformer_blocks.{i}.attn.to_k`
+- **BFL / native style** — `lora_unet_double_blocks.{i}.img_attn_qkv` / `lora_unet_single_blocks.{i}.linear1`
+
+```rust
+use aurora_rust_engine::pipelines::FluxPipeline;
+
+let mut pipeline = FluxPipeline::from_single_file_streaming("<MODELS_DIR>/flux1-dev-fp8.safetensors", device)?;
+pipeline.enable_flash_attn();
+
+// Hot-merge a Flux LoRA (key convention auto-detected, applied per-block in the streamer)
+pipeline.load_lora("<MODELS_DIR>/loras/my_flux_style.safetensors", 0.85)?;
+
+// Generate — the merged weights are applied with zero extra VRAM (sequential block streaming)
+let (image, _) = pipeline.generate_with_metrics(params, None)?;
+
+// Revert to base weights
+pipeline.unload_all_loras();
+```
+
+Because the transformer weights are loaded in a low-VRAM block-by-block streamer, each LoRA delta is
+spliced into a block's weight (including the fused `img_attn.qkv` / `linear1` Q·K·V slabs) as that block
+is streamed in — so LoRAs add **no runtime VRAM overhead** and are compatible with sub-8GB inference.
+
 ---
 
 ### ControlNet (Canny Edge)
