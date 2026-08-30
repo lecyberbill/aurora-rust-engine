@@ -42,13 +42,19 @@ Without this you get `nvcc fatal : Cannot find compiler 'cl.exe' in PATH`. With 
 |---|---|---|---|
 | Too few steps (under-denoising) | 20 vs 30 steps, 1024 | ❌ Same grain | `flux_dev_1024_seed42` vs `flux_dev_1024_s30` (same) |
 | Dynamic shifting (use_dynamic_shifting) | 384, 28 steps | ❌ **Regression → chaos** | `flux_dev_384_s28.png` — reverted |
+| Resolution-dependent mu schedule | 1024, 20 steps | ❌ Identical grain | `flux_dev_1024_s20_g3.5.png` (dyn) == statique |
 | Guidance mis-applied | `guidance_scale=1.0`, 1024 | ❌ Grain persists | `flux_dev_1024_s20_g1.png` |
 | Text RMS normalisation (0.4→1.9) | 384, 20 steps | ❌ Wrong per reference | reverted; ref feeds native ~0.4 |
 | FP8 `scale_weight` dequant | Klein-9B fp8 | ✅ Correct | `flux_klein_9b_fp8_test.png` (perfect) |
 | RoPE 4D / theta | shared with Kleins | ✅ Correct | Klein-9B fp8 (same code) perfect |
 | Klein `shift=2.02` path | — | ❌ not for Dev | Dev uses default static shift=3.0 |
+| AdaLN-Zero chunk order (single/double) | code vs ref | ✅ Correct | `(shift,scale,gate)`, `(1+scale)·Norm+shift`, `x+gate·Out` |
+| Dev block dims (linear1/linear2/mlp/qkv) | probe | ✅ Correct | [55296,6144]/[6144,24576]/[36864,6144]/QKV 18432 |
+| Mistral layers/width | probe | ✅ Correct | 30 layers, hidden 5120, txt_in 15360 |
+| vector_in / pooled present? | probe | ✅ none | Dev is text-only (guidance_in only) |
 
-**Concluded**: grain is specific to `flux2DevFp8Scaled_fp8Scaled.safetensors`.
+**Concluded**: grain is specific to `flux2DevFp8Scaled_fp8Scaled.safetensors`. The transformer math
+(blocks, modulation, dims, text conditioning, schedule, guidance) is verified correct against the reference.
 
 ---
 
