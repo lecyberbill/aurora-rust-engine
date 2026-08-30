@@ -487,4 +487,23 @@ for the Flux text encoders.
 - **Scope risk**: full LLM features (finetuning, tools, agents, serving) would balloon hugely. Keep it as
   "run the LLMs we already ship for text conditioning, now for text output".
 
+#### First concrete use-case: prompt enrichment & translation (for image generation)
+
+The most valuable near-term application of Milestone 16 is **not** standalone chat — it is a **prompt
+enhancer / translator** that sits *in front of* the image generator:
+
+```
+user prompt (short / FR)  ──▶ LLM (Qwen/Mistral, already loaded) ──▶ enriched EN prompt ──▶ image model
+```
+
+- **Enrich**: rewrite a terse prompt into a detailed, structured English prompt (subject, lighting,
+  camera, style, composition) that image models follow better.
+- **Translate**: `prompt:<fr>` → `en` so a user writing in French/any language gets a native quality
+  image without hand-writing long English prompts.
+- **Style expansion**: expand a style keyword into full descriptor text.
+
+This needs only the **decoder-only generation loop** (Milestone 16 §1) plus a small `PromptEnhancer`
+brick — no new model ecosystem, and it directly improves the image UX for everyone using the engine.
+Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alongside `FluxPipeline`.
+
 ---
