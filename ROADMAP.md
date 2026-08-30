@@ -65,6 +65,19 @@
   - End-to-end UNet denoising speed improved from **1.18 it/s to 1.94 it/s** (50 steps in 25.8s on RTX 4070 Ti).
   - Strict numerical parity validated with maximum absolute difference $\le 0.000244$.
 
+### ✅ Milestone 2b: Format-agnostic weight bricks & unified model hub (COMPLETED & VERIFIED)
+- [x] **`WeightsSource` trait** (`src/weights.rs`): format-agnostic weight access (`get_tensor`, `contains`,
+  `raw_info`, `keys`, `describe`) consumed by the encoders / transformer / VAE. Implementations:
+  - `SafeTensorsArchive` — single file and **multi-shards** (`open_shards`, `open_shards_dir`).
+  - `GgufWeights` — llama.cpp **GGUF** (dequantises on the fly via `candle::quantized::gguf_file`).
+- [x] **`ModelHub` + `ModelOrigin`** (`src/hub.rs`): resolves a model origin to local paths —
+  `Local` (Civitai, no download), `Hf` (HF repo / mirror via `HF_ENDPOINT` / `HF_HOME` / `HF_TOKEN`),
+  `Url`. `HF_ENDPOINT` allows pointing at any HF-compatible mirror (e.g. Citai) with **no code change**.
+- [x] **Generalised encoders**: `Qwen3TextEncoder::from_archive` / `Mistral3TextEncoder::from_weights` take
+  `&dyn WeightsSource` / `Arc<dyn WeightsSource>`, so the same brick assembles from safetensors OR GGUF.
+- [x] **`LuminaError::Context`** variant; `hub`/`gguf` modules registered.
+- [x] **Docs**: multi-format bricks + model origins in the User Guide.
+
 ---
 
 ### ✅ Milestone 3: LoRA & LyCORIS Engine & In-Memory Hot Weight Merging (COMPLETED)
@@ -92,6 +105,17 @@
 - [x] **Pipeline API** (`src/pipelines/flux.rs`): `FluxPipeline::load_lora()` / `unload_all_loras()`.
 - [x] **End-to-end verified**: a Flux.1 LoRA visibly changes the render vs the baseline
   (`outputs/flux_showcase/flux_lora_applied.png`).
+
+### ✅ Milestone 3c: Multi-LoRA stacking, live re-weighting & by-path identification (COMPLETED & VERIFIED)
+- [x] **Per-LoRA delta tracking** (`src/lora/mod.rs`): `LoRAManager` stores deltas per loaded LoRA and
+  derives `applied_deltas` as their sum — overlapping params are **added**, disjoint ones **combined**.
+- [x] **Live re-weighting** (`LoRAManager::set_multiplier` + `set_lora_weight`): change one LoRA's weight
+  at runtime without re-loading the file; the summed deltas are recomputed.
+- [x] **Single-LoRA unload** (`LoRAManager::remove` + `unload_lora`): remove one LoRA at runtime.
+- [x] **By-path/basename identification**: `set_lora_weight` / `unload_lora` accept a file path, basename,
+  or numeric index (`resolve_lora_index`, `index_of_path` normalising `\` / `/`).
+- [x] **Unified API** on both `StableDiffusionXLPipeline` and `FluxPipeline`.
+- [x] **Unit tests**: accumulation, re-weighting, single unload, path resolution (4 tests pass).
 
 ---
 
