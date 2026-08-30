@@ -249,9 +249,10 @@ impl StableDiffusionXLPipeline {
         Ok(())
     }
 
-    /// Re-weight an already-loaded LoRA (by its index in the load order) without reloading it.
-    /// Subtracts the LoRA's old in-place contribution from the GPU weights, then applies the new one.
-    pub fn set_lora_weight(&mut self, index: usize, multiplier: f64) -> crate::error::Result<()> {
+    /// Re-weight an already-loaded LoRA without reloading it. `id` is a file path, basename, or numeric
+    /// index. Subtracts the LoRA's old in-place contribution from the GPU weights, then applies the new.
+    pub fn set_lora_weight<P: AsRef<std::path::Path>>(&mut self, id: P, multiplier: f64) -> crate::error::Result<()> {
+        let index = self.resolve_lora_index(id.as_ref())?;
         let old = self.lora_manager.lora_deltas(index)
             .ok_or_else(|| crate::error::LuminaError::Config(format!("LoRA index {index} not loaded")))?;
 
@@ -269,8 +270,49 @@ impl StableDiffusionXLPipeline {
             self.lora_manager.lora_deltas(index).unwrap().clone();
         self.apply_lora_map(&new_map)?;
 
-        println!("  ✅ LoRA #{} re-weighted to {:.2}.", index, multiplier);
+        println!("  ✅ LoRA '{}' re-weighted to {:.2}.", id.as_ref().display(), multiplier);
         Ok(())
+    }
+
+    /// Remove a single loaded LoRA by id (file path, basename, or numeric index) at runtime, subtracting
+    /// its in-place contribution from the GPU weights.
+    pub fn unload_lora<P: AsRef<std::path::Path>>(&mut self, id: P) -> crate::error::Result<()> {
+        let index = self.resolve_lora_index(id.as_ref())?;
+        let old = self.lora_manager.lora_deltas(index)
+            .ok_or_else(|| crate::error::LuminaError::Config(format!("LoRA index {index} not loaded")))?;
+
+        // Subtract this LoRA's in-place contribution, then drop it (applied_deltas is recomputed).
+        let mut neg_deltas: std::collections::HashMap<String, Tensor> = std::collections::HashMap::new();
+        for (k, v) in old {
+            neg_deltas.insert(k.clone(), v.neg()?);
+        }
+        self.apply_lora_map(&neg_deltas)?;
+
+        self.lora_manager.remove(index)
+            .map_err(|e| crate::error::LuminaError::Config(e.to_string()))?;
+
+        println!("  ✅ LoRA '{}' unloaded.", id.as_ref().display());
+        Ok(())
+    }
+
+    /// Resolve a LoRA id (full path, basename, or numeric index string) to its load index.
+    fn resolve_lora_index(&self, id: &std::path::Path) -> crate::error::Result<usize> {
+        let s = id.to_string_lossy();
+        if let Ok(idx) = s.parse::<usize>() {
+            return Ok(idx);
+        }
+        if let Some(i) = self.lora_manager.index_of_path(&s) {
+            return Ok(i);
+        }
+        let basename = id.file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+        if let Some(i) = self.lora_manager.loaded_loras().iter().position(|l| {
+            let lpath = l.path.replace('\\', "/");
+            let lstem = std::path::Path::new(&lpath).file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+            lpath == s.as_ref() || lstem == basename
+        }) {
+            return Ok(i);
+        }
+        Err(crate::error::LuminaError::Config(format!("LoRA '{}' not loaded", s)))
     }
 
     /// Apply a delta map to UNet / CLIP-L / CLIP-G weights in place.

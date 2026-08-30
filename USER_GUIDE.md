@@ -556,8 +556,8 @@ is streamed in — so LoRAs add **no runtime VRAM overhead** and are compatible 
 
 You can load any number of LoRAs — each keeps its **own weight** (`multiplier`, 0.0–1.0):
 loRA deltas whose weights overlap are **added**; LoRAs targeting different weights are **combined**.
-The `set_lora_weight` method re-weights an already-loaded LoRA (by its load index) on the fly, without
-re-loading the file:
+`set_lora_weight` / `unload_lora` accept a LoRA identified by **file path**, **basename**, or **numeric
+index**, so you can re-weight or remove an individual LoRA on the fly without re-loading the file:
 
 ```rust
 // Load three LoRAs with individual weights (20% / 40% / 30%)
@@ -565,8 +565,11 @@ pipeline.load_lora("loras/a_style.safetensors", 0.20)?;
 pipeline.load_lora("loras/b_theme.safetensors", 0.40)?;
 pipeline.load_lora("loras/c_subject.safetensors", 0.30)?;
 
-// Adjust weight of LoRA #2 (index 1, i.e. "b_theme") to 50% without reloading it
-pipeline.set_lora_weight(1, 0.50)?;
+// Re-weight "b_theme" (by path, basename, or index) to 50% without reloading
+pipeline.set_lora_weight("loras/b_theme.safetensors", 0.50)?;
+
+// Remove just the style LoRA (by basename) at runtime
+pipeline.unload_lora("a_style")?;
 
 // ...generate...
 
@@ -574,8 +577,8 @@ pipeline.set_lora_weight(1, 0.50)?;
 pipeline.unload_all_loras()?;
 ```
 
-The same `load_lora` / `set_lora_weight` / `unload_all_loras` API is available on both the
-`StableDiffusionXLPipeline` and the `FluxPipeline`.
+The same `load_lora` / `set_lora_weight` / `unload_lora` / `unload_all_loras` API is available on both
+the `StableDiffusionXLPipeline` and the `FluxPipeline`.
 
 ---
 

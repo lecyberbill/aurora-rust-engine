@@ -105,9 +105,10 @@ impl FluxPipeline {
         Ok(())
     }
 
-    /// Re-weight an already-loaded LoRA (by its index in the load order) without reloading it.
-    /// `multiplier` is a task weight (e.g. 0.20 == 20%). Updates the streamer's delta map in place.
-    pub fn set_lora_weight(&mut self, index: usize, multiplier: f64) -> crate::error::Result<()> {
+    /// Re-weight an already-loaded LoRA without reloading it. `id` is a file path, basename, or
+    /// numeric index; `multiplier` is a task weight (e.g. 0.20 == 20%). Updates the streamer map.
+    pub fn set_lora_weight<P: AsRef<Path>>(&mut self, id: P, multiplier: f64) -> crate::error::Result<()> {
+        let index = self.resolve_lora_index(id.as_ref())?;
         self.lora_manager.set_multiplier(index, multiplier)
             .map_err(|e| crate::error::LuminaError::Config(e.to_string()))?;
         let mut merged = std::collections::HashMap::new();
@@ -126,6 +127,49 @@ impl FluxPipeline {
             s.clear_lora_deltas();
         }
         self.lora_manager.clear();
+    }
+
+    /// Remove a single loaded LoRA by id (file path, basename, or numeric index) at runtime.
+    pub fn unload_lora<P: AsRef<Path>>(&mut self, id: P) -> crate::error::Result<()> {
+        let index = self.resolve_lora_index(id.as_ref())?;
+        self.lora_manager.remove(index)
+            .map_err(|e| crate::error::LuminaError::Config(e.to_string()))?;
+        let mut merged = std::collections::HashMap::new();
+        for (k, v) in self.lora_manager.applied_deltas() {
+            merged.insert(k.clone(), v.clone());
+        }
+        if let Some(s) = self.streamer.as_mut() {
+            s.set_lora_deltas(merged);
+        }
+        Ok(())
+    }
+
+    /// Resolve a LoRA id (full path, basename, or numeric index string) to its load index.
+    fn resolve_lora_index(&self, id: &Path) -> crate::error::Result<usize> {
+        let s = id.to_string_lossy();
+        if let Ok(idx) = s.parse::<usize>() {
+            return Ok(idx);
+        }
+        // filename without extension
+        let basename = id.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        // full path match, then path match, then basename match
+        if let Some(i) = self.lora_manager.index_of_path(&s) {
+            return Ok(i);
+        }
+        if let Some(i) = self.loaded_loras_normalized().iter().position(|p| p == s.as_ref()) {
+            return Ok(i);
+        }
+        if let Some(i) = self.loaded_loras_basenames().iter().position(|b| *b == basename) {
+            return Ok(i);
+        }
+        Err(crate::error::LuminaError::Config(format!("LoRA '{}' not loaded", s)))
+    }
+
+    fn loaded_loras_normalized(&self) -> Vec<String> {
+        self.lora_manager.loaded_loras().iter().map(|l| l.path.replace('\\', "/")).collect()
+    }
+    fn loaded_loras_basenames(&self) -> Vec<String> {
+        self.lora_manager.loaded_loras().iter().filter_map(|l| Path::new(&l.path).file_stem().map(|s| s.to_string_lossy().into_owned())).collect()
     }
 
     /// Build the Flux.2 scheduler config matching the model's family:

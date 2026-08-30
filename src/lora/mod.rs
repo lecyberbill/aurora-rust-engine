@@ -115,6 +115,13 @@ impl LoRAManager {
         &self.loaded_loras
     }
 
+    /// Find the index of a loaded LoRA by its file path. Returns `None` if not found. The path match
+    /// is by suffix so relative/absolute or `\`/`/` separators still resolve.
+    pub fn index_of_path(&self, path: &str) -> Option<usize> {
+        let norm = path.replace('\\', "/");
+        self.loaded_loras.iter().position(|l| l.path.replace('\\', "/") == norm)
+    }
+
     pub fn applied_deltas(&self) -> &HashMap<String, Tensor> {
         &self.applied_deltas
     }
@@ -123,6 +130,20 @@ impl LoRAManager {
     /// to subtract the old contribution before applying a re-weighted one.
     pub fn lora_deltas(&self, index: usize) -> Option<&HashMap<String, Tensor>> {
         self.per_lora_deltas.get(index)
+    }
+
+    /// Remove a single loaded LoRA (by index), recomputing the summed applied deltas. For in-place
+    /// (SDXL) pipelines the caller must first subtract `lora_deltas(index)` from the GPU weights.
+    pub fn remove(&mut self, index: usize) -> Result<()> {
+        if index >= self.loaded_loras.len() {
+            return Err(candle_core::Error::Msg(format!(
+                "LoRA index {index} out of range (loaded: {})", self.loaded_loras.len()
+            )));
+        }
+        self.per_lora_deltas.remove(index);
+        self.loaded_loras.remove(index);
+        self.recompute_applied()?;
+        Ok(())
     }
 
     pub fn clear(&mut self) {
@@ -194,6 +215,59 @@ mod tests {
         let after = abs_sum(&mgr);
         assert!((after - 3.6).abs() < 1e-3, "after={after}");
         assert_eq!(mgr.loaded_loras()[0].multiplier, 0.5);
+    }
+
+    #[test]
+    fn remove_unloads_single_lora() {
+        let dev = Device::Cpu;
+        let mut mgr = LoRAManager::new();
+        mgr.device = dev.clone();
+        mgr.dtype = DType::F32;
+
+        let l1 = loaded("a", vec![pair("p", 1.0)]);
+        let l2 = loaded("b", vec![pair("q", 1.0)]);
+        let mut d1 = HashMap::new();
+        d1.insert("p.weight".to_string(), LoRAMerger::compute_delta(&l1.pairs[0], 0.3).unwrap());
+        mgr.per_lora_deltas.push(d1);
+        mgr.loaded_loras.push(l1);
+        let mut d2 = HashMap::new();
+        d2.insert("q.weight".to_string(), LoRAMerger::compute_delta(&l2.pairs[0], 0.7).unwrap());
+        mgr.per_lora_deltas.push(d2);
+        mgr.loaded_loras.push(l2);
+        mgr.recompute_applied().unwrap();
+
+        assert_eq!(mgr.loaded_loras().len(), 2);
+        assert_eq!(mgr.applied_deltas().len(), 2);
+
+        // Unload LoRA #0 -> only "q.weight" remains and sum is recomputed.
+        mgr.remove(0).unwrap();
+        assert_eq!(mgr.loaded_loras().len(), 1);
+        assert!(!mgr.applied_deltas().contains_key("p.weight"));
+        assert!(mgr.applied_deltas().contains_key("q.weight"));
+        assert_eq!(mgr.loaded_loras()[0].path, "b");
+    }
+
+    #[test]
+    fn index_of_path_resolves_and_normalizes_separators() {
+        let dev = Device::Cpu;
+        let mut mgr = LoRAManager::new();
+        mgr.device = dev.clone();
+        mgr.dtype = DType::F32;
+
+        let mut d1 = HashMap::new();
+        d1.insert("p.weight".to_string(), LoRAMerger::compute_delta(&pair("p", 1.0), 0.2).unwrap());
+        mgr.per_lora_deltas.push(d1);
+        mgr.loaded_loras.push(loaded("G:\\models\\loras\\cyber.safetensors", vec![pair("p", 1.0)]));
+        let mut d2 = HashMap::new();
+        d2.insert("q.weight".to_string(), LoRAMerger::compute_delta(&pair("q", 1.0), 0.4).unwrap());
+        mgr.per_lora_deltas.push(d2);
+        mgr.loaded_loras.push(loaded("G:\\models\\loras\\style.safetensors", vec![pair("q", 1.0)]));
+        mgr.recompute_applied().unwrap();
+
+        assert_eq!(mgr.index_of_path("G:\\models\\loras\\cyber.safetensors"), Some(0));
+        assert_eq!(mgr.index_of_path("G:/models/loras/cyber.safetensors"), Some(0)); // normalized separators
+        assert_eq!(mgr.index_of_path("G:/models/loras/style.safetensors"), Some(1));
+        assert_eq!(mgr.index_of_path("G:/models/loras/missing.safetensors"), None);
     }
 
     #[test]
