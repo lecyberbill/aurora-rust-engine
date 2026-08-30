@@ -214,6 +214,8 @@ The MMDiT module now covers **Flux.1** (Schnell/Dev) and **Flux.2-Klein-4B**. Th
 - [ ] **Guidance embed / negative-prompt CFG** paths vs. guidance-distilled models (Klein uses `guidance_distilled=True`).
 - [ ] **Reference-image / KV-cache edit** path (Flux.2 `encode_image_refs`, `denoise_cached`).
 - [ ] **CUDA-Graph & batched multi-image** throughput tuning for MMDiT.
+- [ ] **[PROPOSED] Block-Level GPU Kernel Compiler in pure Rust** — see Milestone 14: a Rust DSL → PTX
+  → JIT compiler to emit our own fused kernels and drop the C++-bound FlashAttention/cuBLAS dependency.
 
 ---
 
@@ -345,3 +347,84 @@ Bringing **FLUX.2-Klein-9B** (8 double blocks, 24 single blocks, 4096 hidden dim
   - Single-block streaming bounded to **< 7.5 GB peak VRAM** on consumer GPUs (RTX 4070 Ti).
 - [ ] **Visual Parity Convergence on 9B**:
   - Architecture and streaming execution operate cleanly without crash, but generated images exhibit high-frequency grain texture. Active calibration underway on text projection slices, RoPE axes geometry, and FP8 dynamic activation scales.
+
+---
+
+## 🚀 Milestone 14 (PROPOSED — Architectural Vision): Block-Level GPU Kernel Compiler in Pure Rust
+
+**Goal.** Build a compiler + runtime, written entirely in Rust, that translates a block-level DSL
+(declarative tensor-tile algorithms) into highly-optimized NVIDIA PTX / CUDA — with **no dependency on
+MLIR / LLVM C++**. This is a long-term, self-hosted path toward emitting our own fused kernels
+(attention, VAE ops, quantised mma) instead of relying on `candle`'s C++-backed kernels.
+
+> **Status: PROPOSED / NOT STARTED.** This is a multi-month architectural initiative, tracked here as a
+> design blueprint. It does not block the current engine milestones.
+
+### Vision
+- Compile a **Block-Level DSL** → **PTX text** → JIT `cubin` → execute on the CUDA driver.
+- Replace the C++-bound FlashAttention / cuBLAS kernels we currently call into with **ours**, generated
+  and owned in Rust.
+- Deterministic, dependency-light: strictly identical PTX for identical HIR, zero implicit allocation.
+
+```
+              FRONTEND & eDSL (Rust)           — declarative tensor-tile DSL, typed args, constexpr dims
+                     │  AST / macro expansion
+                     ▼
+              BLOCK-LEVEL IR (HIR)             — spatial (2D/3D) tile ops: BlockLoad/Store/Dot/Reduce
+                     │  lowering & layout transitions
+                     ▼
+              LOWERING ENGINE                  — warp/thread distribution, SRAM swizzling, pipelining
+                     │  hardware materialisation
+                     ▼
+              THREAD-LEVEL IR (LIR)            — scalar/vector instrs, registers, bar.sync
+                     │  text serialisation
+                     ▼
+              BACKEND & PTX EMITTER            — valid PTX per compute capability (sm_80/89/90)
+                     │  JIT compile & dispatch
+                     ▼
+              HOST RUNTIME (CUDA driver)       — VRAM buffers, grid config, async streams
+```
+
+### Layer breakdown
+
+**1. Frontend & eDSL (Rust)** — user-facing kernel API: typed args (`Tensor<f16>`, `Scalar<u32>`),
+compile-time constants (`BLOCK_M = 128`), builds a high-level AST without executing, statically validates
+dim/type constraints.
+
+**2. Block-Level IR (HIR)** — pure tensor-tile computation: operations over whole blocks
+(`BlockLoad`, `BlockStore`, `BlockDot`, `BlockReduce`); a logical grid of blocks with **no** notion of
+`threadIdx`, warps, or physical registers; sequential $K$-accumulation loops for reductions.
+
+**3. Lowering Engine** — maps the block math to physical SM topology:
+- *Layout Engine*: global-memory strides, shared-memory bank/swizzling (XOR) to remove bank conflicts,
+  register/fragment layout across the 32 threads of a warp.
+- *Hardware Mapping*: pattern-match Tensor Core units (`mma.sync` / `wgmma`), auto `ld.global.v4` /
+  `st.global.v4` vectorisation.
+- *Pipelining & Async*: `cp.async` / TMA scheduling, multi-stage double-buffering, `bar.sync` /
+  arrive-wait insertion.
+
+**4. Thread-Level IR (LIR)** — per-thread logic: tensors decomposed into scalar/vector registers,
+explicit physical address math from `threadIdx`/`blockIdx`/strides, explicit out-of-bounds predicates,
+scalar control flow.
+
+**5. Backend & PTX Emitter** — emit NVIDIA intermediate machine code: virtual register naming
+(`%r`, `%f`, `%p`), serialise valid PTX text per target compute capability.
+
+**6. Host Runtime** — orchestrate execution: JIT PTX→`cubin` via the NVIDIA driver, VRAM buffer
+allocation/transfers, grid config (`gridDim`, `blockDim`, dynamic shared mem), async CUDA stream launch.
+
+### Phasing (suggested, incremental)
+1. **Spike**: emit canonical PTX for a single fused kernel (e.g. a small blocked matmul) and run it via
+   the CUDA driver — validate the pipeline end-to-end.
+2. **HIR + lowering** for blocked GEMM with shared-memory swizzling & warp fragments.
+3. **Tensor Core mapping** — `mma.sync.aligned.m16n8k16` for f16/f8; hook into the MMDiT attention path.
+4. **Async/pipelining** (`cp.async`) + multi-stage buffers for streaming kernels.
+5. **Runtime integration** — JIT cache, grid/stream management, and a fallback path whenever a kernel
+   cannot be emitted.
+
+### Synergy with existing engine
+- Replaces the C++-bound FlashAttention-2 / cuBLAS kernels with **self-hosted, generated ones**.
+- Enables bespoke fused ops (attention, VAE, quantised `mma`) the current `candle` layer can't express.
+- Complements the FlashAttention-2 manette (`FLUX_FLASH_ATTN`), letting it fall back to our own kernels.
+
+---
