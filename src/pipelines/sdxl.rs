@@ -249,6 +249,44 @@ impl StableDiffusionXLPipeline {
         Ok(())
     }
 
+    /// Re-weight an already-loaded LoRA (by its index in the load order) without reloading it.
+    /// Subtracts the LoRA's old in-place contribution from the GPU weights, then applies the new one.
+    pub fn set_lora_weight(&mut self, index: usize, multiplier: f64) -> crate::error::Result<()> {
+        let old = self.lora_manager.lora_deltas(index)
+            .ok_or_else(|| crate::error::LuminaError::Config(format!("LoRA index {index} not loaded")))?;
+
+        // 1. Subtract this LoRA's current in-place contribution.
+        let mut neg_deltas: std::collections::HashMap<String, Tensor> = std::collections::HashMap::new();
+        for (k, v) in old {
+            neg_deltas.insert(k.clone(), v.neg()?);
+        }
+        self.apply_lora_map(&neg_deltas)?;
+
+        // 2. Recompute with the new multiplier and apply.
+        self.lora_manager.set_multiplier(index, multiplier)
+            .map_err(|e| crate::error::LuminaError::Config(e.to_string()))?;
+        let new_map: std::collections::HashMap<String, Tensor> =
+            self.lora_manager.lora_deltas(index).unwrap().clone();
+        self.apply_lora_map(&new_map)?;
+
+        println!("  ✅ LoRA #{} re-weighted to {:.2}.", index, multiplier);
+        Ok(())
+    }
+
+    /// Apply a delta map to UNet / CLIP-L / CLIP-G weights in place.
+    fn apply_lora_map(&mut self, delta_map: &std::collections::HashMap<String, Tensor>) -> crate::error::Result<()> {
+        if let Some(unet) = &mut self.unet {
+            unet.apply_lora_deltas(delta_map)?;
+        }
+        if let Some(clip_l) = &mut self.clip_l {
+            clip_l.apply_lora_deltas(delta_map)?;
+        }
+        if let Some(clip_g) = &mut self.clip_g {
+            clip_g.apply_lora_deltas(delta_map)?;
+        }
+        Ok(())
+    }
+
     /// List currently loaded LoRA models and their multipliers
     pub fn loaded_loras(&self) -> &[crate::lora::LoadedLoRA] {
         self.lora_manager.loaded_loras()

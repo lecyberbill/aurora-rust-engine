@@ -105,6 +105,21 @@ impl FluxPipeline {
         Ok(())
     }
 
+    /// Re-weight an already-loaded LoRA (by its index in the load order) without reloading it.
+    /// `multiplier` is a task weight (e.g. 0.20 == 20%). Updates the streamer's delta map in place.
+    pub fn set_lora_weight(&mut self, index: usize, multiplier: f64) -> crate::error::Result<()> {
+        self.lora_manager.set_multiplier(index, multiplier)
+            .map_err(|e| crate::error::LuminaError::Config(e.to_string()))?;
+        let mut merged = std::collections::HashMap::new();
+        for (k, v) in self.lora_manager.applied_deltas() {
+            merged.insert(k.clone(), v.clone());
+        }
+        if let Some(s) = self.streamer.as_mut() {
+            s.set_lora_deltas(merged);
+        }
+        Ok(())
+    }
+
     /// Remove all loaded LoRAs, resetting the transformer to its base weights.
     pub fn unload_all_loras(&mut self) {
         if let Some(s) = self.streamer.as_mut() {
