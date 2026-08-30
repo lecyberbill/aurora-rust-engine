@@ -580,6 +580,37 @@ pipeline.unload_all_loras()?;
 The same `load_lora` / `set_lora_weight` / `unload_lora` / `unload_all_loras` API is available on both
 the `StableDiffusionXLPipeline` and the `FluxPipeline`.
 
+#### LoRA API reference
+
+| Method | Description |
+|---|---|
+| `load_lora(path, multiplier)` | Load a LoRA. `multiplier` (0.0–1.0) is its contribution weight; overlapping deltas are summed, disjoint ones combined. |
+| `set_lora_weight(id, multiplier)` | Re-weight an already-loaded LoRA on the fly without reloading the file. |
+| `unload_lora(id)` | Remove a single loaded LoRA at runtime, restoring the others' combined effect. |
+| `unload_all_loras()` | Remove all LoRAs and restore the exact base checkpoint weights. |
+| `loaded_loras()` | List the currently loaded LoRAs (path, multiplier, alpha/rank scaling). |
+
+`id` in `set_lora_weight` / `unload_lora` may be a **file path**, a **basename** (filename without
+extension), or a **numeric index** (position in load order). Path matching normalises `\` and `/`.
+
+**Example — SDXL with three LoRAs, re-weighted & one removed:**
+```rust
+let mut pipeline = StableDiffusionXLPipeline::from_safetensors("base.safetensors", &device)?;
+
+pipeline.load_lora("loras/style.safetensors", 0.20)?;
+pipeline.load_lora("loras/subject.safetensors", 0.40)?;
+pipeline.load_lora("loras/lighting.safetensors", 0.30)?;
+
+pipeline.set_lora_weight("loras/lighting.safetensors", 0.50)?; // bump lighting to 50%
+pipeline.unload_lora("subject")?;                              // drop the subject LoRA
+
+let img = pipeline.generate(params)?;
+```
+
+> **Note** — the Flux pipeline applies LoRA deltas via a low-VRAM per-block streamer, so LoRAs add
+> **0 MB runtime VRAM**; SDXL applies them in place on the GPU weights. Both restore the base weights
+> exactly on `unload_all_loras()`.
+
 ---
 
 ### ControlNet (Canny Edge)

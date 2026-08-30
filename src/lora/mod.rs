@@ -1,5 +1,30 @@
 ﻿// [WFGY] Zone: SAFE | Î»: 0.20 | Fallbacks: 0 | Action: LoRA & LyCORIS engine root module
 
+//! LoRA & LyCORIS hot weight-merge engine.
+//!
+//! [`LoRAManager`] loads one or more LoRA adapters, computes their weight deltas
+//! (`ΔW = multiplier × (α/r) × (B·A)`), and exposes the combined delta map for a pipeline to apply —
+//! either **in place** on the base weights (SDXL) or **streamed per block** (Flux MMDiT). Each loaded
+//! LoRA keeps its own `multiplier` so they can be stacked and re-weighted independently at runtime.
+//!
+//! ## Multi-LoRA stacking & live weighting
+//!
+//! - [`LoRAManager::load_and_merge`] adds a LoRA; overlapping params are summed, disjoint params combined.
+//! - [`LoRAManager::set_multiplier`] re-weights one loaded LoRA without re-loading the file.
+//! - [`LoRAManager::remove`] unloads a single LoRA; [`LoRAManager::clear`] unloads all.
+//! - [`LoRAManager::index_of_path`] resolves a LoRA by file path (normalising `\` / `/`).
+//!
+//! Both [`crate::pipelines::FluxPipeline`] and [`crate::pipelines::StableDiffusionXLPipeline`] expose a
+//! unified API that accepts a file path, basename, or numeric index:
+//!
+//! ```rust,ignore
+//! pipeline.load_lora("a_style.safetensors", 0.20)?;
+//! pipeline.load_lora("b_theme.safetensors", 0.40)?;
+//! pipeline.set_lora_weight("b_theme.safetensors", 0.50)?;   // re-weight on the fly
+//! pipeline.unload_lora("a_style")?;                        // remove one LoRA
+//! pipeline.unload_all_loras()?;                            // reset to base weights
+//! ```
+
 pub mod loader;
 pub mod merger;
 pub mod types;
