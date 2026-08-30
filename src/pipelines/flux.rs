@@ -178,6 +178,7 @@ impl FluxPipeline {
     /// - distilled (Flux.2-Klein-4B/9B): empirical-mu calibrated schedule.
     fn flux2_scheduler_config(&self) -> FlowMatchEulerConfig {
         if self.transformer.config.guidance_embed {
+            // Flux.2-Dev: static shift=3.0 (resolution-dependent mu gave identical grain).
             FlowMatchEulerConfig::default()
         } else {
             FlowMatchEulerConfig {
