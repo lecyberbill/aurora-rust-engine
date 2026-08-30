@@ -216,6 +216,10 @@ The MMDiT module now covers **Flux.1** (Schnell/Dev) and **Flux.2-Klein-4B**. Th
 - [ ] **CUDA-Graph & batched multi-image** throughput tuning for MMDiT.
 - [ ] **[PROPOSED] Block-Level GPU Kernel Compiler in pure Rust** — see Milestone 14: a Rust DSL → PTX
   → JIT compiler to emit our own fused kernels and drop the C++-bound FlashAttention/cuBLAS dependency.
+- [ ] **[PROPOSED] LoRA Training engine** — see Milestone 15: train a LoRA inside the engine (candle
+  autograd), closing the loop with the existing load/merge/re-weight stack.
+- [ ] **[PROPOSED] LLM text generation (adjacent)** — see Milestone 16: run the Qwen/Mistral LLMs we
+  already ship for text conditioning, now as a decoder-only text pipeline.
 
 ---
 
@@ -426,5 +430,61 @@ allocation/transfers, grid config (`gridDim`, `blockDim`, dynamic shared mem), a
 - Replaces the C++-bound FlashAttention-2 / cuBLAS kernels with **self-hosted, generated ones**.
 - Enables bespoke fused ops (attention, VAE, quantised `mma`) the current `candle` layer can't express.
 - Complements the FlashAttention-2 manette (`FLUX_FLASH_ATTN`), letting it fall back to our own kernels.
+
+---
+
+## 🚀 Milestone 15 (PROPOSED — Architectural Vision): LoRA Training Engine (pure Rust)
+
+**Goal.** Train a LoRA adapter **inside** the engine — closing the loop with the existing LoRA
+loading/merging/stacking stack. This turns `aurora-rust-engine` from a pure inference runtime into a
+**train-and-run** tool for the models it already runs.
+
+> **Status: PROPOSED / NOT STARTED.** Reuses `candle`'s autograd; a natural extension given we already
+> load, stream, merge and re-weight LoRAs.
+
+### What already exists (reuse)
+- LoRA parser (**loader.rs**), delta computation (**merger.rs**), multi-LoRA hot-merge &
+  live re-weighting, by-path/basename identification, per-block weight splicing.
+- Checkpoint loading (safetensors/GGUF/shards), text encoders, scheduler, VAE.
+
+### What needs building
+1. **Trainer loop** — dataset iterators (caption / conditioning + image), batching, loss (MSE, LPIPS, CFG-distilled guidance), optimizer (AdamW / Adafactor with weight decay) over a LoRA's `A`/`B` matrices only (frozen base).
+2. **Backward through MMDiT** — leverage `candle` autograd; freeze transformer/VAE/text-encoder weights, optimise only the injected LoRA deltas (rank-aware, `alpha/r` scaling already modelled).
+3. **Persistence** — export the trained LoRA in both Diffusers (`transformer.*`) and BFL (`lora_unet_*`) key conventions we already read.
+4. **Resume / eval** — load a partially-trained LoRA, continue; a small harness to validate a trained LoRA against the existing `load_lora`/`set_lora_weight` pipeline.
+
+### Synergy
+- Full train→merge→fly-reweight→infer cycle in one binary, no Python.
+- Can co-opt Milestone 14's kernels later for faster backward GEMMs.
+
+---
+
+## 🚀 Milestone 16 (PROPOSED — Adjacent product): LLM chat / text generation (pure Rust)
+
+**Goal.** Offer general **LLM inference** as an adjacent capability. This is *not* image generation —
+it is a separate product mode, but it reuses a large part of the existing Rust infra we already built
+for the Flux text encoders.
+
+> **Status: PROPOSED / NOT STARTED.** A scope expansion beyond image generation; tracked as an
+> adjacent offering. Do **not** start before the core image milestones (Klein-4B/9B, Dev, SD3.5) land.
+
+### What already exists (reuse)
+- **Causal attention + RoPE** (`theta = 10^8`, causal mask) in the text encoders.
+- **Layer-streaming dequantiser** for Mistral-3 / Qwen3 (low-RAM, on-demand block dequant) — proven at
+  < 3.8 GB RAM.
+- MMDiT `DoubleStreamBlock`/`SingleStreamBlock` attention paths & FP8/GGUF weight bricks.
+
+### What needs building
+1. **Decoder-only generation loop** — autoregressive token sampling (top-p/temperature), KV-cache,
+   grammar/format-preserving generation for chat / structured output.
+2. **Text-only pipeline** — prompt→token→logits→sample decoupled from the image VAE/scheduler; a
+   `TextPipeline` parallel to `FluxPipeline`.
+3. **Template support** — chat/tool-call formats for the Qwen/Mistral families we already load.
+
+### Synergy & caution
+- The Qwen3-8B / Mistral-3-Small weights are already loadable here → LLM inference is a small layer on
+  top, not a new model ecosystem.
+- **Scope risk**: full LLM features (finetuning, tools, agents, serving) would balloon hugely. Keep it as
+  "run the LLMs we already ship for text conditioning, now for text output".
 
 ---
