@@ -552,6 +552,31 @@ Because the transformer weights are loaded in a low-VRAM block-by-block streamer
 spliced into a block's weight (including the fused `img_attn.qkv` / `linear1` Q·K·V slabs) as that block
 is streamed in — so LoRAs add **no runtime VRAM overhead** and are compatible with sub-8GB inference.
 
+#### Stacking & re-weighting multiple LoRAs
+
+You can load any number of LoRAs — each keeps its **own weight** (`multiplier`, 0.0–1.0):
+loRA deltas whose weights overlap are **added**; LoRAs targeting different weights are **combined**.
+The `set_lora_weight` method re-weights an already-loaded LoRA (by its load index) on the fly, without
+re-loading the file:
+
+```rust
+// Load three LoRAs with individual weights (20% / 40% / 30%)
+pipeline.load_lora("loras/a_style.safetensors", 0.20)?;
+pipeline.load_lora("loras/b_theme.safetensors", 0.40)?;
+pipeline.load_lora("loras/c_subject.safetensors", 0.30)?;
+
+// Adjust weight of LoRA #2 (index 1, i.e. "b_theme") to 50% without reloading it
+pipeline.set_lora_weight(1, 0.50)?;
+
+// ...generate...
+
+// Reset everything back to the base checkpoint weights
+pipeline.unload_all_loras()?;
+```
+
+The same `load_lora` / `set_lora_weight` / `unload_all_loras` API is available on both the
+`StableDiffusionXLPipeline` and the `FluxPipeline`.
+
 ---
 
 ### ControlNet (Canny Edge)
