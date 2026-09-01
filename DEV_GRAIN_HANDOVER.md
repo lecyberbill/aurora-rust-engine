@@ -52,9 +52,20 @@ Without this you get `nvcc fatal : Cannot find compiler 'cl.exe' in PATH`. With 
 | Dev block dims (linear1/linear2/mlp/qkv) | probe | ✅ Correct | [55296,6144]/[6144,24576]/[36864,6144]/QKV 18432 |
 | Mistral layers/width | probe | ✅ Correct | 30 layers, hidden 5120, txt_in 15360 |
 | vector_in / pooled present? | probe | ✅ none | Dev is text-only (guidance_in only) |
+| **Official BF16 (Diffusers layout)** | 1024, 20 steps, 69 min | ❌ **flat blue frame** | `flux_dev_1024_s20_g3.5.png` (BF16) — model does NOT denoise |
 
-**Concluded**: grain is specific to `flux2DevFp8Scaled_fp8Scaled.safetensors`. The transformer math
-(blocks, modulation, dims, text conditioning, schedule, guidance) is verified correct against the reference.
+**BF16 / Diffusers-layout note (new):** The official `flux2-dev` BF16 checkpoint (7 shards) uses the
+**Diffusers** key layout (`transformer_blocks.*`, `single_transformer_blocks.*`, `x_embedder`,
+`context_embedder`, `time_guidance_embed.timestep/guidance_embedder`, `.linear.weight` modulations).
+We added a `flux_diffusers_to_bfl` remapper + shard-directory loading so it loads consistently
+(low VRAM, ~5GB peak), **but the render comes out as a flat blue frame** — the model receives the
+conditioning but does not denoise. This points to a **conditioning wiring bug** specific to the
+Diffusers-layout loader (NOT an architectural issue), still under investigation. The BFL fp8Scaled
+path remains the working one (fox + residual grain).
+
+**Concluded**: for the fp8Scaled checkpoint, the transformer math (blocks, modulation, dims, text
+conditioning, schedule, guidance) is verified correct against the reference. The residual grain is
+still unexplained; the BF16-Diffusers test is inconclusive due to a separate conditioning-loading bug.
 
 ---
 
