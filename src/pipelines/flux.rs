@@ -196,7 +196,12 @@ impl FluxPipeline {
         let dtype = if is_cuda { DType::F16 } else { DType::F32 };
         let checkpoint_buf = checkpoint_path.as_ref().to_path_buf();
 
-        let archive = Arc::new(SafeTensorsArchive::open(&checkpoint_buf)?);
+        // Accept either a single .safetensors file or a directory of multi-file shards.
+        let archive = Arc::new(if checkpoint_buf.is_dir() {
+            SafeTensorsArchive::open_shards_dir(&checkpoint_buf)?
+        } else {
+            SafeTensorsArchive::open(&checkpoint_buf)?
+        });
         let router = WeightRouter::new(&archive, device.clone(), dtype);
 
         println!("📦 Constructing Pure Rust Flux Streaming Transformer (Ultra-Low VRAM)...");

@@ -15,25 +15,25 @@ fn main() -> Result<()> {
     println!("================================================================================");
 
     let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-    let checkpoint = "G:\\models\\flux\\flux2DevFp8Scaled_fp8Scaled.safetensors";
-    let mistral_path = "G:\\models\\clip\\mistral_3_small_flux2_fp8.safetensors";
-    let vae_path = "G:\\models\\vae\\flux2-vae.safetensors";
+    let checkpoint = std::env::var("CKPT").unwrap_or_else(|_| "G:\\models\\flux\\flux2DevFp8Scaled_fp8Scaled.safetensors".into());
+    let mistral_path = std::env::var("MISTRAL").unwrap_or_else(|_| "G:\\models\\clip\\mistral_3_small_flux2_fp8.safetensors".into());
+    let vae_path = std::env::var("VAE").unwrap_or_else(|_| "G:\\models\\vae\\flux2-vae.safetensors".into());
 
-    if !Path::new(checkpoint).exists() {
+    if !Path::new(&checkpoint).exists() {
         eprintln!("[-] Checkpoint not found: {}", checkpoint);
         return Ok(());
     }
 
     println!("\n📥 Loading Flux.2-Dev Checkpoint with Sequential Streamer...");
     let t_start = Instant::now();
-    let mut pipeline = FluxPipeline::from_single_file_streaming(checkpoint, device.clone())
+    let mut pipeline = FluxPipeline::from_single_file_streaming(&checkpoint, device.clone())
         .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
     pipeline.enable_flash_attn();
 
-    if Path::new(mistral_path).exists() {
+    if Path::new(&mistral_path).exists() {
         println!("📥 Attaching Mistral-3-Small Prompt Encoder (CPU, FP8 dequant)...");
         let mistral = aurora_rust_engine::text::Mistral3TextEncoder::from_safetensors(
-            mistral_path,
+            &mistral_path,
             Some(std::path::Path::new("mistral_tokenizer.json")),
             Device::Cpu,
             DType::F16,
@@ -42,10 +42,13 @@ fn main() -> Result<()> {
         println!("✅ Mistral-3-Small Attached!");
     }
 
-    if Path::new(vae_path).exists() {
+    if Path::new(&vae_path).exists() {
         println!("📥 Attaching Flux.2 32-Channel VAE Decoder (GPU/F16)...");
-        let vae_archive = SafeTensorsArchive::open(PathBuf::from(vae_path))
-            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let vae_archive = if Path::new(&vae_path).is_dir() {
+            SafeTensorsArchive::open_shards_dir(&vae_path)
+        } else {
+            SafeTensorsArchive::open(PathBuf::from(&vae_path))
+        }.map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         let vae_router = WeightRouter::new(&vae_archive, device.clone(), DType::F16);
         let vae_vb = vae_router.vae_var_builder()
             .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
