@@ -68,10 +68,11 @@ impl SequentialBlockStreamer {
         let mut tensors = HashMap::new();
 
         for key in self.archive.keys() {
-            let matched_suffix = if let Some(suffix) = key.strip_prefix(&prefix) {
-                Some(suffix)
-            } else if let Some(suffix) = key.strip_prefix(&prefix_alt) {
-                Some(suffix)
+            let bfl = crate::weights::flux_diffusers_to_bfl(key).unwrap_or_else(|| key.clone());
+            let matched_suffix = if let Some(suffix) = bfl.strip_prefix(&prefix) {
+                Some(suffix.to_string())
+            } else if let Some(suffix) = bfl.strip_prefix(&prefix_alt) {
+                Some(suffix.to_string())
             } else {
                 None
             };
@@ -83,14 +84,19 @@ impl SequentialBlockStreamer {
                     apply_flux_deltas_to_tensor(deltas, &format!("{prefix}{suffix}"), t, &self.device, self.dtype)
                         .map_err(|e| candle_core::Error::Msg(e.to_string()))?
                 } else { t };
-                tensors.insert(suffix.to_string(), t);
+                tensors.insert(suffix, t);
             }
         }
+
+        // Fuse Diffusers-layout split QKV (img_attn.qkv@Q/@K/@V) back into a single fused weight.
+        fuse_split_qkv(&mut tensors, "img_attn.qkv");
+        fuse_split_qkv(&mut tensors, "txt_attn.qkv");
 
         // Inject shared global modulations if block-local ones are absent (Klein architecture)
         let double_mod_dim = self.hidden_dim * 6;
         if !tensors.keys().any(|k| k.starts_with("img_mod")) {
             let t_opt = self.archive.get_tensor("double_stream_modulation_img.lin.weight", &self.device, self.dtype)
+                .or_else(|_| self.archive.get_tensor("double_stream_modulation_img.linear.weight", &self.device, self.dtype))
                 .or_else(|_| self.archive.get_tensor("model.diffusion_model.double_stream_modulation_img.lin.weight", &self.device, self.dtype));
             if let Ok(t) = t_opt {
                 let t_slice = if t.dim(0)? == double_mod_dim {
@@ -105,6 +111,7 @@ impl SequentialBlockStreamer {
         }
         if !tensors.keys().any(|k| k.starts_with("txt_mod")) {
             let t_opt = self.archive.get_tensor("double_stream_modulation_txt.lin.weight", &self.device, self.dtype)
+                .or_else(|_| self.archive.get_tensor("double_stream_modulation_txt.linear.weight", &self.device, self.dtype))
                 .or_else(|_| self.archive.get_tensor("model.diffusion_model.double_stream_modulation_txt.lin.weight", &self.device, self.dtype));
             if let Ok(t) = t_opt {
                 let t_slice = if t.dim(0)? == double_mod_dim {
@@ -137,10 +144,11 @@ impl SequentialBlockStreamer {
         let mut tensors = HashMap::new();
 
         for key in self.archive.keys() {
-            let matched_suffix = if let Some(suffix) = key.strip_prefix(&prefix) {
-                Some(suffix)
-            } else if let Some(suffix) = key.strip_prefix(&prefix_alt) {
-                Some(suffix)
+            let bfl = crate::weights::flux_diffusers_to_bfl(key).unwrap_or_else(|| key.clone());
+            let matched_suffix = if let Some(suffix) = bfl.strip_prefix(&prefix) {
+                Some(suffix.to_string())
+            } else if let Some(suffix) = bfl.strip_prefix(&prefix_alt) {
+                Some(suffix.to_string())
             } else {
                 None
             };
@@ -160,6 +168,7 @@ impl SequentialBlockStreamer {
         let single_mod_dim = self.hidden_dim * 3;
         if !tensors.keys().any(|k| k.starts_with("modulation")) {
             let t_opt = self.archive.get_tensor("single_stream_modulation.lin.weight", &self.device, self.dtype)
+                .or_else(|_| self.archive.get_tensor("single_stream_modulation.linear.weight", &self.device, self.dtype))
                 .or_else(|_| self.archive.get_tensor("model.diffusion_model.single_stream_modulation.lin.weight", &self.device, self.dtype));
             if let Ok(t) = t_opt {
                 let t_slice = if t.dim(0)? == single_mod_dim {
@@ -176,5 +185,23 @@ impl SequentialBlockStreamer {
         let vb = VarBuilder::from_tensors(tensors, self.dtype, &self.device);
         let block = SingleStreamBlock::new(self.hidden_dim, self.num_heads, self.mlp_ratio, vb)?;
         block.forward(x, temb, freqs_cos, freqs_sin)
+    }
+}
+
+/// Combine a Diffusers-layout split QKV (`{base}@Q.weight`, `@K`, `@V`) into a single fused
+/// `{base}.weight` (concatenated along dim 0). Removes the split entries so the block builder sees a
+/// single fused linear weight, as it expects.
+fn fuse_split_qkv(tensors: &mut HashMap<String, Tensor>, base: &str) {
+    let get = |tag: &str| tensors.get(&format!("{base}@{tag}.weight")).cloned();
+    let (q, k, v) = (get("Q"), get("K"), get("V"));
+    let (q, k, v) = match (q, k, v) {
+        (Some(q), Some(k), Some(v)) => (q, k, v),
+        _ => return, // not split / partial; leave as-is
+    };
+    if let Ok(fused) = Tensor::cat(&[&q, &k, &v], 0) {
+        tensors.insert(format!("{base}.weight"), fused);
+        tensors.remove(&format!("{base}@Q.weight"));
+        tensors.remove(&format!("{base}@K.weight"));
+        tensors.remove(&format!("{base}@V.weight"));
     }
 }

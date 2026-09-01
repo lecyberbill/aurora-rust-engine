@@ -205,22 +205,41 @@ impl FluxPipeline {
         let router = WeightRouter::new(&archive, device.clone(), dtype);
 
         println!("📦 Constructing Pure Rust Flux Streaming Transformer (Ultra-Low VRAM)...");
-        let has_guidance = archive.keys().any(|k| k.contains("guidance_in"));
+        let has_guidance = archive.keys().any(|k| k.contains("guidance_in") || k.contains("time_guidance_embed"));
         let is_klein = archive.keys().any(|k| k.contains("double_stream_modulation") || k.contains("img_attn.norm.key_norm.scale"));
+
+        // Count single-stream blocks in either the BFL or Diffusers (official BF16) layout.
+        let count_single = |prefixes: &[&str]| -> usize {
+            let mut max_s = 0;
+            for k in archive.keys() {
+                for p in prefixes {
+                    if let Some(rest) = k.strip_prefix(p) {
+                        if let Some(idx_str) = rest.split('.').next() {
+                            if let Ok(idx) = idx_str.parse::<usize>() { max_s = max_s.max(idx + 1); }
+                        }
+                    }
+                }
+            }
+            max_s
+        };
 
         let config = if is_klein && has_guidance {
             // Flux.2-Dev also carries `double_stream_modulation` + `single_stream_modulation`,
             // but has a guidance embedder and 48 single blocks -> it is NOT a Klein model.
-            let mut max_s = 0;
-            for k in archive.keys() {
-                if let Some(rest) = k.strip_prefix("single_blocks.") {
-                    if let Some(idx_str) = rest.split('.').next() {
-                        if let Ok(idx) = idx_str.parse::<usize>() { max_s = max_s.max(idx + 1); }
-                    }
-                }
-            }
+            let max_s = count_single(&["single_blocks.", "single_transformer_blocks."]);
             if max_s > 40 {
                 println!("✨ Detected Flux.2-Dev Scaled checkpoint (guidance embed, 8 double / 48 single, 6144 hidden)!");
+                FluxConfig::flux2_dev()
+            } else {
+                println!("✨ Detected Flux.1-Dev checkpoint (with guidance embedder)!");
+                FluxConfig::dev()
+            }
+        } else if !is_klein && has_guidance {
+            // Diffusers-layout Flux.2-Dev (official BF16): no double_stream_modulation, but guidance
+            // embedder + 48 single blocks.
+            let max_s = count_single(&["single_blocks.", "single_transformer_blocks."]);
+            if max_s > 40 {
+                println!("✨ Detected Flux.2-Dev (Diffusers BF16) checkpoint (guidance, 8 double / 48 single, 6144 hidden)!");
                 FluxConfig::flux2_dev()
             } else {
                 println!("✨ Detected Flux.1-Dev checkpoint (with guidance embedder)!");

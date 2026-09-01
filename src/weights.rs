@@ -521,16 +521,33 @@ impl<'a> WeightRouter<'a> {
         let header_prefixes = ["img_in.", "txt_in.", "time_in.", "vector_in.", "guidance_in.", "final_layer."];
 
         for key in self.archive.keys() {
+            let mut matched = false;
             for prefix in &header_prefixes {
                 if key.starts_with(prefix) {
                     let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
                     tensors.insert(key.clone(), tensor);
+                    matched = true;
                     break;
                 } else if let Some(stripped) = key.strip_prefix("model.diffusion_model.") {
                     if stripped.starts_with(prefix) {
                         let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
                         tensors.insert(stripped.to_string(), tensor);
+                        matched = true;
                         break;
+                    }
+                }
+            }
+            // Fall back to the Diffusers layout (official flux2-dev BF16) mapping — but ONLY for the
+            // transformer header modules. The blocks/modulations are streamed separately, so we must
+            // NOT pull them into the header VarBuilder (it would load the whole 60GB checkpoint).
+            if !matched {
+                if let Some(bfl) = flux_diffusers_to_bfl(key) {
+                    if bfl.starts_with("img_in.") || bfl.starts_with("txt_in.")
+                        || bfl.starts_with("time_in.") || bfl.starts_with("guidance_in.")
+                        || bfl.starts_with("final_layer.")
+                    {
+                        let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
+                        tensors.insert(bfl, tensor);
                     }
                 }
             }
@@ -548,17 +565,27 @@ impl<'a> WeightRouter<'a> {
         let flux_prefixes = ["double_blocks.", "single_blocks.", "img_in.", "txt_in.", "time_in.", "vector_in.", "guidance_in.", "final_layer."];
 
         for key in self.archive.keys() {
+            let mut matched = false;
             for prefix in &flux_prefixes {
                 if key.starts_with(prefix) {
                     let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
                     tensors.insert(key.clone(), tensor);
+                    matched = true;
                     break;
                 } else if let Some(stripped) = key.strip_prefix("model.diffusion_model.") {
                     if stripped.starts_with(prefix) {
                         let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
                         tensors.insert(stripped.to_string(), tensor);
+                        matched = true;
                         break;
                     }
+                }
+            }
+            // Fall back to the Diffusers layout (official flux2-dev BF16) mapping.
+            if !matched {
+                if let Some(bfl) = flux_diffusers_to_bfl(key) {
+                    let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
+                    tensors.insert(bfl, tensor);
                 }
             }
         }
@@ -956,6 +983,97 @@ fn translate_compvis_vae_key(key: &str) -> String {
     mapped
 }
 
+/// Map a Diffusers-style Flux.2 key (the official HF `diffusers` layout, e.g. the
+/// `flux2-dev` BF16 checkpoint) to the BFL-style key names this engine uses internally.
+/// Returns `None` if the key is not recognised. The QKV of the double-stream block is fused in BFL as
+/// a single `img_attn.qkv`; the Diffusers layout keeps `to_q`/`to_k`/`to_v` separately, and `attn.to_out.0`
+/// is the output proj.
+pub fn flux_diffusers_to_bfl(key: &str) -> Option<String> {
+    // --- Header / global modules ---
+    if let Some(rest) = key.strip_prefix("x_embedder.") { return Some(format!("img_in.{rest}")); }
+    if let Some(rest) = key.strip_prefix("context_embedder.") { return Some(format!("txt_in.{rest}")); }
+    if let Some(rest) = key.strip_prefix("proj_out.") { return Some(format!("final_layer.linear.{rest}")); }
+    if let Some(rest) = key.strip_prefix("norm_out.linear.") { return Some(format!("final_layer.adaLN_modulation.1.{rest}")); }
+    if let Some(rest) = key.strip_prefix("time_guidance_embed.timestep_embedder.linear_1.") { return Some(format!("time_in.in_layer.{rest}")); }
+    if let Some(rest) = key.strip_prefix("time_guidance_embed.timestep_embedder.linear_2.") { return Some(format!("time_in.out_layer.{rest}")); }
+    if let Some(rest) = key.strip_prefix("time_guidance_embed.guidance_embedder.linear_1.") { return Some(format!("guidance_in.in_layer.{rest}")); }
+    if let Some(rest) = key.strip_prefix("time_guidance_embed.guidance_embedder.linear_2.") { return Some(format!("guidance_in.out_layer.{rest}")); }
+    if let Some(rest) = key.strip_prefix("double_stream_modulation_img.") { return Some(format!("double_stream_modulation_img.{rest}")); }
+    if let Some(rest) = key.strip_prefix("double_stream_modulation_txt.") { return Some(format!("double_stream_modulation_txt.{rest}")); }
+    if let Some(rest) = key.strip_prefix("single_stream_modulation.") { return Some(format!("single_stream_modulation.{rest}")); }
+
+    // --- Double-stream block: transformer_blocks.{i}.* -> double_blocks.{i}.* ---
+    if let Some(rest) = key.strip_prefix("transformer_blocks.") {
+        let mut it = rest.splitn(3, '.');
+        let idx = it.next()?;
+        let field = it.next()?;
+        let tail = it.next()?;
+        return match field {
+            "attn" => {
+                if tail.starts_with("to_q.") || tail.starts_with("to_k.") || tail.starts_with("to_v.") {
+                    let tag = if tail.starts_with("to_q") { "Q" } else if tail.starts_with("to_k") { "K" } else { "V" };
+                    let t = tail.split_once('.').map(|(_, b)| b).unwrap_or("weight");
+                    Some(format!("double_blocks.{idx}.img_attn.qkv@{tag}.{t}"))
+                } else if let Some(t) = tail.strip_prefix("to_out.0.") {
+                    Some(format!("double_blocks.{idx}.img_attn.proj.{t}"))
+                } else if let Some(t) = tail.strip_prefix("norm_q.") {
+                    Some(format!("double_blocks.{idx}.img_attn.norm.query_norm.{t}"))
+                } else if let Some(t) = tail.strip_prefix("norm_k.") {
+                    Some(format!("double_blocks.{idx}.img_attn.norm.key_norm.{t}"))
+                } else if let Some(t) = tail.strip_prefix("add_q_proj.") {
+                    Some(format!("double_blocks.{idx}.txt_attn.qkv@Q.{t}"))
+                } else if let Some(t) = tail.strip_prefix("add_k_proj.") {
+                    Some(format!("double_blocks.{idx}.txt_attn.qkv@K.{t}"))
+                } else if let Some(t) = tail.strip_prefix("add_v_proj.") {
+                    Some(format!("double_blocks.{idx}.txt_attn.qkv@V.{t}"))
+                } else if let Some(t) = tail.strip_prefix("to_add_out.") {
+                    Some(format!("double_blocks.{idx}.txt_attn.proj.{t}"))
+                } else if let Some(t) = tail.strip_prefix("norm_added_q.") {
+                    Some(format!("double_blocks.{idx}.txt_attn.norm.query_norm.{t}"))
+                } else if let Some(t) = tail.strip_prefix("norm_added_k.") {
+                    Some(format!("double_blocks.{idx}.txt_attn.norm.key_norm.{t}"))
+                } else { None }
+            }
+            "ff" => {
+                if let Some(t) = tail.strip_prefix("linear_in.") { Some(format!("double_blocks.{idx}.img_mlp.0.{t}")) }
+                else if let Some(t) = tail.strip_prefix("linear_out.") { Some(format!("double_blocks.{idx}.img_mlp.2.{t}")) }
+                else { None }
+            }
+            "ff_context" => {
+                if let Some(t) = tail.strip_prefix("linear_in.") { Some(format!("double_blocks.{idx}.txt_mlp.0.{t}")) }
+                else if let Some(t) = tail.strip_prefix("linear_out.") { Some(format!("double_blocks.{idx}.txt_mlp.2.{t}")) }
+                else { None }
+            }
+            _ => None,
+        };
+    }
+
+    // --- Single-stream block: single_transformer_blocks.{i}.* -> single_blocks.{i}.* ---
+    if let Some(rest) = key.strip_prefix("single_transformer_blocks.") {
+        let mut it = rest.splitn(3, '.');
+        let idx = it.next()?;
+        let field = it.next()?;
+        let tail = it.next()?;
+        let p = |s: &str| Some(format!("single_blocks.{idx}.{s}.{tail}"));
+        return match field {
+            "attn" => {
+                if let Some(t) = tail.strip_prefix("to_qkv_mlp_proj.") {
+                    Some(format!("single_blocks.{idx}.linear1.{t}"))
+                } else if let Some(t) = tail.strip_prefix("to_out.") {
+                    Some(format!("single_blocks.{idx}.linear2.{t}"))
+                } else if let Some(t) = tail.strip_prefix("norm_q.") {
+                    Some(format!("single_blocks.{idx}.norm.query_norm.{t}"))
+                } else if let Some(t) = tail.strip_prefix("norm_k.") {
+                    Some(format!("single_blocks.{idx}.norm.key_norm.{t}"))
+                } else { None }
+            }
+            _ => None,
+        };
+    }
+
+    None
+}
+
 impl WeightsSource for SafeTensorsArchive {
     fn get_tensor(&self, name: &str, device: &Device, dtype: DType) -> Result<Tensor> {
         SafeTensorsArchive::get_tensor(self, name, device, dtype)
@@ -975,5 +1093,47 @@ impl WeightsSource for SafeTensorsArchive {
 
     fn describe(&self) -> String {
         format!("safetensors ({} shards)", self._mmaps.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flux_diffusers_to_bfl;
+
+    #[test]
+    fn flux_diffusers_header_maps() {
+        assert_eq!(flux_diffusers_to_bfl("x_embedder.weight"), Some("img_in.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("context_embedder.weight"), Some("txt_in.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("proj_out.weight"), Some("final_layer.linear.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("norm_out.linear.weight"), Some("final_layer.adaLN_modulation.1.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("time_guidance_embed.timestep_embedder.linear_1.weight"), Some("time_in.in_layer.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("time_guidance_embed.guidance_embedder.linear_1.weight"), Some("guidance_in.in_layer.weight".into()));
+    }
+
+    #[test]
+    fn flux_diffusers_double_block_maps() {
+        // QKV split -> fused with slab tag
+        assert_eq!(flux_diffusers_to_bfl("transformer_blocks.0.attn.to_q.weight"), Some("double_blocks.0.img_attn.qkv@Q.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("transformer_blocks.3.attn.to_k.weight"), Some("double_blocks.3.img_attn.qkv@K.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("transformer_blocks.5.attn.to_v.weight"), Some("double_blocks.5.img_attn.qkv@V.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("transformer_blocks.0.attn.to_out.0.weight"), Some("double_blocks.0.img_attn.proj.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("transformer_blocks.0.ff.linear_in.weight"), Some("double_blocks.0.img_mlp.0.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("transformer_blocks.0.ff.linear_out.weight"), Some("double_blocks.0.img_mlp.2.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("transformer_blocks.0.attn.add_q_proj.weight"), Some("double_blocks.0.txt_attn.qkv@Q.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("transformer_blocks.0.attn.to_add_out.weight"), Some("double_blocks.0.txt_attn.proj.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("transformer_blocks.0.ff_context.linear_in.weight"), Some("double_blocks.0.txt_mlp.0.weight".into()));
+    }
+
+    #[test]
+    fn flux_diffusers_single_block_maps() {
+        assert_eq!(flux_diffusers_to_bfl("single_transformer_blocks.0.attn.to_qkv_mlp_proj.weight"), Some("single_blocks.0.linear1.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("single_transformer_blocks.7.attn.to_out.weight"), Some("single_blocks.7.linear2.weight".into()));
+        assert_eq!(flux_diffusers_to_bfl("single_transformer_blocks.0.attn.norm_q.weight"), Some("single_blocks.0.norm.query_norm.weight".into()));
+    }
+
+    #[test]
+    fn flux_diffusers_unrecognized_none() {
+        assert_eq!(flux_diffusers_to_bfl("unknown.thing.weight"), None);
+        assert_eq!(flux_diffusers_to_bfl("double_blocks.0.img_attn.qkv.weight"), None);
     }
 }
