@@ -44,15 +44,31 @@ Without this you get `nvcc fatal : Cannot find compiler 'cl.exe' in PATH`. With 
 | Dynamic shifting (use_dynamic_shifting) | 384, 28 steps | ❌ **Regression → chaos** | `flux_dev_384_s28.png` — reverted |
 | Resolution-dependent mu schedule | 1024, 20 steps | ❌ Identical grain | `flux_dev_1024_s20_g3.5.png` (dyn) == statique |
 | Guidance mis-applied | `guidance_scale=1.0`, 1024 | ❌ Grain persists | `flux_dev_1024_s20_g1.png` |
+| Guidance double-scaling (×1000) | code audit | ❌ **Bug found & fixed** | `TimestepEmbedder` already ×1000; now pass raw `guidance_scale` (commit `21c6a19`) |
 | Text RMS normalisation (0.4→1.9) | 384, 20 steps | ❌ Wrong per reference | reverted; ref feeds native ~0.4 |
 | FP8 `scale_weight` dequant | Klein-9B fp8 | ✅ Correct | `flux_klein_9b_fp8_test.png` (perfect) |
+| FP8 per-block vs per-tensor scale | fp8Scaled vs fp8mixed | ❌ **Same grain** | both give identical grain → not the scale format |
+| GGUF Q8_0 (per-block, most precise) | 1024, 20 steps (~20 min) | ❌ **Same grain** | `flux_dev_gguf_q8_s20_g3.5.png` — identical |
 | RoPE 4D / theta | shared with Kleins | ✅ Correct | Klein-9B fp8 (same code) perfect |
 | Klein `shift=2.02` path | — | ❌ not for Dev | Dev uses default static shift=3.0 |
 | AdaLN-Zero chunk order (single/double) | code vs ref | ✅ Correct | `(shift,scale,gate)`, `(1+scale)·Norm+shift`, `x+gate·Out` |
+| Final AdaLN scale/shift order (BFL vs Diffusers) | code audit | ⚠️ **Bug found & fixed** | `swap_scale_shift` (commit `21c6a19`) |
 | Dev block dims (linear1/linear2/mlp/qkv) | probe | ✅ Correct | [55296,6144]/[6144,24576]/[36864,6144]/QKV 18432 |
 | Mistral layers/width | probe | ✅ Correct | 30 layers, hidden 5120, txt_in 15360 |
 | vector_in / pooled present? | probe | ✅ none | Dev is text-only (guidance_in only) |
-| **Official BF16 (Diffusers layout)** | 1024, 20 steps, 69 min | ⚠️ **runs end-to-end, flat blue frame** | `flux_dev_1024_s20_g3.5.png` (BF16) — no crash; model doesn't denoise |
+| **Activation drift (FLUX_TRACE)** | 1 step, trace | 🚨 **CUMULATIVE INSTABILITY** | img rms 0.25→0.92→**4.00** (double.7)→**22.07** (single) |
+
+**KEY FINDING — the grain is a CODE bug, not the model or the quantization.** Three radically different
+quant formats (fp8Scaled per-tensor, fp8mixed per-block, GGUF-Q8_0 per-block) give **identical** grain,
+whereas ComfyUI renders the same model **clean** (the NVFP4 4-bit reference image is clean). So the
+grain is not a quantization artifact — it is a **cumulative numerical instability in our Dev transformer
+path**, localised with `FLUX_TRACE`: activation RMS drifts `0.25 → 0.92 → 4.00 (last double block) →
+22.07 (after 48 single blocks)`. The Klein-4B/9B use the same blocks and are perfect, so the trigger is
+Dev-specific (guidance_embed + 48 single blocks + 6144 dim).
+
+**Concluded**: the Dev transformer math is dimensionally correct and the loader works for every format;
+the residual grain is a code bug causing a progressive activation blow-up. The next decisive step is to
+dump activations and compare them to a reference run (ComfyUI / llama.cpp) of the same checkpoint.
 
 **BF16 / Diffusers-layout note (new):** The official `flux2-dev` BF16 checkpoint (7 shards) uses the
 **Diffusers** key layout (`transformer_blocks.*`, `single_transformer_blocks.*`, `x_embedder`,
