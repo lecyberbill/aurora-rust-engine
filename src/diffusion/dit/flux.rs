@@ -133,6 +133,11 @@ pub struct FluxTransformer {
     pub final_mod: Linear,
     pub final_linear: Linear,
     pub config: FluxConfig,
+    /// When true, the final AdaLN chunk order is `[shift, scale]` (BFL native); when false it is
+    /// `[scale, shift]` (Diffusers convention). Diffusers `norm_out` chunk(2) yields [scale, shift];
+    /// BFL-exported checkpoints store [shift, scale]. Mismatching this collapses the output variance
+    /// (flat blue frame).
+    pub swap_scale_shift: bool,
 }
 
 impl FluxTransformer {
@@ -187,6 +192,7 @@ impl FluxTransformer {
             final_mod,
             final_linear,
             config,
+            swap_scale_shift: true, // BFL native order
         })
     }
 
@@ -231,6 +237,7 @@ impl FluxTransformer {
             final_mod,
             final_linear,
             config,
+            swap_scale_shift: true, // BFL native order
         })
     }
 
@@ -333,8 +340,13 @@ impl FluxTransformer {
         let temb_silu = candle_nn::ops::silu(&temb)?;
         let mod_out = self.final_mod.forward(&temb_silu)?;
         let chunks = mod_out.chunk(2, mod_out.dims().len() - 1)?;
-        let shift = &chunks[0];
-        let scale = &chunks[1];
+        // BFL native stores [shift, scale]; Diffusers convention is [scale, shift]. Using the wrong
+        // order collapses the output variance (flat blue frame).
+        let (shift, scale) = if self.swap_scale_shift {
+            (&chunks[0], &chunks[1])
+        } else {
+            (&chunks[1], &chunks[0])
+        };
 
         // LayerNorm(elementwise_affine=False) on img_h
         let orig_dtype = img_h.dtype();

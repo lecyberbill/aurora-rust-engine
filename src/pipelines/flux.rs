@@ -297,7 +297,12 @@ impl FluxPipeline {
             FluxConfig::schnell()
         };
         let vb = router.flux_header_var_builder()?;
-        let transformer = FluxTransformer::new_streaming(config.clone(), vb)?;
+        let mut transformer = FluxTransformer::new_streaming(config.clone(), vb)?;
+
+        // Diffusers-layout checkpoints (official flux2-dev BF16) use [scale, shift] chunk order in the
+        // final AdaLN; BFL native uses [shift, scale]. Detect via a Diffusers-only header key.
+        let is_diffusers = archive.keys().any(|k| k.starts_with("x_embedder.") || k.starts_with("context_embedder."));
+        transformer.swap_scale_shift = !is_diffusers;
 
         let streamer = Some(crate::diffusion::dit::streamer::SequentialBlockStreamer::new(
             archive.clone(),
@@ -495,7 +500,7 @@ impl FluxPipeline {
         let t_unet_start = Instant::now();
 
         let guidance_tensor = if self.transformer.config.guidance_embed {
-            let g = (params.guidance_scale * 1000.0) as f32;
+            let g = params.guidance_scale as f32;
             Some(Tensor::from_slice(&[g], (1,), &self.device)?.to_dtype(self.dtype)?)
         } else {
             None
@@ -705,7 +710,7 @@ impl FluxPipeline {
         };
 
         let guidance_tensor = if self.transformer.config.guidance_embed {
-            let g = (params.guidance_scale * 1000.0) as f32;
+            let g = params.guidance_scale as f32;
             Some(Tensor::from_slice(&[g], (1,), &self.device)?.to_dtype(self.dtype)?)
         } else {
             None
@@ -914,7 +919,7 @@ impl FluxPipeline {
         };
 
         let guidance_tensor = if self.transformer.config.guidance_embed {
-            let g = (params.guidance_scale * 1000.0) as f32;
+            let g = params.guidance_scale as f32;
             Some(Tensor::from_slice(&[g], (1,), &self.device)?.to_dtype(self.dtype)?)
         } else {
             None
