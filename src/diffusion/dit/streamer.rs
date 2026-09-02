@@ -1,15 +1,16 @@
-// [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Sequential Block Streamer for MMDiT Low-VRAM Inference
+﻿// [WFGY] Zone: SAFE | Î»: 0.25 | Fallbacks: 0 | Action: Sequential Block Streamer for MMDiT Low-VRAM Inference
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 use std::collections::HashMap;
 use std::sync::Arc;
 use crate::diffusion::dit::blocks::{DoubleStreamBlock, SingleStreamBlock};
-use crate::weights::{SafeTensorsArchive, apply_flux_deltas_to_tensor};
+use crate::weights::{WeightsSource, apply_flux_deltas_to_tensor};
 
-/// Stream-loads individual MMDiT blocks into GPU VRAM on-demand and drops them after computation
+/// Stream-loads individual MMDiT blocks into GPU VRAM on-demand and drops them after computation.
+/// Works with any [`WeightsSource`] (safetensors single/multi-shard, or GGUF).
 pub struct SequentialBlockStreamer {
-    archive: Arc<SafeTensorsArchive>,
+    archive: Arc<dyn WeightsSource>,
     device: Device,
     dtype: DType,
     hidden_dim: usize,
@@ -22,7 +23,7 @@ pub struct SequentialBlockStreamer {
 
 impl SequentialBlockStreamer {
     pub fn new(
-        archive: Arc<SafeTensorsArchive>,
+        archive: Arc<dyn WeightsSource>,
         device: Device,
         dtype: DType,
         hidden_dim: usize,
@@ -68,7 +69,7 @@ impl SequentialBlockStreamer {
         let mut tensors = HashMap::new();
 
         for key in self.archive.keys() {
-            let bfl = crate::weights::flux_diffusers_to_bfl(key).unwrap_or_else(|| key.clone());
+            let bfl = crate::weights::flux_diffusers_to_bfl(&key).unwrap_or_else(|| key.clone());
             let matched_suffix = if let Some(suffix) = bfl.strip_prefix(&prefix) {
                 Some(suffix.to_string())
             } else if let Some(suffix) = bfl.strip_prefix(&prefix_alt) {
@@ -78,7 +79,7 @@ impl SequentialBlockStreamer {
             };
 
             if let Some(suffix) = matched_suffix {
-                let t = self.archive.get_tensor(key, &self.device, self.dtype)
+                let t = self.archive.get_tensor(&key, &self.device, self.dtype)
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 let t = if let Some(deltas) = &self.lora_deltas {
                     apply_flux_deltas_to_tensor(deltas, &format!("{prefix}{suffix}"), t, &self.device, self.dtype)
@@ -144,7 +145,7 @@ impl SequentialBlockStreamer {
         let mut tensors = HashMap::new();
 
         for key in self.archive.keys() {
-            let bfl = crate::weights::flux_diffusers_to_bfl(key).unwrap_or_else(|| key.clone());
+            let bfl = crate::weights::flux_diffusers_to_bfl(&key).unwrap_or_else(|| key.clone());
             let matched_suffix = if let Some(suffix) = bfl.strip_prefix(&prefix) {
                 Some(suffix.to_string())
             } else if let Some(suffix) = bfl.strip_prefix(&prefix_alt) {
@@ -154,7 +155,7 @@ impl SequentialBlockStreamer {
             };
 
             if let Some(suffix) = matched_suffix {
-                let t = self.archive.get_tensor(key, &self.device, self.dtype)
+                let t = self.archive.get_tensor(&key, &self.device, self.dtype)
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 let t = if let Some(deltas) = &self.lora_deltas {
                     apply_flux_deltas_to_tensor(deltas, &format!("{prefix}{suffix}"), t, &self.device, self.dtype)
@@ -205,3 +206,5 @@ fn fuse_split_qkv(tensors: &mut HashMap<String, Tensor>, base: &str) {
         tensors.remove(&format!("{base}@V.weight"));
     }
 }
+
+
