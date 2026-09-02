@@ -190,6 +190,95 @@ impl FluxPipeline {
             }
         }
     }
+    /// Load Flux pipeline from a llama.cpp **GGUF** checkpoint (quantized per-block weights). This is the
+    /// low-memory path for Flux.2-dev GGUF (Q4/Q5/Q8): weights are dequantized per block as streamed.
+    /// Text encoder (Mistral/Qwen) and the 32-channel VAE are attached separately via `set_mistral`/
+    /// `set_qwen3`/`set_vae`.
+    pub fn from_gguf<P: AsRef<Path>>(path: P, device: Device) -> crate::error::Result<Self> {
+        let is_cuda = device.is_cuda();
+        let dtype = if is_cuda { DType::F16 } else { DType::F32 };
+        let src: Arc<dyn crate::weights::WeightsSource> = Arc::new(crate::gguf::GgufWeights::open(path.as_ref())?);
+        Self::from_weights_source(src, device, dtype, path.as_ref().to_path_buf())
+    }
+
+    /// Shared builder for a Flux pipeline from any [`WeightsSource`] (safetensors or GGUF).
+    fn from_weights_source(
+        src: Arc<dyn crate::weights::WeightsSource>,
+        device: Device,
+        dtype: DType,
+        checkpoint_buf: PathBuf,
+    ) -> crate::error::Result<Self> {
+        println!("📦 Constructing Pure Rust Flux Streaming Transformer (Ultra-Low VRAM)...");
+        let has_guidance = src.keys().iter().any(|k| k.contains("guidance_in") || k.contains("time_guidance_embed"));
+        let is_klein = src.keys().iter().any(|k| k.contains("double_stream_modulation") || k.contains("img_attn.norm.key_norm.scale"));
+
+        let count_single = |prefixes: &[&str]| -> usize {
+            let mut max_s = 0;
+            for k in src.keys() {
+                for p in prefixes {
+                    if let Some(rest) = k.strip_prefix(p) {
+                        if let Some(idx_str) = rest.split('.').next() {
+                            if let Ok(idx) = idx_str.parse::<usize>() { max_s = max_s.max(idx + 1); }
+                        }
+                    }
+                }
+            }
+            max_s
+        };
+
+        let config = if is_klein && has_guidance {
+            let max_s = count_single(&["single_blocks.", "single_transformer_blocks."]);
+            if max_s > 40 { println!("✨ Detected Flux.2-Dev (guidance, 8 double / 48 single, 6144 hidden)!"); FluxConfig::flux2_dev() }
+            else { println!("✨ Detected Flux.1-Dev (guidance embedder)!"); FluxConfig::dev() }
+        } else if !is_klein && has_guidance {
+            let max_s = count_single(&["single_blocks.", "single_transformer_blocks."]);
+            if max_s > 40 { println!("✨ Detected Flux.2-Dev (guidance, 8 double / 48 single, 6144 hidden)!"); FluxConfig::flux2_dev() }
+            else { println!("✨ Detected Flux.1-Dev (guidance embedder)!"); FluxConfig::dev() }
+        } else if is_klein {
+            let mut max_d = 0; let mut max_s = 0;
+            for k in src.keys() {
+                if let Some(rest) = k.strip_prefix("double_blocks.") { if let Some(i)=rest.split('.').next().and_then(|s|s.parse::<usize>().ok()){ max_d=max_d.max(i+1);} }
+                if let Some(rest) = k.strip_prefix("single_blocks.") { if let Some(i)=rest.split('.').next().and_then(|s|s.parse::<usize>().ok()){ max_s=max_s.max(i+1);} }
+            }
+            println!("✨ Detected Flux.2-Klein ({max_d} double / {max_s} single)!");
+            if max_d >= 8 { FluxConfig::klein_9b() } else { FluxConfig::klein_4b() }
+        } else if has_guidance {
+            let max_s = count_single(&["single_blocks.", "single_transformer_blocks."]);
+            if max_s > 40 { println!("✨ Detected Flux.2-Dev (8 double / 48 single, 6144 hidden)!"); FluxConfig::flux2_dev() }
+            else { println!("✨ Detected Flux.1-Dev!"); FluxConfig::dev() }
+        } else {
+            println!("✨ Detected Flux.1-Schnell!");
+            FluxConfig::schnell()
+        };
+
+        let vb = crate::weights::flux_header_var_builder_src(src.as_ref(), &device, dtype)?;
+        let mut transformer = FluxTransformer::new_streaming(config.clone(), vb)?;
+        let is_diffusers = src.keys().iter().any(|k| k.starts_with("x_embedder.") || k.starts_with("context_embedder."));
+        transformer.swap_scale_shift = !is_diffusers;
+
+        let streamer = Some(crate::diffusion::dit::streamer::SequentialBlockStreamer::new(
+            src.clone(), device.clone(), dtype, config.hidden_size, config.num_heads, config.mlp_ratio,
+        ));
+
+        let scheduler = FlowMatchEulerScheduler::new(FlowMatchEulerConfig::default());
+
+        Ok(Self {
+            checkpoint_path: checkpoint_buf,
+            transformer,
+            scheduler,
+            clip_l: None,
+            t5xxl: None,
+            qwen3: None,
+            mistral: None,
+            vae: None,
+            vae_encoder: None,
+            streamer,
+            lora_manager: crate::lora::LoRAManager::new(),
+            device,
+            dtype,
+        })
+    }
+
     /// Load Flux.1 pipeline with Sequential Block Streaming (< 6.5 GB VRAM peak)
     pub fn from_single_file_streaming<P: AsRef<Path>>(checkpoint_path: P, device: Device) -> crate::error::Result<Self> {
         let is_cuda = device.is_cuda();

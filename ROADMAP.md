@@ -221,6 +221,12 @@ The MMDiT module now covers **Flux.1** (Schnell/Dev) and **Flux.2-Klein-4B**. Th
 - [ ] **[PROPOSED] LLM text generation (adjacent)** — see Milestone 16: run the Qwen/Mistral LLMs we
   already ship for text conditioning, now as a decoder-only text pipeline.
 
+> **Reference for serving architecture** — [`huggingface/text-embeddings-inference`](https://github.com/huggingface/text-embeddings-inference) (TEI)
+> is the production-grade Rust on Candle serving engine. It is the reference for how to decouple Axum
+> request reception from the Candle compute loop (token-level dynamic batching), and for pooling ops
+> (mean/CLS/L2) written as native Rust. Very relevant to Milestone 16 (LLM/text serving) and to our
+> Axum server backend — worth a dedicated study when we reach production serving.
+
 ---
 
 ---

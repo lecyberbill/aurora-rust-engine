@@ -517,47 +517,7 @@ impl<'a> WeightRouter<'a> {
     }
 
     pub fn flux_header_var_builder(&self) -> Result<VarBuilder<'static>> {
-        let mut tensors = HashMap::new();
-        let header_prefixes = ["img_in.", "txt_in.", "time_in.", "vector_in.", "guidance_in.", "final_layer."];
-
-        for key in self.archive.keys() {
-            let mut matched = false;
-            for prefix in &header_prefixes {
-                if key.starts_with(prefix) {
-                    let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
-                    tensors.insert(key.clone(), tensor);
-                    matched = true;
-                    break;
-                } else if let Some(stripped) = key.strip_prefix("model.diffusion_model.") {
-                    if stripped.starts_with(prefix) {
-                        let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
-                        tensors.insert(stripped.to_string(), tensor);
-                        matched = true;
-                        break;
-                    }
-                }
-            }
-            // Fall back to the Diffusers layout (official flux2-dev BF16) mapping — but ONLY for the
-            // transformer header modules. The blocks/modulations are streamed separately, so we must
-            // NOT pull them into the header VarBuilder (it would load the whole 60GB checkpoint).
-            if !matched {
-                if let Some(bfl) = flux_diffusers_to_bfl(key) {
-                    if bfl.starts_with("img_in.") || bfl.starts_with("txt_in.")
-                        || bfl.starts_with("time_in.") || bfl.starts_with("guidance_in.")
-                        || bfl.starts_with("final_layer.")
-                    {
-                        let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
-                        tensors.insert(bfl, tensor);
-                    }
-                }
-            }
-        }
-
-        if tensors.is_empty() {
-            return Err(LuminaError::MissingWeight("No Flux.1 header weights found in checkpoint".to_string()));
-        }
-
-        Ok(VarBuilder::from_tensors(tensors, self.dtype, &self.device))
+        flux_header_var_builder_src(self.archive, &self.device, self.dtype)
     }
 
     pub fn flux_var_builder(&self) -> Result<VarBuilder<'static>> {
@@ -988,6 +948,54 @@ fn translate_compvis_vae_key(key: &str) -> String {
 /// Returns `None` if the key is not recognised. The QKV of the double-stream block is fused in BFL as
 /// a single `img_attn.qkv`; the Diffusers layout keeps `to_q`/`to_k`/`to_v` separately, and `attn.to_out.0`
 /// is the output proj.
+/// Build a VarBuilder for the Flux transformer header (img_in/txt_in/time_in/guidance_in/final_layer)
+/// from any [`WeightsSource`] — safetensors (single/multi-shard) or GGUF. Block weights are NOT included
+/// (they stream separately), so this stays cheap even for large checkpoints.
+pub fn flux_header_var_builder_src(
+    src: &dyn WeightsSource,
+    device: &Device,
+    dtype: DType,
+) -> Result<VarBuilder<'static>> {
+    let mut tensors = HashMap::new();
+    let header_prefixes = ["img_in.", "txt_in.", "time_in.", "vector_in.", "guidance_in.", "final_layer."];
+
+    for key in src.keys() {
+        let mut matched = false;
+        for prefix in &header_prefixes {
+            if key.starts_with(prefix) {
+                let tensor = src.get_tensor(&key, device, dtype)?;
+                tensors.insert(key.clone(), tensor);
+                matched = true;
+                break;
+            } else if let Some(stripped) = key.strip_prefix("model.diffusion_model.") {
+                if stripped.starts_with(prefix) {
+                    let tensor = src.get_tensor(&key, device, dtype)?;
+                    tensors.insert(stripped.to_string(), tensor);
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if !matched {
+            if let Some(bfl) = flux_diffusers_to_bfl(&key) {
+                if bfl.starts_with("img_in.") || bfl.starts_with("txt_in.")
+                    || bfl.starts_with("time_in.") || bfl.starts_with("guidance_in.")
+                    || bfl.starts_with("final_layer.")
+                {
+                    let tensor = src.get_tensor(&key, device, dtype)?;
+                    tensors.insert(bfl, tensor);
+                }
+            }
+        }
+    }
+
+    if tensors.is_empty() {
+        return Err(LuminaError::MissingWeight("No Flux.1 header weights found in checkpoint".to_string()));
+    }
+
+    Ok(VarBuilder::from_tensors(tensors, dtype, device))
+}
+
 pub fn flux_diffusers_to_bfl(key: &str) -> Option<String> {
     // --- Header / global modules ---
     if let Some(rest) = key.strip_prefix("x_embedder.") { return Some(format!("img_in.{rest}")); }
