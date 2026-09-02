@@ -289,6 +289,17 @@ impl FluxTransformer {
         let img_sin = freqs_sin.narrow(0, txt_len, img_seq)?;
 
         // 3. Double Stream (Joint Attention) Blocks
+        if std::env::var("FLUX_TRACE").is_ok() {
+            let rms = |t: &Tensor, tag: &str| -> f32 {
+                let f = t.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap();
+                if let Ok(v) = f.to_vec1::<f32>() {
+                    let m = v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / v.len() as f64;
+                    eprintln!("    [TRACE] {tag} rms={:.5}", m.sqrt());
+                    m.sqrt() as f32
+                } else { 0.0 }
+            };
+            rms(&img_h, "img_h-in"); rms(&txt_h, "txt_h-in"); rms(&temb, "temb");
+        }
         if let Some(s) = streamer {
             for i in 0..self.config.num_double_blocks {
                 let (next_img, next_txt) = s.execute_double_block(
@@ -303,6 +314,13 @@ impl FluxTransformer {
                 )?;
                 img_h = next_img;
                 txt_h = next_txt;
+                if std::env::var("FLUX_TRACE").is_ok() {
+                    let f = img_h.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap();
+                    if let Ok(v) = f.to_vec1::<f32>() {
+                        let m = v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / v.len() as f64;
+                        eprintln!("    [TRACE] after double.{i} img_rms={:.5}", m.sqrt());
+                    }
+                }
             }
         } else {
             for block in &self.double_blocks {
@@ -334,6 +352,13 @@ impl FluxTransformer {
             }
             let txt_len = txt_h.dim(1)?;
             img_h = unified.narrow(1, txt_len, img_h.dim(1)?)?;
+            if std::env::var("FLUX_TRACE").is_ok() {
+                let f = img_h.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap();
+                if let Ok(v) = f.to_vec1::<f32>() {
+                    let m = v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / v.len() as f64;
+                    eprintln!("    [TRACE] after single blocks img_rms={:.5}", m.sqrt());
+                }
+            }
         }
 
         // 5. Final AdaLN-Zero Modulation and Linear Output Projection
