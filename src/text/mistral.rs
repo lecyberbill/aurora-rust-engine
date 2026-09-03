@@ -411,7 +411,19 @@ impl Mistral3TextEncoder {
         // Concat sliced layers 10, 20, 30 along channel dimension: [1, seq_len, keep*3].
         // NOTE: Flux.2-Dev feeds Mistral-3 hidden states at their NATIVE amplitude (~rms 0.4) — the
         // text projection (context_embedder) was trained on these raw values. Do NOT normalise.
-        Tensor::cat(&[&l10, &l20, &l30], 2)
+        let out = Tensor::cat(&[&l10, &l20, &l30], 2)?;
+
+        // De-noise test (FLUX_TRACE_DEVOISE): normalise to kill the massive outliers (max 171+) that
+        // blow up the Dev transformer. Scale to a target RMS. Only active under the env flag.
+        if std::env::var("FLUX_TEXT_NORM").is_ok() {
+            let x = out.to_dtype(DType::F32)?;
+            let mean_sq = (x.sqr()?.sum_keepdim(2)? / (x.dim(2)? as f64))?;
+            let rms = (mean_sq + 1e-6f64)?.sqrt()?;
+            let normed = x.broadcast_div(&rms)?.to_dtype(self.dtype)?;
+            Ok(normed)
+        } else {
+            Ok(out)
+        }
     }
 
     /// Open Mistral-3-Small text encoder for on-demand low-memory streaming (RAM < 4GB)
