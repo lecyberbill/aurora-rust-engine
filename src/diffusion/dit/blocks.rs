@@ -287,8 +287,9 @@ impl DoubleStreamBlock {
                     m.sqrt() as f32
                 } else { 0.0 }
             };
-            eprintln!("      [DBLOCK] img_mod_rms={:.3} img_qkv_rms={:.3} attn_out_rms={:.3} img_attn_proj_rms={:.3} img_mlp_out_rms={:.3}",
-                rms(&img_normed), rms(&img_qkv), rms(&attn_out), rms(&img_attn_proj), rms(&img_mlp_out));
+            // Note txt_attn_proj / txt_mlp_out / txt are only in scope at this point; capture under names.
+            eprintln!("      [DBLOCK] txt_mod_rms={:.3} txt_attn_proj_rms={:.3} txt_mlp_out_rms={:.3} txt_out_rms={:.3} txt_gate1={:.3} txt_gate2={:.3}",
+                rms(&txt_normed), rms(&txt_attn_proj), rms(&txt_mlp_out), rms(&txt), rms(&txt_gate1), rms(&txt_gate2));
         }
 
         Ok((img, txt))
