@@ -15,7 +15,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut pipeline = FluxPipeline::from_gguf(path, device.clone())
+    let mut pipeline = FluxPipeline::from_gguf_dtype(path, device.clone(), DType::F32)
         .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
     pipeline.enable_flash_attn();
 

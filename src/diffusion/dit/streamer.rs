@@ -185,7 +185,18 @@ impl SequentialBlockStreamer {
 
         let vb = VarBuilder::from_tensors(tensors, self.dtype, &self.device);
         let block = SingleStreamBlock::new(self.hidden_dim, self.num_heads, self.mlp_ratio, vb)?;
-        block.forward(x, temb, freqs_cos, freqs_sin)
+        let out = block.forward(x, temb, freqs_cos, freqs_sin)?;
+        if std::env::var("FLUX_TRACE").is_ok() {
+            let rms = |t: &Tensor| -> f32 {
+                let f = t.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap();
+                if let Ok(v) = f.to_vec1::<f32>() {
+                    let m = v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / v.len() as f64;
+                    m.sqrt() as f32
+                } else { 0.0 }
+            };
+            eprintln!("    [TRACE] single.{block_idx} in={:.4} out={:.4}", rms(x), rms(&out));
+        }
+        Ok(out)
     }
 }
 

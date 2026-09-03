@@ -197,6 +197,12 @@ impl FluxPipeline {
     pub fn from_gguf<P: AsRef<Path>>(path: P, device: Device) -> crate::error::Result<Self> {
         let is_cuda = device.is_cuda();
         let dtype = if is_cuda { DType::F16 } else { DType::F32 };
+        Self::from_gguf_dtype(path, device, dtype)
+    }
+
+    /// Load a GGUF checkpoint with an explicit compute dtype (e.g. `DType::F32` to avoid precision
+    /// drift of large activations in F16 — useful when the F16 path produces a residual grain).
+    pub fn from_gguf_dtype<P: AsRef<Path>>(path: P, device: Device, dtype: DType) -> crate::error::Result<Self> {
         let src: Arc<dyn crate::weights::WeightsSource> = Arc::new(crate::gguf::GgufWeights::open(path.as_ref())?);
         Self::from_weights_source(src, device, dtype, path.as_ref().to_path_buf())
     }
