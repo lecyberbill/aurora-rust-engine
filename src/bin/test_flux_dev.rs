@@ -31,13 +31,22 @@ fn main() -> Result<()> {
     pipeline.enable_flash_attn();
 
     if Path::new(&mistral_path).exists() {
-        println!("📥 Attaching Mistral-3-Small Prompt Encoder (CPU, FP8 dequant)...");
-        let mistral = aurora_rust_engine::text::Mistral3TextEncoder::from_safetensors(
-            &mistral_path,
-            Some(std::path::Path::new("mistral_tokenizer.json")),
-            Device::Cpu,
-            DType::F16,
-        ).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        println!("📥 Attaching Mistral-3-Small Prompt Encoder (CPU...)...");
+        let mistral = if Path::new(&mistral_path).is_dir() {
+            aurora_rust_engine::text::Mistral3TextEncoder::from_dir(
+                &mistral_path,
+                Some(std::path::Path::new("mistral_tokenizer.json")),
+                Device::Cpu,
+                DType::F16,
+            )
+        } else {
+            aurora_rust_engine::text::Mistral3TextEncoder::from_safetensors(
+                &mistral_path,
+                Some(std::path::Path::new("mistral_tokenizer.json")),
+                Device::Cpu,
+                DType::F16,
+            )
+        }.map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         pipeline.set_mistral(mistral);
         println!("✅ Mistral-3-Small Attached!");
     }

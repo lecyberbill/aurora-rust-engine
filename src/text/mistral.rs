@@ -440,6 +440,19 @@ impl Mistral3TextEncoder {
         Self::from_weights(Arc::new(archive), tokenizer_path, device, dtype)
     }
 
+    /// Open a multi-shard text encoder from a directory of `.safetensors` (e.g. the official
+    /// Flux.2-dev Mistral-3.2-24B VLM split into model-0000X-of-0000N.safetensors).
+    pub fn from_dir<P: AsRef<Path>>(
+        dir: P,
+        tokenizer_path: Option<&Path>,
+        device: Device,
+        dtype: DType,
+    ) -> Result<Self> {
+        let archive = crate::weights::SafeTensorsArchive::open_shards_dir(dir.as_ref())
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        Self::from_weights(Arc::new(archive), tokenizer_path, device, dtype)
+    }
+
     /// Build from any [`WeightsSource`] (safetensors single/multi-shard, or GGUF). This is the
     /// format-agnostic entry point so the brick can be assembled from a chosen model origin.
     pub fn from_weights(
