@@ -151,7 +151,11 @@ impl DoubleStreamBlock {
                     m.sqrt() as f32
                 } else { 0.0 }
             };
-            eprintln!("      [DBLOCK-IN] img_rms={:.3} txt_rms={:.3}", rms(img), rms(txt));
+            let mx = |t: &Tensor| -> f32 {
+                let f = t.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap();
+                if let Ok(v) = f.to_vec1::<f32>() { v.iter().fold(0f32, |a,&b| a.max(if b<0.0 {-b} else {b})) } else { 0.0 }
+            };
+            eprintln!("      [DBLOCK-IN] img_rms={:.3} txt_rms={:.3} txt_max={:.3}", rms(img), rms(txt), mx(txt));
         }
 
         // LayerNorm(elementwise_affine=False) helper
@@ -246,7 +250,8 @@ impl DoubleStreamBlock {
         // 7. Apply Attention Output Projection & Gated Residual (in F32 to preserve numerical dynamic range)
         let txt_attn_proj = self.txt_proj.forward(&txt_attn)?;
         let txt_gate1 = txt_gate1.unsqueeze(1)?;
-        let txt = (txt.to_dtype(candle_core::DType::F32)? + txt_attn_proj.to_dtype(candle_core::DType::F32)?.broadcast_mul(&txt_gate1.to_dtype(candle_core::DType::F32)?)?)?.clamp(-50000.0f32, 50000.0f32)?.to_dtype(orig_dtype)?;
+        let txt_after_attn = (txt.to_dtype(candle_core::DType::F32)? + txt_attn_proj.to_dtype(candle_core::DType::F32)?.broadcast_mul(&txt_gate1.to_dtype(candle_core::DType::F32)?)?)?.clamp(-50000.0f32, 50000.0f32)?.to_dtype(orig_dtype)?;
+        let txt = txt_after_attn.clone();
 
         let img_attn_proj = self.img_proj.forward(&img_attn)?;
         let img_gate1 = img_gate1.unsqueeze(1)?;
@@ -298,8 +303,8 @@ impl DoubleStreamBlock {
                 } else { 0.0 }
             };
             // Note txt_attn_proj / txt_mlp_out / txt are only in scope at this point; capture under names.
-            eprintln!("      [DBLOCK] txt_mod_rms={:.3} txt_attn_proj_rms={:.3} txt_mlp_out_rms={:.3} txt_out_rms={:.3} txt_gate1={:.3} txt_gate2={:.3}",
-                rms(&txt_normed), rms(&txt_attn_proj), rms(&txt_mlp_out), rms(&txt), rms(&txt_gate1), rms(&txt_gate2));
+            eprintln!("      [DBLOCK] txt_mod_rms={:.3} txt_attn_rms={:.3} txt_attn_proj_rms={:.3} txt_mlp_out_rms={:.3} txt_after_attn={:.3} txt_out_rms={:.3}",
+                rms(&txt_normed), rms(&txt_attn), rms(&txt_attn_proj), rms(&txt_mlp_out), rms(&txt_after_attn), rms(&txt));
         }
 
         Ok((img, txt))
