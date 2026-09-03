@@ -341,6 +341,17 @@ impl FluxTransformer {
         // 4. Single Stream Blocks (Tokens concatenation for Flux.1)
         if self.config.num_single_blocks > 0 {
             let mut unified = Tensor::cat(&[&txt_h, &img_h], 1)?;
+            if std::env::var("FLUX_TRACE").is_ok() {
+                let rms = |t: &Tensor| -> f32 {
+                    let f = t.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap();
+                    if let Ok(v) = f.to_vec1::<f32>() {
+                        let m = v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / v.len() as f64;
+                        m.sqrt() as f32
+                    } else { 0.0 }
+                };
+                eprintln!("    [TRACE] pre-single: unified_rms={:.4} img_rms={:.4} txt_rms={:.4} txt_len={} img_len={}",
+                    rms(&unified), rms(&img_h), rms(&txt_h), txt_h.dim(1)?, img_h.dim(1)?);
+            }
             if let Some(s) = streamer {
                 for i in 0..self.config.num_single_blocks {
                     unified = s.execute_single_block(i, &unified, &temb, Some(&freqs_cos), Some(&freqs_sin))?;

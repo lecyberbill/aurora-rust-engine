@@ -41,9 +41,10 @@ fn main() -> Result<()> {
     let guidance: f64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(3.5);
 
     let t0 = Instant::now();
+    let size: usize = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(1024);
     let params = DiffusionParams {
         prompt, negative_prompt: None, num_steps: steps, guidance_scale: guidance,
-        width: 1024, height: 1024, seed: 42,
+        width: size, height: size, seed: 42,
     };
     let (image, metrics) = pipeline.generate_with_metrics(params, None::<fn(usize,usize,&Tensor)>)
         .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
