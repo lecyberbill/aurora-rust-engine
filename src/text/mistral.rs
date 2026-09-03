@@ -288,6 +288,8 @@ pub struct Mistral3TextEncoder {
     embed_tokens: Embedding,
     archive: std::sync::Arc<dyn crate::weights::WeightsSource>,
     num_layers: usize,
+    /// Prefix for the language model keys, e.g. `language_model.` (Flux.2-dev VLM) or `""` (plain Mistral).
+    prefix: String,
     tokenizer: Option<Tokenizer>,
     device: Device,
     dtype: DType,
@@ -303,7 +305,7 @@ impl Mistral3TextEncoder {
 
     /// Load a single decoder layer on-the-fly from archive and dequantize it
     fn load_layer(&self, layer_idx: usize) -> Result<MistralDecoderLayer> {
-        let p = format!("model.layers.{}.", layer_idx);
+        let p = format!("{}model.layers.{}.", self.prefix, layer_idx);
         let device = &self.device;
         let dtype = self.dtype;
         let archive = &self.archive;
@@ -446,15 +448,26 @@ impl Mistral3TextEncoder {
         device: Device,
         dtype: DType,
     ) -> Result<Self> {
-        // 1. Embedding
-        let embed_weight = archive.get_tensor("model.embed_tokens.weight", &device, dtype)
+        // Detect the key prefix: Flux.2-dev VLM text uses `language_model.model.layers.*`; plain
+        // Mistral uses `model.layers.*`.
+        let keys = archive.keys();
+        let prefix = if keys.iter().any(|k| k.starts_with("language_model.model.layers.")) {
+            "language_model."
+        } else {
+            ""
+        };
+
+        let embed_key = format!("{prefix}model.embed_tokens.weight");
+        let embed_weight = archive.get_tensor(&embed_key, &device, dtype)
+            .or_else(|_| archive.get_tensor("model.embed_tokens.weight", &device, dtype))
             .or_else(|_| archive.get_tensor("embed_tokens.weight", &device, dtype))
             .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         let embed_tokens = Embedding::new(embed_weight, 5120);
 
         // Detect the layer count from the checkpoint (Flux.2-dev's Mistral-3.2-24B has 40 layers, not 30).
-        let num_layers = archive.keys().iter().filter_map(|k| {
-            let rest = k.strip_prefix("model.layers.")?;
+        let layer_prefix = format!("{prefix}model.layers.");
+        let num_layers = keys.iter().filter_map(|k| {
+            let rest = k.strip_prefix(&layer_prefix)?;
             let idx = rest.split('.').next()?.parse::<usize>().ok()?;
             Some(idx + 1)
         }).max().unwrap_or(30);
@@ -469,6 +482,7 @@ impl Mistral3TextEncoder {
             embed_tokens,
             archive,
             num_layers,
+            prefix: prefix.to_string(),
             tokenizer,
             device,
             dtype,
