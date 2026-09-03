@@ -452,6 +452,13 @@ impl Mistral3TextEncoder {
             .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         let embed_tokens = Embedding::new(embed_weight, 5120);
 
+        // Detect the layer count from the checkpoint (Flux.2-dev's Mistral-3.2-24B has 40 layers, not 30).
+        let num_layers = archive.keys().iter().filter_map(|k| {
+            let rest = k.strip_prefix("model.layers.")?;
+            let idx = rest.split('.').next()?.parse::<usize>().ok()?;
+            Some(idx + 1)
+        }).max().unwrap_or(30);
+
         let tokenizer = if let Some(p) = tokenizer_path {
             Tokenizer::from_file(p).ok()
         } else {
@@ -461,7 +468,7 @@ impl Mistral3TextEncoder {
         Ok(Self {
             embed_tokens,
             archive,
-            num_layers: 30,
+            num_layers,
             tokenizer,
             device,
             dtype,
