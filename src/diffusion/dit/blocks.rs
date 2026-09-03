@@ -279,6 +279,18 @@ impl DoubleStreamBlock {
         let txt_gate2 = txt_gate2.unsqueeze(1)?;
         let txt = (txt.to_dtype(candle_core::DType::F32)? + txt_mlp_out.to_dtype(candle_core::DType::F32)?.broadcast_mul(&txt_gate2.to_dtype(candle_core::DType::F32)?)?)?.clamp(-50000.0f32, 50000.0f32)?.to_dtype(orig_dtype)?;
 
+        if std::env::var("FLUX_TRACE").is_ok() {
+            let rms = |t: &Tensor| -> f32 {
+                let f = t.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap();
+                if let Ok(v) = f.to_vec1::<f32>() {
+                    let m = v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / v.len() as f64;
+                    m.sqrt() as f32
+                } else { 0.0 }
+            };
+            eprintln!("      [DBLOCK] img_mod_rms={:.3} img_qkv_rms={:.3} attn_out_rms={:.3} img_attn_proj_rms={:.3} img_mlp_out_rms={:.3}",
+                rms(&img_normed), rms(&img_qkv), rms(&attn_out), rms(&img_attn_proj), rms(&img_mlp_out));
+        }
+
         Ok((img, txt))
     }
 
