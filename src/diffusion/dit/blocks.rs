@@ -143,6 +143,16 @@ impl DoubleStreamBlock {
         let (b, img_len, d) = img.dims3()?;
         let (_, txt_len, _) = txt.dims3()?;
         let orig_dtype = img.dtype();
+        if std::env::var("FLUX_TRACE").is_ok() {
+            let rms = |t: &Tensor| -> f32 {
+                let f = t.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap();
+                if let Ok(v) = f.to_vec1::<f32>() {
+                    let m = v.iter().map(|x| (*x as f64)*(*x as f64)).sum::<f64>() / v.len() as f64;
+                    m.sqrt() as f32
+                } else { 0.0 }
+            };
+            eprintln!("      [DBLOCK-IN] img_rms={:.3} txt_rms={:.3}", rms(img), rms(txt));
+        }
 
         // LayerNorm(elementwise_affine=False) helper
         let norm_layer = |x: &Tensor| -> Result<Tensor> {
