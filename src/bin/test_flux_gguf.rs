@@ -15,8 +15,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut pipeline = FluxPipeline::from_gguf_dtype(&path, device.clone(), DType::F32)
-        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+    let is_gguf = path.to_lowercase().ends_with(".gguf");
+    let mut pipeline = if is_gguf {
+        FluxPipeline::from_gguf_dtype(&path, device.clone(), DType::F32)
+    } else {
+        FluxPipeline::from_single_file_streaming(&path, device.clone())
+    }.map_err(|e| candle_core::Error::Msg(e.to_string()))?;
     pipeline.enable_flash_attn();
 
     if Path::new(&mistral_path).exists() {

@@ -650,11 +650,16 @@ impl FluxPipeline {
                 grid_4d
             };
 
-            // c. Exact Flux 2 _unpatchify_latents:
-            // [1, 128, H_p, W_p] -> [1, 32, 2, 2, H_p, W_p] -> permute(0, 1, 4, 2, 5, 3) -> [1, 32, H_p, 2, W_p, 2] -> [1, 32, H_p*2, W_p*2]
-            let reshaped = destandardized.reshape((1, 32, 2, 2, h_patches, w_patches))?;
-            let permuted = reshaped.permute((0, 1, 4, 2, 5, 3))?.contiguous()?;
-            permuted.reshape((1, 32, h_patches * 2, w_patches * 2))?
+            // c. Exact Flux 2 _unpack_latents: input [B, H_p, W_p, 128] ->
+            //    [B, H_p, W_p, 32, 2, 2] -> permute(0, 3, 1, 4, 2, 5) ->
+            //    [B, 32, H_p, 2, W_p, 2] -> [B, 32, H_p*2, W_p*2].
+            // The spatial dims come FIRST (H_p, W_p), then channels (32) then the 2x2 patch, matching
+            // diffusers Flux2 _unpack_latents exactly. (Previously the channel+patch dims were placed
+            // before the spatial dims, which transposed H/W — a 90-degree rotation.)
+            let spatial_first = destandardized.permute((0, 2, 3, 1))?.contiguous()?; // [1, H_p, W_p, 128]
+            let reshaped = spatial_first.reshape((1, h_patches, w_patches, 32, 2, 2))?;
+            let permuted = reshaped.permute((0, 3, 1, 4, 2, 5))?.contiguous()?; // [1, 32, H_p, 2, W_p, 2]
+            permuted.reshape((1, 32, h_patches * 2, w_patches * 2))? // [1, 32, H_p*2, W_p*2]
         } else {
             let normalized = if let Some(ref vae) = self.vae {
                 if let (Some(mean), Some(var)) = (vae.bn_mean(), vae.bn_var()) {
