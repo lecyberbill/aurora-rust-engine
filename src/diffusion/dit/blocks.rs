@@ -1,7 +1,7 @@
 // [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Pure Rust DoubleStreamBlock and SingleStreamBlock for MMDiT (SD 3.5 & Flux.1)
 
 use candle_core::{Result, Tensor};
-use candle_nn::{layer_norm, linear, LayerNorm, Linear, Module, VarBuilder};
+use candle_nn::{linear, Linear, Module, VarBuilder};
 use crate::diffusion::dit::embeddings::AdaLNZeroModulation;
 
 #[cfg(feature = "flash-attn")]

@@ -240,13 +240,11 @@ pub struct FluxVaeEncoder {
     bn_mean: Option<Tensor>,
     bn_var: Option<Tensor>,
     is_flux2: bool,
-    device: Device,
     dtype: DType,
 }
 
 impl FluxVaeEncoder {
     pub fn new(vb: VarBuilder) -> Result<Self> {
-        let device = vb.device().clone();
         let dtype = vb.dtype();
 
         let conv_in = conv2d(3, 128, 3, Conv2dConfig { padding: 1, ..Default::default() }, vb.pp("encoder.conv_in"))?;
@@ -305,7 +303,6 @@ impl FluxVaeEncoder {
             bn_mean,
             bn_var,
             is_flux2,
-            device,
             dtype,
         })
     }

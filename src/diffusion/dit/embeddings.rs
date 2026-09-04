@@ -1,7 +1,7 @@
 // [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Pure Rust RoPE (Rotary Position Embeddings 2D/3D), Timestep Modulation, and AdaLN-Zero
 
 use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::{linear, Linear, Module, VarBuilder};
+use candle_nn::{Linear, Module, VarBuilder};
 
 /// Generate 3D/4D RoPE coordinates for Flux.1 [16, 56, 56] and Flux.2 [32, 32, 32, 32] (txt_ids + img_ids)
 pub fn create_flux_rope_embeddings(

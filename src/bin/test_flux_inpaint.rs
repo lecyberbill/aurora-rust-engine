@@ -1,7 +1,7 @@
 // [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: End-to-End Verification of Flux.2 Inpainting Pipeline
 
 use candle_core::{DType, Device, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use aurora_rust_engine::pipelines::FluxPipeline;
 use aurora_rust_engine::traits::InpaintParams;
 use aurora_rust_engine::weights::{SafeTensorsArchive, WeightRouter};

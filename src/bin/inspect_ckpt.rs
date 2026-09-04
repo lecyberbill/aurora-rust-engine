@@ -6,7 +6,7 @@ fn main() -> anyhow::Result<()> {
     let archive = Arc::new(SafeTensorsArchive::open(&path)?);
 
     let mut double = 0; let mut single = 0; let mut double_prefix = 0; let mut single_prefix = 0;
-    let mut f8 = 0; let mut f16 = 0; let mut bf16 = 0; let mut f32 = 0;
+    let _f8 = 0; let _f16 = 0; let _bf16 = 0; let _f32 = 0;
     let mut keys_all = Vec::new();
 
     for key in archive.keys() {

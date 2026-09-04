@@ -4,7 +4,7 @@ use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{embedding, linear, Embedding, Linear, Module, VarBuilder};
 use tokenizers::Tokenizer;
 use std::path::Path;
-use crate::weights::{SafeTensorsArchive, WeightsSource};
+use crate::weights::WeightsSource;
 
 /// Auto-detected architecture spec for a Qwen3 text encoder, read from the checkpoint weights.
 ///
@@ -313,7 +313,7 @@ pub struct Qwen3TextEncoder {
     norm: Option<QwenRMSNorm>,
     tokenizer: Option<Tokenizer>,
     device: Device,
-    dtype: DType,
+    _dtype: DType,
     selected_layers: Vec<usize>,
     pad_id: u32,
 }
@@ -398,7 +398,7 @@ impl Qwen3TextEncoder {
             norm,
             tokenizer,
             device,
-            dtype,
+            _dtype: dtype,
             selected_layers,
             pad_id,
         })

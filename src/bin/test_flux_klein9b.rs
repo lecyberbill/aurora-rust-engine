@@ -17,7 +17,7 @@ fn main() -> Result<()> {
 
     let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
     let checkpoint = std::env::var("CKPT").unwrap_or_else(|_| "G:\\models\\flux\\flux-2-klein-9b.safetensors".into());
-    let mistral_path = "G:\\models\\clip\\mistral3SmallFlux2Fp4_mistral3SmallFlux2.safetensors";
+    let _mistral_path = "G:\\models\\clip\\mistral3SmallFlux2Fp4_mistral3SmallFlux2.safetensors";
     let qwen8b_dir = "G:\\models\\clip\\FLUX.2-klein-9B_text_encoder";
     let vae_path = "G:\\models\\vae\\flux2-vae.safetensors";
 

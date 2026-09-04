@@ -479,7 +479,7 @@ pub fn apply_flux_deltas_to_tensor(
             return Tensor::cat(&[&q, &k, &v], 0).map_err(LuminaError::Candle);
         }
         let tail = base0.narrow(0, slab * 3, out - slab * 3).map_err(LuminaError::Candle)?;
-        Tensor::cat(&[&q, &k, &v, &tail], 0).map_err(LuminaError::Candle);
+        return Tensor::cat(&[&q, &k, &v, &tail], 0).map_err(LuminaError::Candle);
     }
 
     Ok(tensor)
@@ -1062,7 +1062,7 @@ pub fn flux_diffusers_to_bfl(key: &str) -> Option<String> {
         let idx = it.next()?;
         let field = it.next()?;
         let tail = it.next()?;
-        let p = |s: &str| Some(format!("single_blocks.{idx}.{s}.{tail}"));
+        let _p = |s: &str| Some(format!("single_blocks.{idx}.{s}.{tail}"));
         return match field {
             "attn" => {
                 if let Some(t) = tail.strip_prefix("to_qkv_mlp_proj.") {

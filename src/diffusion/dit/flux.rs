@@ -3,7 +3,7 @@
 use candle_core::{Result, Tensor};
 use candle_nn::{linear, Linear, Module, VarBuilder};
 use crate::diffusion::dit::blocks::{DoubleStreamBlock, SingleStreamBlock};
-use crate::diffusion::dit::embeddings::{AdaLNZeroModulation, TimestepEmbedder};
+use crate::diffusion::dit::embeddings::TimestepEmbedder;
 
 /// Configuration for Flux.1 / SD 3.5 MMDiT models
 #[derive(Debug, Clone)]

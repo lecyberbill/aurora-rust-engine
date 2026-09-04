@@ -1,4 +1,4 @@
-use candle_core::{DType, Device, Result};
+use candle_core::{Device, Result};
 use std::path::Path;
 use std::time::Instant;
 use aurora_rust_engine::pipelines::FluxPipeline;

@@ -1,10 +1,9 @@
 // [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: Pure Rust Mistral-3-Small Multi-Layer Text Encoder with NVFP4 / FP8 Dequantization
 
 use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::{embedding, linear, Embedding, Linear, Module, VarBuilder};
+use candle_nn::{Embedding, Linear, Module, VarBuilder};
 use tokenizers::Tokenizer;
 use std::path::Path;
-use std::collections::HashMap;
 use std::sync::Arc;
 use crate::weights::WeightsSource;
 
@@ -34,11 +33,11 @@ pub fn dequantize_nvfp4(
     let bs_cpu = block_scales.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
     let bs_data: Vec<f32> = bs_cpu.flatten_all()?.to_vec1()?;
     let bs_dims = block_scales.dims();
-    let bs_padded_rows = bs_dims[0];
-    let bs_padded_cols = bs_dims[1];
+    let _bs_padded_rows = bs_dims[0];
+    let _bs_padded_cols = bs_dims[1];
 
     let num_blocks_per_row = num_cols / 16;
-    let n_row_blocks = (num_rows + 127) / 128;
+    let _n_row_blocks = (num_rows + 127) / 128;
     let n_col_blocks = (num_blocks_per_row + 3) / 4;
 
     // Unswizzle block_scales from cuBLAS tiled layout
@@ -179,8 +178,8 @@ impl MistralAttention {
         let k = self.k_proj.forward(x)?;
         let v = self.v_proj.forward(x)?;
 
-        let mut q = q.reshape((b, seq, self.num_heads, self.head_dim))?;
-        let mut k = k.reshape((b, seq, self.num_kv_heads, self.head_dim))?;
+        let q = q.reshape((b, seq, self.num_heads, self.head_dim))?;
+        let k = k.reshape((b, seq, self.num_kv_heads, self.head_dim))?;
         let v = v.reshape((b, seq, self.num_kv_heads, self.head_dim))?;
 
         // Apply 1D Rotary Position Embedding (RoPE) for Mistral-3.2-24B (theta = 1000000000.0 / 1e9)

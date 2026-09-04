@@ -16,7 +16,7 @@ fn main() -> anyhow::Result<()> {
     println!("📥 Loading Qwen3-8B from {} shards...", shards.len());
     let archive = SafeTensorsArchive::open_shards(&shards)?;
 
-    let mut enc = Qwen3TextEncoder::from_archive(&archive, Some(std::path::Path::new("qwen_tokenizer.json")), &device, dtype)?;
+    let enc = Qwen3TextEncoder::from_archive(&archive, Some(std::path::Path::new("qwen_tokenizer.json")), &device, dtype)?;
     println!("✅ Encoder built!");
 
     let out = enc.encode("a gorgeous portrait of an arctic fox with sapphire blue eyes", 512)?;

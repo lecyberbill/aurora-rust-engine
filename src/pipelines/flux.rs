@@ -747,7 +747,7 @@ impl FluxPipeline {
 
         // 3. Exact Flux 2 _patchify_latents + _pack_latents + BatchNorm:
         // a. [1, 32, H_p*2, W_p*2] -> [1, 32, H_p, 2, W_p, 2] -> permute(0, 1, 3, 5, 2, 4) -> [1, 128, H_p, W_p]
-        let mut x_0 = if in_channels == 128 {
+        let x_0 = if in_channels == 128 {
             let lat_reshaped = init_latents.reshape((1, 32, h_patches, 2, w_patches, 2))?;
             let lat_permuted = lat_reshaped.permute((0, 1, 3, 5, 2, 4))?.contiguous()?;
             let patchified_4d = lat_permuted.reshape((1, 128, h_patches, w_patches))?;
@@ -828,7 +828,7 @@ impl FluxPipeline {
 
         let t_unet_start = Instant::now();
         for step_idx in start_step..timesteps.len() {
-            let t = timesteps[step_idx];
+            let _t = timesteps[step_idx];
             let sigma = if step_idx < sigmas.len() { sigmas[step_idx] } else { 0.0 };
             let t_tensor = Tensor::from_slice(&[sigma as f32], (1,), &self.device)?.to_dtype(self.dtype)?;
 
