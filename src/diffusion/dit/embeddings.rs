@@ -177,10 +177,18 @@ pub struct TimestepEmbedder {
     in_layer: Linear,
     out_layer: Linear,
     freq_dim: usize,
+    time_factor: f64,
 }
 
 impl TimestepEmbedder {
     pub fn new(hidden_dim: usize, freq_dim: usize, vb: VarBuilder) -> Result<Self> {
+        Self::new_with_factor(hidden_dim, freq_dim, 1000.0, vb)
+    }
+
+    /// Like [`new`](Self::new) but with a custom `time_factor`. Use `1.0` when embedding a value that
+    /// must NOT be re-scaled (e.g. Flux.2-dev's `guidance_in` scalar guidance), since the timestep
+    /// embedding's `t = factor * t` would otherwise blow up the guidance to 1000x.
+    pub fn new_with_factor(hidden_dim: usize, freq_dim: usize, time_factor: f64, vb: VarBuilder) -> Result<Self> {
         let linear_layer = |in_d: usize, out_d: usize, path: VarBuilder| -> Result<Linear> {
             candle_nn::linear(in_d, out_d, path.clone()).or_else(|_| candle_nn::linear_no_bias(in_d, out_d, path))
         };
@@ -190,6 +198,7 @@ impl TimestepEmbedder {
             in_layer,
             out_layer,
             freq_dim,
+            time_factor,
         })
     }
 
@@ -203,7 +212,7 @@ impl TimestepEmbedder {
         // freqs = exp(-ln(10000.0) * (0..half_dim) / half_dim)
         // emb = cat([cos(args), sin(args)], dim=-1)
         let max_period: f64 = 10000.0;
-        let time_factor: f64 = 1000.0;
+        let time_factor: f64 = self.time_factor;
 
         let freqs: Vec<f32> = (0..half_dim)
             .map(|i| (-(max_period.ln()) * (i as f64) / (half_dim as f64)).exp() as f32)

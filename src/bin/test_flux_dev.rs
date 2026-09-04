@@ -26,24 +26,29 @@ fn main() -> Result<()> {
 
     println!("\n📥 Loading Flux.2-Dev Checkpoint with Sequential Streamer...");
     let t_start = Instant::now();
-    let mut pipeline = FluxPipeline::from_single_file_streaming(&checkpoint, device.clone())
-        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+    let is_gguf = checkpoint.to_lowercase().ends_with(".gguf");
+    let mut pipeline = if is_gguf {
+        FluxPipeline::from_gguf_dtype(&checkpoint, device.clone(), DType::F16)
+    } else {
+        FluxPipeline::from_single_file_streaming(&checkpoint, device.clone())
+    }.map_err(|e| candle_core::Error::Msg(e.to_string()))?;
     pipeline.enable_flash_attn();
 
     if Path::new(&mistral_path).exists() {
-        println!("📥 Attaching Mistral-3-Small Prompt Encoder (CPU...)...");
+        let mistral_dev = if device.is_cuda() { device.clone() } else { Device::Cpu };
+        println!("📥 Attaching Mistral-3-Small Prompt Encoder (CUDA)...");
         let mistral = if Path::new(&mistral_path).is_dir() {
             aurora_rust_engine::text::Mistral3TextEncoder::from_dir(
                 &mistral_path,
                 Some(std::path::Path::new("mistral_tokenizer.json")),
-                Device::Cpu,
+                mistral_dev,
                 DType::F16,
             )
         } else {
             aurora_rust_engine::text::Mistral3TextEncoder::from_safetensors(
                 &mistral_path,
                 Some(std::path::Path::new("mistral_tokenizer.json")),
-                Device::Cpu,
+                mistral_dev,
                 DType::F16,
             )
         }.map_err(|e| candle_core::Error::Msg(e.to_string()))?;

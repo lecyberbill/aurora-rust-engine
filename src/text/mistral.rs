@@ -183,9 +183,9 @@ impl MistralAttention {
         let mut k = k.reshape((b, seq, self.num_kv_heads, self.head_dim))?;
         let v = v.reshape((b, seq, self.num_kv_heads, self.head_dim))?;
 
-        // Apply 1D Rotary Position Embedding (RoPE) for Mistral-3 (theta = 100000000.0 / 1e8)
+        // Apply 1D Rotary Position Embedding (RoPE) for Mistral-3.2-24B (theta = 1000000000.0 / 1e9)
         let half_dim = self.head_dim / 2;
-        let theta = 100000000.0f64;
+        let theta = 1000000000.0f64;
         let inv_freq: Vec<f32> = (0..half_dim)
             .map(|i| 1.0 / (theta.powf((i * 2) as f64 / self.head_dim as f64) as f32))
             .collect();
@@ -371,7 +371,7 @@ impl Mistral3TextEncoder {
             candle_core::Error::Msg("Mistral Tokenizer not loaded".to_string())
         })?;
 
-        let formatted_prompt = format!("[INST]{}[/INST]", prompt.trim());
+        let formatted_prompt = prompt.trim().to_string();
 
         let encoding = tokenizer.encode(formatted_prompt, true)
             .or_else(|_| tokenizer.encode(prompt, true))
@@ -415,13 +415,16 @@ impl Mistral3TextEncoder {
         // text projection (context_embedder) was trained on these raw values. Do NOT normalise.
         let out = Tensor::cat(&[&l10, &l20, &l30], 2)?;
 
-        // De-noise test (FLUX_TRACE_DEVOISE): normalise to kill the massive outliers (max 171+) that
-        // blow up the Dev transformer. Scale to a target RMS. Only active under the env flag.
-        if std::env::var("FLUX_TEXT_NORM").is_ok() {
+        // De-noise test (FLUX_TRACE_DEVOISE): per-token RMSNorm (each of the 512 token rows scaled to
+        // unit RMS) to tame the localised early-layer outlier spike before it reaches txt_in. Active
+        // only when FLUX_TEXT_NORM is set.
+        if let Ok(target) = std::env::var("FLUX_TEXT_NORM") {
+            let target: f64 = if target.is_empty() { 0.4 } else { target.parse().unwrap_or(0.4) };
             let x = out.to_dtype(DType::F32)?;
-            let mean_sq = (x.sqr()?.sum_keepdim(2)? / (x.dim(2)? as f64))?;
+            let dim = x.dims().len() - 1;
+            let mean_sq = (x.sqr()?.sum_keepdim(dim)? / (x.dim(dim)? as f64))?;
             let rms = (mean_sq + 1e-6f64)?.sqrt()?;
-            let normed = x.broadcast_div(&rms)?.to_dtype(self.dtype)?;
+            let normed = x.broadcast_div(&rms)?.affine(target, 0.0)?.to_dtype(self.dtype)?;
             Ok(normed)
         } else {
             Ok(out)

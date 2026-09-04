@@ -6,28 +6,36 @@ use aurora_rust_engine::traits::DiffusionParams;
 
 fn main() -> Result<()> {
     let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-    let path = "C:\\Users\\lecyb\\Downloads\\flux2-dev-Q8_0.gguf";
-    let mistral_path = "G:\\models\\clip\\mistral_3_small_flux2_fp8.safetensors";
-    let vae_path = "G:\\models\\vae\\flux2-vae.safetensors";
+    let path = std::env::var("CKPT").unwrap_or_else(|_| "C:\\Users\\lecyb\\Downloads\\flux2-dev-Q8_0.gguf".into());
+    let mistral_path = std::env::var("MISTRAL").unwrap_or_else(|_| "G:\\models\\clip\\mistral_3_small_flux2_fp8.safetensors".into());
+    let vae_path = std::env::var("VAE").unwrap_or_else(|_| "G:\\models\\vae\\flux2-vae.safetensors".into());
 
-    if !Path::new(path).exists() {
+    if !Path::new(&path).exists() {
         eprintln!("[-] GGUF not found: {}", path);
         return Ok(());
     }
 
-    let mut pipeline = FluxPipeline::from_gguf_dtype(path, device.clone(), DType::F32)
+    let mut pipeline = FluxPipeline::from_gguf_dtype(&path, device.clone(), DType::F32)
         .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
     pipeline.enable_flash_attn();
 
-    if Path::new(mistral_path).exists() {
-        let mistral = aurora_rust_engine::text::Mistral3TextEncoder::from_safetensors(
-            mistral_path, Some(std::path::Path::new("mistral_tokenizer.json")),
-            Device::Cpu, DType::F16,
-        ).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+    if Path::new(&mistral_path).exists() {
+        let mistral_dev = if device.is_cuda() { device.clone() } else { Device::Cpu };
+        let mistral = if Path::new(&mistral_path).is_dir() {
+            aurora_rust_engine::text::Mistral3TextEncoder::from_dir(
+                &mistral_path, Some(std::path::Path::new("mistral_tokenizer.json")),
+                mistral_dev, DType::F16,
+            )
+        } else {
+            aurora_rust_engine::text::Mistral3TextEncoder::from_safetensors(
+                &mistral_path, Some(std::path::Path::new("mistral_tokenizer.json")),
+                mistral_dev, DType::F16,
+            )
+        }.map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         pipeline.set_mistral(mistral);
         println!("✅ Mistral-3-Small Attached!");
     }
-    if Path::new(vae_path).exists() {
+    if Path::new(&vae_path).exists() {
         let va = aurora_rust_engine::weights::SafeTensorsArchive::open(vae_path)
             .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         let vr = aurora_rust_engine::weights::WeightRouter::new(&va, device.clone(), DType::F16);
