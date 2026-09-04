@@ -173,21 +173,18 @@ impl FluxPipeline {
     }
 
     /// Build the Flux.2 scheduler config matching the model's family:
-    /// - guidance (Flux.2-Dev): keep the default static shift=3.0 schedule (empirically the
-    ///   calibrated Flux.1/Dev curve; experimentally dynamic shifting regressed quality).
+    /// - guidance (Flux.2-Dev): use the official Flux.2 empirical-mu schedule
+    ///   `compute_empirical_mu(image_seq_len, num_steps)` (a1/b1/a2/b2) exactly like Klein. A static
+    ///   shift=3.0 was previously used but regressed Dev; the guidance_in factor fix (×1000) restores
+    ///   the correct conditional, so the empirical schedule is now valid.
     /// - distilled (Flux.2-Klein-4B/9B): empirical-mu calibrated schedule.
     fn flux2_scheduler_config(&self) -> FlowMatchEulerConfig {
-        if self.transformer.config.guidance_embed {
-            // Flux.2-Dev: static shift=3.0 (resolution-dependent mu gave identical grain).
-            FlowMatchEulerConfig::default()
-        } else {
-            FlowMatchEulerConfig {
-                shift: 2.02,
-                base_shift: 0.5,
-                max_shift: 1.15,
-                min_shift: 0.5,
-                use_dynamic_shifting: false,
-            }
+        FlowMatchEulerConfig {
+            shift: 2.02,
+            base_shift: 0.5,
+            max_shift: 1.15,
+            min_shift: 0.5,
+            use_dynamic_shifting: false,
         }
     }
     /// Load Flux pipeline from a llama.cpp **GGUF** checkpoint (quantized per-block weights). This is the

@@ -371,7 +371,13 @@ impl Mistral3TextEncoder {
             candle_core::Error::Msg("Mistral Tokenizer not loaded".to_string())
         })?;
 
-        let formatted_prompt = prompt.trim().to_string();
+        // Flux.2-dev applies the official Mistral chat template with a fixed system message before
+        // tokenising: tokenizer.apply_chat_template(messages). The template renders as:
+        //   [INST] <system_message>\n{prompt} [/INST]
+        // Without this, the layer-10/20/30 hidden states fall outside the distribution the
+        // txt_in/context_embedder (15360 dim) was trained on.
+        const SYSTEM_MESSAGE: &str = "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object attribution and actions without speculation.";
+        let formatted_prompt = format!("[INST] {}\n{} [/INST]", SYSTEM_MESSAGE, prompt.trim());
 
         let encoding = tokenizer.encode(formatted_prompt, true)
             .or_else(|_| tokenizer.encode(prompt, true))

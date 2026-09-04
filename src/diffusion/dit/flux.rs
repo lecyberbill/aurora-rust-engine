@@ -151,7 +151,7 @@ impl FluxTransformer {
             _ => None,
         };
         let guidance_embedder = if config.guidance_embed {
-            Some(TimestepEmbedder::new_with_factor(config.hidden_size, 256, 1.0, vb.pp("guidance_in"))?)
+            Some(TimestepEmbedder::new_with_factor(config.hidden_size, 256, 1000.0, vb.pp("guidance_in"))?)
         } else {
             None
         };
@@ -218,7 +218,7 @@ impl FluxTransformer {
             _ => None,
         };
         let guidance_embedder = if config.guidance_embed {
-            Some(TimestepEmbedder::new_with_factor(config.hidden_size, 256, 1.0, vb.pp("guidance_in"))?)
+            Some(TimestepEmbedder::new_with_factor(config.hidden_size, 256, 1000.0, vb.pp("guidance_in"))?)
         } else {
             None
         };
