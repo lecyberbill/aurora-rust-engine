@@ -231,7 +231,7 @@ The MMDiT module now covers **Flux.1** (Schnell/Dev) and **Flux.2-Klein-4B**. Th
 
 ---
 
-### 🔬 Milestone 11: Scaling to FLUX.2-Klein-9B & FLUX.2-Dev (IN PROGRESS / ACTIVE CALIBRATION)
+### ✅ Milestone 11: Scaling to FLUX.2-Klein-9B & FLUX.2-Dev (COMPLETED)
 Enabling execution of large-scale MMDiT models on modest VRAM (< 8GB) using the sequential block streamer, automatic architecture dimensioning, and zero-WDDM-paging execution:
 - [x] **Architectural Profiles & Auto-Detection** (`src/pipelines/flux.rs` & `src/diffusion/dit/flux.rs`):
   - **Flux.2-Klein-9B**: `hidden_dim = 4096`, `num_heads = 32`, `num_double_blocks = 8`, `num_single_blocks = 24`, `mlp_ratio = 6` (SwiGLU `24576 / 12288`), text input projection `12288 -> 4096`.
@@ -241,38 +241,32 @@ Enabling execution of large-scale MMDiT models on modest VRAM (< 8GB) using the 
   - Direct zero-copy loading of FP8 (`F8_E4M3` / `F8_E5M2`) Safetensors weights into CPU host memory with per-block streaming and `weight_scale` dequantisation into CUDA F16.
 - [x] **Dynamic VRAM Budgeting**:
   - Sequential block streamer bounds resident peak VRAM to **< 7.5 GB** during execution of 9B models (`test_flux_klein9b.rs` runs smoothly on single consumer GPU).
-- [ ] **Visual Parity & Artifact Convergence** (Flux.2-Dev residual "stained-glass" grain — see HANDOVER notes):
-  - **Klein-9B is DONE & photorealistic** (both BF16 `flux-2-klein-9b.safetensors` and FP8
-    `flux2Klein9bFp8_fp8.safetensors` render a clean arctic fox — see
-    `outputs/flux_showcase/flux_klein_9b_fp8_test.png`).
-  - **Flux.2-Dev (`flux2DevFp8Scaled_fp8Scaled.safetensors`) renders a recognisable fox but with a
-    persistent, resolution-independent high-frequency "stained-glass"/grid grain.** The grain is the
-    SAME at 384x384 and 1024x1024, and unchanged by 20 vs 30 steps.
-  - **Complete hypothesis isolation (all tested by actual renders, 2026-08):**
-    - *Scheduler*: static shift=3.0 is correct (dynamic shifting REGRESSED — reverted); keeping the
-      Klein `shift=2.02` empirical-mu path also regressed. The default `FlowMatchEulerConfig::default()`
-      is used for Dev via `flux2_scheduler_config()`.
-    - *Text RMS*: Mistral-3 embeddings must stay at NATIVE amplitude (~rms 0.4) — the text projection
-      `context_embedder` was trained on these. RMS-normalising to ~1.9 (to match Qwen) is WRONG and was
-      reverted after the reference confirmed it causes cross-attention saturation.
-    *Guidance*: grain persists even at `guidance_scale=1.0` → NOT a guidance/cfg bug. The
-      `temb = time_emb + guidance_emb` fusion is structurally correct (no pooled vector_in in Dev).
-    - *FP8 dequant*: `scale_weight` (scalar) is correctly applied to F8_E4M3 weights; magnitudes are
-      sane. Confirmed by Klein-9B fp8 rendering perfectly through the SAME `SafeTensorsArchive` code.
-    - *RoPE*: 4D `[T=0,H,W,Ref=0]`, theta=2000 — shared and validated by both Kleins.
-  - **Conclusion**: the pipeline, RoPE, scheduler, VAE, text conditioning and FP8 dequant are all
-    correct (proven by photorealistic Klein-4B + Klein-9B BF16/FP8). The Dev grain is **specific to the
-    `flux2DevFp8Scaled_fp8Scaled.safetensors` checkpoint** — likely either its fp8Scaled quantization
-    quality or an architectural detail in the 48-SingleStreamBlock Dev that is not yet matched.
-  - **Next leads to investigate (resume here):**
-    1. Obtain a non-quantized (BF16/F16) FLUX.2-Dev checkpoint to isolate whether the grain comes from
-       the fp8Scaled encoding vs the Dev architecture itself.
-    2. Diff the Dev 48-SingleStreamBlock structure against the reference (esp. `linear1`/`linear2`
-       projection widths and the SwiGLU gating around `dim*3 + mlp_dim`).
-    3. Verify the Flux.2-Dev reference `CombinedTimestepGuidanceTextProjEmbeddings` — confirm the
-       guidance appears in `temb` with the exact scaling (currently `guidance*1000.0` via `TimestepEmbedder`).
-    4. Compare the Dev `txt_in` text projection and any per-block modulation against the 9B — the Dev
-       splits texts across 15360 dim, so confirm layer-9/19/29 concatenation ordering matches.
+- [x] **Visual Parity & Artifact Convergence — RESOLVED (2026-09-04)**
+  - **Klein-9B photorealistic** (BF16 `flux-2-klein-9b.safetensors` and FP8 `flux2Klein9bFp8_fp8.safetensors`
+    render a clean arctic fox — `outputs/flux_showcase/flux_klein_9b_fp8_test.png`).
+  - **Flux.2-Dev photorealistic & upright** — `flux2DevFp8Scaled_fp8Scaled.safetensors` + the official
+    BF16 Mistral-3.2-24B text encoder (10-shard VLM, 40 layers, `language_model.model.layers.*` prefix)
+    now render a clean 1024 arctic fox with the correct orientation
+    (`outputs/flux_showcase/flux_dev_1024_s20_g3.5.png`).
+  - **Root causes fixed (in dependency order):**
+    1. **Wrong text encoder** — the earlier `mistral_3_small_flux2_fp8` is a *30-layer* Mistral; Flux.2-Dev
+       needs the **Mistral-3.2-24B 40-layer VLM** (`black-forest-labs/FLUX.2-dev/text_encoder`, BF16,
+       10 shards). `from_dir` + `language_model.` prefix auto-detection + 40-layer count.
+    2. **Mistral RoPE θ** — hardcoded `1e8`, the VLM config declares `1e9` (10× phase error).
+    3. **guidance_in ×1000** — the guidance scalar must be scaled by 1000 exactly like the timestep so the
+       sinusoidal freq projection sits in `[0, 10000]`. Passing ×1 collapsed the guidance to the `cos≈1,sin≈0`
+       band, corrupting `temb` at every block (the residual "stained-glass" grain driver).
+    4. **Official Mistral chat template** — Flux.2 prompts Mistral with a fixed SYSTEM_MESSAGE inside
+       `[INST]..[/INST]`; the layer-10/20/30 states must sit in the distribution the 15360-dim `txt_in`
+       was trained on.
+    5. **Scheduler** — Flux.2-Dev uses the empirical `compute_empirical_mu(image_seq_len, num_steps)`
+       schedule (`shift=2.02` branch), not static `shift=3.0` (the earlier static choice was validated
+       while the guidance bug was corrupting the schedule).
+    6. **2×2 patch unpack order (90° rotation)** — `_unpack_latents` must be spatial-first:
+       `[B, H/2, W/2, 32, 2, 2]` → `permute(0,3,1,4,2,5)` → `[B, 32, H, W]`. Channel+patch-before-spatial
+       transposed H/W.
+  - **Hypothesis-isolation trail kept in `DEV_GRAIN_HANDOVER.md`** (multi-format weights, LoRA, guidance
+    factor, theta, text RMS, scheduler shift, unpack order) for future reference.
 
 ---
 
@@ -292,11 +286,11 @@ Extending MMDiT image generation with full contextual image manipulation:
 - [x] **FLUX.2 Inpainting & Mask Preservation** (`src/pipelines/flux.rs` : `generate_inpaint`):
   - Area-averaged latent mask downsampling with in-step background latent re-injection:
     $$z_t = (1 - M) \odot z_{\text{orig}, t} + M \odot z_{\text{denoised}, t}$$
-- [ ] **End-to-End Visual Quality on Flux.2 Models**:
+- [x] **End-to-End Visual Quality on Flux.2 Models**:
   - Klein-9B img2img **verified photorealistic** (`test_flux_img2img_9b.rs` → crowned lion from a fox).
   - Klein-9B inpainting **verified photorealistic** (`test_flux_inpaint_9b.rs` → emerald crown in a circular mask,
     rest of image preserved).
-  - Full end-to-end validation on Flux.2 family awaiting final Dev conditioning convergence (see Dev grain notes).
+  - Dev conditioning converged (see Milestone 11) — Dev T2I now photorealistic & upright.
 
 ---
 
