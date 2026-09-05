@@ -650,12 +650,11 @@ impl FluxPipeline {
                 grid_4d
             };
 
-            // c. Exact Flux 2 _unpack_latents: input [B, H_p, W_p, 128] ->
-            //    [B, H_p, W_p, 32, 2, 2] -> permute(0, 3, 1, 4, 2, 5) ->
-            //    [B, 32, H_p, 2, W_p, 2] -> [B, 32, H_p*2, W_p*2].
-            // The spatial dims come FIRST (H_p, W_p), then channels (32) then the 2x2 patch, matching
-            // diffusers Flux2 _unpack_latents exactly. (Previously the channel+patch dims were placed
-            // before the spatial dims, which transposed H/W — a 90-degree rotation.)
+            // c. Exact Flux 2 _unpack_latents:
+            //    [1, H_p * W_p, 128] -> reshape [1, H_p, W_p, 128] -> permute(0, 3, 1, 2) -> [1, 128, H_p, W_p]
+            //    -> reshape [1, 32, 2, 2, H_p, W_p] -> permute(0, 1, 4, 2, 5, 3) -> [1, 32, H_p, 2, W_p, 2]
+            //    -> [1, 32, H_p*2, W_p*2]. This channel-first pair is the layout the transformer was
+            //    trained on (validated by the straight Klein-9B T2I/img2img renders).
             let spatial_first = destandardized.permute((0, 2, 3, 1))?.contiguous()?; // [1, H_p, W_p, 128]
             let reshaped = spatial_first.reshape((1, h_patches, w_patches, 32, 2, 2))?;
             let permuted = reshaped.permute((0, 3, 1, 4, 2, 5))?.contiguous()?; // [1, 32, H_p, 2, W_p, 2]
@@ -787,8 +786,28 @@ impl FluxPipeline {
             permuted.reshape((1, h_patches * w_patches, in_channels))?
         };
 
-        // 5. Text conditioning: encode prompt via Qwen3, T5-XXL, or CLIP-L
-        let txt_tokens = if let Some(ref mut qwen) = self.qwen3 {
+        // 5. Text conditioning: encode prompt via Mistral-3 (Dev), Qwen3, T5-XXL, or CLIP-L
+        let txt_tokens = if let Some(ref mut mistral) = self.mistral {
+            let raw = if in_channels == 128 && self.transformer.config.hidden_size > 1024 {
+                mistral.encode_dim(params.prompt, 512, if self.transformer.config.hidden_size == 4096 { 4096 } else { 5120 })?
+            } else {
+                mistral.encode(params.prompt, 512)?
+            };
+            let expected = if in_channels == 128 {
+                self.transformer.txt_in_expected_in()
+            } else {
+                4096
+            };
+            let d = raw.dim(2)?;
+            if d < expected {
+                let pad = Tensor::zeros((raw.dim(0)?, raw.dim(1)?, expected - d), self.dtype, &self.device)?;
+                Tensor::cat(&[&raw, &pad], 2)?.contiguous()?.to_device(&self.device)?.to_dtype(self.dtype)?
+            } else if d > expected {
+                raw.narrow(2, 0, expected)?.contiguous()?.to_device(&self.device)?.to_dtype(self.dtype)?
+            } else {
+                raw.to_device(&self.device)?.to_dtype(self.dtype)?
+            }
+        } else if let Some(ref mut qwen) = self.qwen3 {
             qwen.encode(params.prompt, 512)?.to_device(&self.device)?.to_dtype(self.dtype)?
         } else if let Some(ref mut t5) = self.t5xxl {
             let t5_emb = t5.encode(params.prompt, 256)?;
@@ -877,10 +896,13 @@ impl FluxPipeline {
                 grid_4d
             };
 
-            // c. Exact Flux 2 _unpatchify_latents:
-            let reshaped = destandardized.reshape((1, 32, 2, 2, h_patches, w_patches))?;
-            let permuted = reshaped.permute((0, 1, 4, 2, 5, 3))?.contiguous()?;
-            permuted.reshape((1, 32, h_patches * 2, w_patches * 2))?
+            // c. Exact Flux 2 _unpack_latents (spatial-first, same as T2I):
+            //    [1, H_p, W_p, 128] -> reshape [1, H_p, W_p, 32, 2, 2] -> permute(0, 3, 1, 4, 2, 5)
+            //    -> [1, 32, H_p, 2, W_p, 2] -> [1, 32, H_p*2, W_p*2]
+            let spatial_first = destandardized.permute((0, 2, 3, 1))?.contiguous()?; // [1, H_p, W_p, 128]
+            let reshaped = spatial_first.reshape((1, h_patches, w_patches, 32, 2, 2))?;
+            let permuted = reshaped.permute((0, 3, 1, 4, 2, 5))?.contiguous()?; // [1, 32, H_p, 2, W_p, 2]
+            permuted.reshape((1, 32, h_patches * 2, w_patches * 2))? // [1, 32, H_p*2, W_p*2]
         } else {
             unpatchify(&latents, height, width)?
         };
@@ -997,7 +1019,23 @@ impl FluxPipeline {
         };
 
         // 5. Text conditioning
-        let txt_tokens = if let Some(ref mut qwen) = self.qwen3 {
+        let txt_tokens = if let Some(ref mut mistral) = self.mistral {
+            let raw = if in_channels == 128 && self.transformer.config.hidden_size > 1024 {
+                mistral.encode_dim(params.prompt, 512, if self.transformer.config.hidden_size == 4096 { 4096 } else { 5120 })?
+            } else {
+                mistral.encode(params.prompt, 512)?
+            };
+            let expected = if in_channels == 128 { self.transformer.txt_in_expected_in() } else { 4096 };
+            let d = raw.dim(2)?;
+            if d < expected {
+                let pad = Tensor::zeros((raw.dim(0)?, raw.dim(1)?, expected - d), self.dtype, &self.device)?;
+                Tensor::cat(&[&raw, &pad], 2)?.contiguous()?.to_device(&self.device)?.to_dtype(self.dtype)?
+            } else if d > expected {
+                raw.narrow(2, 0, expected)?.contiguous()?.to_device(&self.device)?.to_dtype(self.dtype)?
+            } else {
+                raw.to_device(&self.device)?.to_dtype(self.dtype)?
+            }
+        } else if let Some(ref mut qwen) = self.qwen3 {
             qwen.encode(params.prompt, 512)?.to_device(&self.device)?.to_dtype(self.dtype)?
         } else if let Some(ref mut t5) = self.t5xxl {
             let t5_emb = t5.encode(params.prompt, 256)?;
@@ -1088,9 +1126,13 @@ impl FluxPipeline {
                 grid_4d
             };
 
-            let reshaped = destandardized.reshape((1, 32, 2, 2, h_patches, w_patches))?;
-            let permuted = reshaped.permute((0, 1, 4, 2, 5, 3))?.contiguous()?;
-            permuted.reshape((1, 32, h_patches * 2, w_patches * 2))?
+            // c. Exact Flux 2 _unpack_latents (spatial-first, same as T2I):
+            //    [1, H_p, W_p, 128] -> reshape [1, H_p, W_p, 32, 2, 2] -> permute(0, 3, 1, 4, 2, 5)
+            //    -> [1, 32, H_p, 2, W_p, 2] -> [1, 32, H_p*2, W_p*2]
+            let spatial_first = destandardized.permute((0, 2, 3, 1))?.contiguous()?; // [1, H_p, W_p, 128]
+            let reshaped = spatial_first.reshape((1, h_patches, w_patches, 32, 2, 2))?;
+            let permuted = reshaped.permute((0, 3, 1, 4, 2, 5))?.contiguous()?; // [1, 32, H_p, 2, W_p, 2]
+            permuted.reshape((1, 32, h_patches * 2, w_patches * 2))? // [1, 32, H_p*2, W_p*2]
         } else {
             unpatchify(&latents, height, width)?
         };
