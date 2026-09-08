@@ -114,6 +114,11 @@ fn resolve_target_and_param(base_name: &str) -> (LoRATarget, String) {
     } else if base_name.starts_with("lora_unet_") && base_name.contains("_blocks_") {
         // BFL-style / Kohya Flux LoRA: lora_unet_double_blocks.N.img_attn_qkv ...
         return resolve_bfl_flux_name(base_name);
+    } else if base_name.starts_with("diffusion_model.") {
+        // Kohya-ss / OneTrainer Flux.2 LoRA: diffusion_model.single_blocks.N.linear1 ...
+        // These keys are already BFL-style, so just drop the prefix and tag as a Flux MMDiT target.
+        let raw = base_name.strip_prefix("diffusion_model.").unwrap_or(base_name);
+        return (LoRATarget::Flux, format!("{}.weight", raw));
     }
     if base_name.starts_with("lora_unet_") {
         let unet_raw = base_name.strip_prefix("lora_unet_").unwrap();
