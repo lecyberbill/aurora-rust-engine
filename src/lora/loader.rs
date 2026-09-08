@@ -180,11 +180,13 @@ fn resolve_diffusers_flux_name(base: &str) -> (LoRATarget, String) {
         }
     } else {
         match rest {
-            // Single-stream `linear1` = [Q|K|V|MLP] fused along ROWS (shape [dim*9, dim]); slice rows.
+            // Single-stream Dev: `to_qkv_mlp_proj` is the FULL fused linear1 ([9*dim, dim]) as a
+            // single delta, so it must be matched BEFORE `to_q/`to_k/`to_v` and not be row-sliced.
+            r if r.starts_with("attn.to_qkv_mlp_proj") => Some(format!("{bprefix}.linear1")),
             r if r.starts_with("attn.to_q") => Some(format!("{bprefix}.linear1@Q")),
             r if r.starts_with("attn.to_k") => Some(format!("{bprefix}.linear1@K")),
             r if r.starts_with("attn.to_v") => Some(format!("{bprefix}.linear1@V")),
-            r if r.starts_with("attn.to_out.0") => Some(format!("{bprefix}.proj_out")),
+            r if r.starts_with("attn.to_out") => Some(format!("{bprefix}.linear2")),
             r if r.starts_with("proj_mlp") => Some(format!("{bprefix}.linear2")),
             r if r.starts_with("norm.linear") => Some(format!("{bprefix}.modulation.lin")),
             _ => None,
