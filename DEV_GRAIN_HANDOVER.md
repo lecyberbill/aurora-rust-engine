@@ -7,6 +7,48 @@ FLUX.2-Klein-4B and FLUX.2-Klein-9B.
 
 ---
 
+## 0. Update (2026-09-08) — Dev grain resolved; Dev img2img rotation STILL OPEN
+
+- **T2I Dev grain: RESOLVED.** Root cause was four things fixed together: text-encoder was the wrong one
+  (30-layer → 40-layer `FLUX.2-dev_text_encoder`, now loaded via `Mistral3TextEncoder::from_dir` over
+  10 shards), `guidance_in` needed `×1000` (D.01 had wrongly set it to `1.0` → frequencies collapse),
+  missing Mistral chat template (`[INST]..[/INST] + SYSTEM_MESSAGE`), and the Dev scheduler is
+  `empirical-mu` (`shift: 2.02`) not the static `shift: 3.0`. Reasoned clean arctic fox **upright** at
+  `outputs/flux_showcase/flux_dev_1024_s20_g3.5.png`.
+- **T2I Dev 90° rotation: RESOLVED** (commit `9581076`) via **spatial-first** 2×2 unpack
+  (`[B,H_p,W_p,128] -> reshape(1,Hp,Wp,32,2,2) -> permute(0,3,1,4,2,5)`).
+- **Img2Img Dev rotation: STILL OPEN.** At any strength the img2img output comes out **-90°** (rotated),
+  confirmed by the user (the `flux_dev_img2img.png` fox is at -90°). All isolated pieces are provably
+  correct, which is the paradox blocking a fix:
+  - `encode → pack_OLD(0,1,3,5,2,4) → unpack_SPAT(0,3,1,4,2,5) → decode` round-trips **without rotation**
+    on both a synthetic vertical gradient and the real fox (verified via probes). Pack/unpack are exact
+    identities (`err=0` on unique values).
+  - T2I (random noise input) is upright, using the SAME forward + RoPE + unpack. So the transformer is not
+    obviously rotating the spatial tokens.
+  - The **only thing that differs in img2img** is `x_0` (packed real latents, standardized by the VAE
+    BatchNorm `[128,1,1]`) being concatenated/arithmetically blended with the flow-matching noise. This is
+    the leading suspect for the residual -90°.
+- **Strength→sigma mapping was reworked** (`start_sigma = strength` + local `linspace(strength→0)`
+  scheduler) because the Flux asymptotic schedule gave `sigma[1] ≈ 0.909` even at `strength=0` (i.e. 91%
+  noise, pure regeneration). This fixed the "reconstruction is actually generation" symptom and restored
+  correct orientation on the reconstruction probe, but the img2img render still rotates — so the mapping is
+  necessary, not sufficient.
+
+### Img2Img rotation — next leads (resume here)
+1. **Test the BN round-trip WITH the real VAE BatchNorm** on the real fox, then decode: the pack/unpack
+   probes so far did NOT include the `[128,1,1]` standardization that img2img actually applies. Confirm
+   whether applying `(x-mean)/std` in `[128,H_p,W_p]` then denormalizing flips the image (BN axis order vs
+   the packed channel order `[c,py,px]`).
+2. **Diff the img2img `latents` layout vs T2I**: img2img feeds `x_0` (packed `[H_p*W_p,128]` std-dev) plus
+   noise. Confirm `x_0` and `noise_tokens` are in the SAME channel order before the arithmetic blend
+   (`x_0*(1-σ)+noise*σ`). If the noise is flat `[128]` but `x_0` is `[c,py,px]`, the blend couples wrong
+   feature channels → spatial transpose.
+3. **Add a probe that runs the FULL img2img encoder path** (encode → BN → pack → blend → forward → unpack
+   → denorm → decode) to see where orientation flips the first time, rather than testing pack/unpack in
+   isolation.
+
+---
+
 ## 1. Current state (what works)
 
 | Model | Checkpoint | Status | Output |

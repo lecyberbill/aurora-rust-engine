@@ -775,7 +775,9 @@ impl FluxPipeline {
             init_permuted.reshape((1, h_patches * w_patches, in_channels))?
         };
 
-        // 4. Initial Gaussian noise for flow interpolation:
+        // 4. Initial Gaussian noise for flow interpolation. Keep the flow matching noise in the same
+        // flat [C,H_p,W_p] layout the T2I path uses (modelled on the training-time latent), while x_0
+        // is packed separately below; the denoiser learns to fuse the two.
         let noise_tokens = if in_channels == 128 {
             let raw_diff_noise = Tensor::randn(0f32, 1f32, (1, 128, h_patches, w_patches), &self.device)?.to_dtype(self.dtype)?;
             raw_diff_noise.reshape((1, 128, h_patches * w_patches))?.permute((0, 2, 1))?.contiguous()?
@@ -832,13 +834,17 @@ impl FluxPipeline {
             None
         };
 
-        // Determine starting step based on strength: strength in [0.0, 1.0]
-        let start_step = ((1.0 - params.strength.clamp(0.0, 1.0)) * num_steps as f64) as usize;
-        let start_step = start_step.min(num_steps.saturating_sub(1));
-
+        // Determine starting step based on strength: strength in [0.0, 1.0].
+        // Two independent concerns: (1) the NOISE BLEND coefficient (strength, so strength=0 is a
+        // true reconstruction and strength=1 is pure generation) and (2) HOW MANY denoising steps to
+        // run ((1-strength) * num_steps), so low strength still edits the image instead of skipping
+        // almost the whole schedule. The Flux.2 schedule asymptotes slowly (sigma[1]large) which is
+        // why the blend must NOT be taken from sigmas[start_step].
+        let strength_c = params.strength.clamp(0.0, 1.0);
         let timesteps: Vec<usize> = self.scheduler.timesteps().to_vec();
-        let sigmas: Vec<f64> = self.scheduler.sigmas().to_vec();
-        let start_sigma = if start_step < sigmas.len() { sigmas[start_step] } else { 1.0 };
+        let _sigmas: Vec<f64> = self.scheduler.sigmas().to_vec();
+        let start_sigma = strength_c;
+        let start_step = (((1.0 - strength_c) * num_steps as f64) as usize).min(timesteps.len().saturating_sub(1));
 
         // Interpolate initial latents at start_step: x_start = (1 - sigma)*x_0 + sigma*noise
         let sigma_t = Tensor::from_slice(&[start_sigma as f32], (1,), &self.device)?.to_dtype(self.dtype)?;
@@ -846,9 +852,18 @@ impl FluxPipeline {
         let mut latents = (x_0.broadcast_mul(&one_minus_sigma_t)? + noise_tokens.broadcast_mul(&sigma_t)?)?;
 
         let t_unet_start = Instant::now();
-        for step_idx in start_step..timesteps.len() {
-            let _t = timesteps[step_idx];
-            let sigma = if step_idx < sigmas.len() { sigmas[step_idx] } else { 0.0 };
+        // Build a local denoising schedule from start_sigma down to 0 over the active steps so the
+        // model is queried at a coherent noise level (strength) rather than the Flux asymptotic tail.
+        let active_steps = num_steps.saturating_sub(start_step).max(1);
+        let local_sigmas: Vec<f64> = (0..=active_steps)
+            .map(|i| {
+                let f = i as f64 / active_steps as f64;
+                let s = start_sigma * (1.0 - f);
+                if s < 1e-4 { 0.0 } else { s }
+            })
+            .collect();
+        for k in 0..active_steps {
+            let sigma = if k < local_sigmas.len() { local_sigmas[k] } else { 0.0 };
             let t_tensor = Tensor::from_slice(&[sigma as f32], (1,), &self.device)?.to_dtype(self.dtype)?;
 
             let velocity = self.transformer.forward_with_streamer(
@@ -860,16 +875,19 @@ impl FluxPipeline {
                 self.streamer.as_ref(),
             )?;
 
-            latents = self.scheduler.step_at(step_idx, &velocity, &latents)?;
+            let sigma_next = if k + 1 < local_sigmas.len() { local_sigmas[k + 1] } else { 0.0 };
+            let dt = (sigma_next - sigma) as f32;
+            let dt_tensor = Tensor::from_slice(&[dt], (1,), &self.device)?.to_dtype(self.dtype)?;
+            latents = (latents + velocity.broadcast_mul(&dt_tensor)?)?;
 
             if let Some(ref cb) = progress_cb {
-                cb(step_idx + 1, num_steps, &latents);
+                cb(start_step + k + 1, num_steps, &latents);
             }
         }
 
         let unet_duration = t_unet_start.elapsed();
         let unet_total_ms = unet_duration.as_secs_f64() * 1000.0;
-        let active_steps = num_steps - start_step;
+        let active_steps = num_steps.saturating_sub(start_step).max(1);
         let unet_it_per_sec = active_steps as f64 / unet_duration.as_secs_f64();
         let unet_step_avg_ms = if active_steps > 0 { unet_total_ms / active_steps as f64 } else { 0.0 };
 
@@ -1007,10 +1025,13 @@ impl FluxPipeline {
         let mask_tensor = Tensor::from_vec(mask_floats, (1, h_patches * w_patches, 1), &self.device)?.to_dtype(self.dtype)?;
         let inv_mask_tensor = Tensor::from_slice(&[1.0f32], (1,), &self.device)?.to_dtype(self.dtype)?.broadcast_sub(&mask_tensor)?;
 
-        // 4. Initial Gaussian noise for inpainting area
+        // 4. Initial Gaussian noise for inpainting area. Same channel layout as x_0 (pack [c,py,px]).
         let noise_tokens = if in_channels == 128 {
-            let raw_diff_noise = Tensor::randn(0f32, 1f32, (1, 128, h_patches, w_patches), &self.device)?.to_dtype(self.dtype)?;
-            raw_diff_noise.reshape((1, 128, h_patches * w_patches))?.permute((0, 2, 1))?.contiguous()?
+            let raw_noise = Tensor::randn(0f32, 1f32, (1, 32, h_patches * 2, w_patches * 2), &self.device)?.to_dtype(self.dtype)?;
+            let reshaped = raw_noise.reshape((1, 32, h_patches, 2, w_patches, 2))?;
+            let permuted = reshaped.permute((0, 1, 3, 5, 2, 4))?.contiguous()?;
+            let p4 = permuted.reshape((1, 128, h_patches, w_patches))?;
+            p4.reshape((1, 128, h_patches * w_patches))?.permute((0, 2, 1))?.contiguous()?
         } else {
             let raw_noise = Tensor::randn(0f32, 1f32, (1, c, h_patches * ph, w_patches * pw), &self.device)?.to_dtype(self.dtype)?;
             let reshaped = raw_noise.reshape((1, c, h_patches, ph, w_patches, pw))?;
@@ -1060,21 +1081,31 @@ impl FluxPipeline {
             None
         };
 
-        // 6. Starting step & noise interpolation
-        let start_step = ((1.0 - params.strength.clamp(0.0, 1.0)) * num_steps as f64) as usize;
-        let start_step = start_step.min(num_steps.saturating_sub(1));
-
+        // 6. Starting step & noise interpolation. Strength controls the blend coefficient directly
+        // (so strength=0 is a true reconstruction) while start_step scales the number of denoising
+        // steps actually executed (so low strength still edits the image).
+        let strength_c = params.strength.clamp(0.0, 1.0);
         let timesteps: Vec<usize> = self.scheduler.timesteps().to_vec();
-        let sigmas: Vec<f64> = self.scheduler.sigmas().to_vec();
-        let start_sigma = if start_step < sigmas.len() { sigmas[start_step] } else { 1.0 };
+        let _sigmas: Vec<f64> = self.scheduler.sigmas().to_vec();
+        let start_sigma = strength_c;
+        let start_step = (((1.0 - strength_c) * num_steps as f64) as usize).min(timesteps.len().saturating_sub(1));
 
         let sigma_t = Tensor::from_slice(&[start_sigma as f32], (1,), &self.device)?.to_dtype(self.dtype)?;
         let one_minus_sigma_t = Tensor::from_slice(&[(1.0 - start_sigma) as f32], (1,), &self.device)?.to_dtype(self.dtype)?;
         let mut latents = (x_0.broadcast_mul(&one_minus_sigma_t)? + noise_tokens.broadcast_mul(&sigma_t)?)?;
 
         let t_unet_start = Instant::now();
-        for step_idx in start_step..timesteps.len() {
-            let sigma = if step_idx < sigmas.len() { sigmas[step_idx] } else { 0.0 };
+        // Local denoising schedule from start_sigma down to 0 (see generate_img2img).
+        let active_steps = num_steps.saturating_sub(start_step).max(1);
+        let local_sigmas: Vec<f64> = (0..=active_steps)
+            .map(|i| {
+                let f = i as f64 / active_steps as f64;
+                let s = start_sigma * (1.0 - f);
+                if s < 1e-4 { 0.0 } else { s }
+            })
+            .collect();
+        for k in 0..active_steps {
+            let sigma = if k < local_sigmas.len() { local_sigmas[k] } else { 0.0 };
             let t_tensor = Tensor::from_slice(&[sigma as f32], (1,), &self.device)?.to_dtype(self.dtype)?;
 
             let velocity = self.transformer.forward_with_streamer(
@@ -1086,10 +1117,12 @@ impl FluxPipeline {
                 self.streamer.as_ref(),
             )?;
 
-            let denoised_latents = self.scheduler.step_at(step_idx, &velocity, &latents)?;
+            let next_sigma = if k + 1 < local_sigmas.len() { local_sigmas[k + 1] } else { 0.0 };
+            let dt = (next_sigma - sigma) as f32;
+            let dt_tensor = Tensor::from_slice(&[dt], (1,), &self.device)?.to_dtype(self.dtype)?;
+            let denoised_latents = (latents + velocity.broadcast_mul(&dt_tensor)?)?;
 
             // Re-inject original background at next sigma to guarantee sharp boundary preservation
-            let next_sigma = if step_idx + 1 < sigmas.len() { sigmas[step_idx + 1] } else { 0.0 };
             let next_sigma_t = Tensor::from_slice(&[next_sigma as f32], (1,), &self.device)?.to_dtype(self.dtype)?;
             let one_minus_next_sigma_t = Tensor::from_slice(&[(1.0 - next_sigma) as f32], (1,), &self.device)?.to_dtype(self.dtype)?;
             let original_noisy_next = (x_0.broadcast_mul(&one_minus_next_sigma_t)? + noise_tokens.broadcast_mul(&next_sigma_t)?)?;
@@ -1097,13 +1130,13 @@ impl FluxPipeline {
             latents = (original_noisy_next.broadcast_mul(&inv_mask_tensor)? + denoised_latents.broadcast_mul(&mask_tensor)?)?;
 
             if let Some(ref cb) = progress_cb {
-                cb(step_idx + 1, num_steps, &latents);
+                cb(start_step + k + 1, num_steps, &latents);
             }
         }
 
         let unet_duration = t_unet_start.elapsed();
         let unet_total_ms = unet_duration.as_secs_f64() * 1000.0;
-        let active_steps = num_steps - start_step;
+        let active_steps = num_steps.saturating_sub(start_step).max(1);
         let unet_it_per_sec = active_steps as f64 / unet_duration.as_secs_f64();
         let unet_step_avg_ms = if active_steps > 0 { unet_total_ms / active_steps as f64 } else { 0.0 };
 

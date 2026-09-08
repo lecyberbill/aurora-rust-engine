@@ -309,7 +309,8 @@ impl FluxVaeEncoder {
 
     /// Encode input image tensor [-1.0, 1.0] [1, 3, H, W] into latents [1, C, H/8, W/8]
     pub fn encode(&self, image: &Tensor) -> Result<Tensor> {
-        let mut h = self.conv_in.forward(image)?;
+        let image = image.to_dtype(self.dtype)?;
+        let mut h = self.conv_in.forward(&image)?;
 
         for block in &self.down_blocks {
             h = block.forward(&h)?;

@@ -73,10 +73,13 @@ fn main() -> Result<()> {
 
     println!("✅ Pipeline initialization completed in {:.2}s", t_start.elapsed().as_secs_f64());
 
-    let prompt = "a gorgeous portrait of an arctic fox with sapphire blue eyes in a mystical snowy forest at twilight, cinematic lighting, 8k";
+    let prompt_env = std::env::var("PROMPT").unwrap_or_else(|_| "a gorgeous portrait of an arctic fox with sapphire blue eyes in a mystical snowy forest at twilight, cinematic lighting, 8k".into());
+    let prompt = prompt_env.as_str();
     let steps: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(30);
     let guidance: f64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(3.5);
-    println!("\n🎨 Generating Image with FLUX.2-Dev ({} Steps, Guidance {})...", steps, guidance);
+    let width: usize = std::env::var("WIDTH").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+    let height: usize = std::env::var("HEIGHT").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+    println!("\n🎨 Generating Image with FLUX.2-Dev ({}x{}, {} Steps, Guidance {})...", width, height, steps, guidance);
     println!("📝 Prompt: \"{}\"", prompt);
 
     let params = DiffusionParams {
@@ -84,15 +87,15 @@ fn main() -> Result<()> {
         negative_prompt: None,
         num_steps: steps,
         guidance_scale: guidance,
-        width: 1024,
-        height: 1024,
+        width,
+        height,
         seed: 42,
     };
 
     let (image, metrics) = pipeline.generate_with_metrics(params, None::<fn(usize, usize, &candle_core::Tensor)>)
         .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
-    let out_path = format!("outputs/flux_showcase/flux_dev_1024_s{}_g{}.png", steps, guidance);
+    let out_path = std::env::var("OUT").unwrap_or_else(|_| format!("outputs/flux_showcase/flux_dev_{}_s{}_g{}.png", width, steps, guidance));
     image.save(&out_path)
         .map_err(|e| candle_core::Error::Msg(format!("Failed to save output: {}", e)))?;
 
