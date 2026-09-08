@@ -49,6 +49,25 @@ impl DiffusionModel {
     pub fn sd15(id: String, pipeline: StableDiffusionPipeline) -> Self {
         Self { id, family: "sd15".into(), inner: DiffBackend::Sd15(pipeline) }
     }
+
+    /// Apply the fast inference knobs to a loaded SDXL pipeline: Euler scheduler and Ada-Lovelace FP8
+    /// weights (halves UNet VRAM bandwidth). Tiled VAE decode guards the decode peg without choking
+    /// throughput. **CPU offload is intentionally NOT enabled** — it streams weights CPU<->GPU every
+    /// step and craters throughput (10+ s/step on a 4070 Ti); leave it off for a fast run.
+    ///
+    /// The denoising step count passes via `DiffusionParams::num_steps`.
+    pub fn sdxl_fast_mode(&mut self) -> Result<()> {
+        if let DiffBackend::Sdxl(p) = &mut self.inner {
+            p.use_euler();
+            p.enable_vae_tiling(None);
+            if cfg!(feature = "cuda") {
+                p.enable_fp8();
+            }
+            Ok(())
+        } else {
+            Err(LuminaError::UnsupportedOp("SDXL fast mode only".into()))
+        }
+    }
 }
 
 impl AnyModel for DiffusionModel {

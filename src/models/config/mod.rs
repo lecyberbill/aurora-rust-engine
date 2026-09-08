@@ -108,19 +108,21 @@ pub fn detect_architecture(src: &dyn WeightsSource) -> Architecture {
     if has("encoder.layers.") && has("decoder.layers.") {
         return Architecture::T5;
     }
-    if has("text_model.encoder.layers.") && has("text_projection.weight") {
-        return Architecture::OpenClip;
-    }
-    if has("text_model.encoder.layers.") {
-        return Architecture::ClipL;
-    }
-
     // --- SDXL / SD1.5 --------------------------------------------------------
+    // SDXL carries `conditioner.embedders.*` BEFORE the text-model keys, so it MUST be checked first,
+    // otherwise the embedded CLIP-L / OpenCLIP text encoders shadow the SDXL family detection.
     if has("conditioner.embedders") || has("add_embedding") || (has("cross_attention_dim") && has("time_embedding")) {
         return Architecture::Sdxl;
     }
     if has("model.diffusion_model.input_blocks.") {
         return Architecture::Sd15;
+    }
+
+    if has("text_model.encoder.layers.") && has("text_projection.weight") {
+        return Architecture::OpenClip;
+    }
+    if has("text_model.encoder.layers.") {
+        return Architecture::ClipL;
     }
 
     Architecture::Unknown("unknown".into())
@@ -213,6 +215,19 @@ mod tests {
         };
         let src = FakeSource { keys };
         assert_eq!(detect_architecture(&src), Architecture::Flux2Dev);
+    }
+
+    #[test]
+    fn shape_sniff_sdxl_is_not_shadowed_by_embedders() {
+        // SDXL ships its CLIP-L/OpenCLIP behind `conditioner.embedders.*`; the family must still win
+        // over the text-encoder heuristics.
+        let keys: Vec<String> = vec![
+            "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight".to_string(),
+            "conditioner.embedders.0.transformer.text_model.encoder.layers.0.self_attn.v_proj.bias".to_string(),
+            "conditioner.embedders.1.model.transformer.resblocks.0.attn.in_proj_weight".to_string(),
+        ];
+        let src = FakeSource { keys };
+        assert_eq!(detect_architecture(&src), Architecture::Sdxl);
     }
 
     #[test]
