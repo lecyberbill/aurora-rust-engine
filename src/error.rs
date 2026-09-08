@@ -34,6 +34,18 @@ pub enum LuminaError {
     #[error("Pipeline error: {0}")]
     Pipeline(String),
 
+    #[error("Model error: {0}")]
+    Model(String),
+
+    #[error("Model not found: {0}")]
+    ModelNotFound(String),
+
+    #[error("Operation not supported by this model: {0}")]
+    UnsupportedOp(String),
+
+    #[error("Unknown model architecture '{family}' — cannot auto-detect. Provide an explicit kind.")]
+    UnknownArchitecture { family: String },
+
     #[error("{context}")]
     Context { context: String, #[source] source: Box<LuminaError> },
 }

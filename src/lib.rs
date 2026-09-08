@@ -6,6 +6,7 @@ pub mod error;
 pub mod gguf;
 pub mod hub;
 pub mod lora;
+pub mod models;
 pub mod pipelines;
 pub mod server;
 pub mod text;
@@ -14,6 +15,10 @@ pub mod weights;
 
 pub use device::{auto_device, select_device, GenerationMetrics, KernelDispatchConfig};
 pub use error::{LuminaError, Result};
+pub use models::{
+    Architecture, AutoModel, EncodeModel, GenerationModel, ImageGenerationModel, ModelKind,
+    ModelLoadConfig, ModelRegistry,
+};
 pub use lora::{LoRALoader, LoRAManager, LoRAMerger, LoRAPair, LoRATarget, LoadedLoRA};
 pub use traits::{ControlNetParams, DiffusionParams, Img2ImgParams, InpaintParams, TextGenerationPipeline, TextToImagePipeline};
 pub use weights::{SafeTensorsArchive, WeightRouter};

@@ -1,0 +1,208 @@
+# Aure-Spec — Port de l'API `transformers` (HuggingFace) pour Candle
+
+**Date**: 2026-09-08 | **Repos**: `aurora-rust-engine` | **Statut**: ÉBAUCHE — à valider
+**Gabarit**: `transformers` en PyTorch (AutoModel / AutoTokenizer / AutoProcessor / AutoConfig /
+`from_pretrained`), transposé en Rust/Candle.
+
+## 1. Motivation
+
+Au lieu d'exposer des pipelines concrets (`FluxPipeline`, `Qwen3TextEncoder`…), on veut que le moteur
+offre **l'API familière de `transformers`** : on donne un `repo_id` HF (ou un chemin), le moteur
+télécharge, détecte la config, charge les poids et retourne un objet prêt à générer. Ainsi tout ce qui
+peut parler à `transformers` (une app, un notebook, un backend) peut parler à notre moteur Candle.
+
+## 2. Ce qui correspond (les concepts à reproduire)
+
+| `transformers` (PyTorch) | Équivalent Candle (à bâtir) |
+|---|---|
+| `AutoConfig.from_pretrained(repo)` | `Config::detect(&dyn WeightsSource)` (*existe déjà* dans `QwenTextConfig::detect`) |
+| `AutoModel.from_pretrained(repo, ...)` | `models::auto::AutoModel::from_pretrained(&Hub, repo, ...)` |
+| `AutoTokenizer.from_pretrained(repo)` | `models::auto::AutoTokenizer::from_pretrained(...)` (drive `*_tokenizer.json`) |
+| `AutoProcessor` (pour VLM / image) | `models::auto::AutoProcessor` (wrap VAE + tokenizer + resize) |
+| `model.generate(...)` | `GenerationModel::generate(...)` (déjà esquissé trait) |
+| `model(pixel_values=..., input_ids=...)` | `EncodeModel::forward/encode(...)` (text encoders existants) |
+| `AutoModelForCausalLM` (LLM) | `models::text::TextModel` (Qwen/Mistral) — Milestone 16 |
+| `DiffusionPipeline` | `models::image::DiffusionModel` (Flux/SDXL) — déjà quasi là |
+
+## 3. Architecture proposée (module `src/models/`)
+
+```
+src/models/
+├── mod.rs              # ré-export Auto*, traits communs
+├── auto.rs             # AutoConfig / AutoModel / AutoTokenizer / AutoProcessor (le "front door")
+├── registry.rs         # cache id -> Arc<Mutex<dyn AnyModel>> (+ swap/unload)
+├── common.rs           # traits AnyModel / GenerationModel / EncodeModel (Send+Sync)
+├── text/
+│   ├── mod.rs          # TextModel (Qwen/Mistral) impl GenerationModel
+│   └── wapper.rs
+├── image/
+│   ├── mod.rs          # DiffusionModel (Flux/SDXL) impl EncodeModel + GenerationModel
+│   └── wapper.rs
+└── config/             # cfg detection par famille (move QwenTextConfig::detect ici?)
+```
+
+### 3.1 `AutoModel` — le point d'entrée "front door"
+
+```rust
+pub enum ModelKind { Text, Image, Diffusion, Unknown }
+pub struct ModelInfo {
+    pub repo_id: String,
+    pub kind: ModelKind,
+    pub family: String,          // "qwen3", "mistral3", "flux2-dev", "sdxl", ...
+    pub dtype: DType,
+    pub checkpoint: PathBuf,     // chemin résolu (local)
+    pub config_path: PathBuf,
+}
+
+pub struct AutoModel;
+impl AutoModel {
+    /// Repo HF ou chemin local. Télécharge via ModelHub, détecte config, charge, met en cache.
+    pub async fn from_pretrained(
+        hub: &ModelHub, repo: &str, device: Device, dtype: DType,
+    ) -> Result<Arc<Mutex<dyn AnyModel>>>;
+
+    pub async fn from_pretrained_with(
+        hub: &ModelHub, repo: &str, device: Device, dtype: DType,
+        display: impl DisplayProgress,        // stream de progression (WebSocket/CLI)
+    ) -> Result<Arc<Mutex<dyn AnyModel>>>;
+}
+```
+
+### 3.2 `AutoTokenizer` / `AutoProcessor`
+
+```rust
+pub struct AutoTokenizer(TokenizerKind);   // wraps the existing *tokenizer.json loaders
+impl AutoTokenizer {
+    pub fn from_pretrained(hub: &ModelHub, repo: &str) -> Result<Self>;
+    pub fn encode(&self, text: &str, max_len: usize) -> Result<Tensor>;
+    pub fn decode(&self, ids: &[u32]) -> Result<String>;
+}
+
+pub struct AutoProcessor {    // pour les modèles vision/langage
+    tokenizer: AutoTokenizer,
+    image_size: (usize, usize),
+}
+impl AutoProcessor {
+    pub fn from_pretrained(hub: &ModelHub, repo: &str) -> Result<Self>;
+    pub fn encode_image(&self, img: &RgbImage) -> Result<Tensor>;  // -> [1,C,H,W]
+    pub fn encode_text(&self, text: &str, max_len: usize) -> Result<Tensor>;
+}
+```
+
+### 3.3 Traits communs (`Send + Sync`, plateforme-ready)
+
+```rust
+pub trait AnyModel: Send + Sync {
+    fn kind(&self) -> ModelKind;
+    fn family(&self) -> &str;
+    fn id(&self) -> &str;
+    fn device(&self) -> Device;
+    fn dtype(&self) -> DType;
+}
+
+pub trait GenerationModel: AnyModel {
+    fn generate(&mut self, prompt: &str, max_tokens: usize, temperature: f64) -> Result<String>;
+}
+
+pub trait ImageGenerationModel: AnyModel {
+    fn generate_t2i(&mut self, params: DiffusionParams, on_step: Option<...>) -> Result<RgbImage>;
+    fn generate_img2img(&mut self, params: Img2ImgParams, on_step: Option<...>) -> Result<RgbImage>;
+    fn generate_inpaint(&mut self, params: InpaintParams, on_step: Option<...>) -> Result<RgbImage>;
+    fn load_lora(&mut self, path: &Path, multiplier: f64) -> Result<()>;
+    fn unload_lora(&mut self, id: &str) -> Result<()>;
+}
+```
+
+Les implémentations concrètes **wrappent** les objets existants :
+- `TextModel` : wrap `Qwen3TextEncoder` / `Mistral3TextEncoder` (+ détection du bon texte par `family`).
+- `DiffusionModel` : wrap `FluxPipeline` / `StableDiffusionXLPipeline`.
+
+> **Important**: on NE réécrit pas les encodeurs/pipelines internes. On expose une façade `Auto*`
+> au-dessus d'eux. C'est un port d'API, pas un rewrite du moteur.
+
+### 3.4 `ModelRegistry` (cache + swap de modèles chargés)
+
+```rust
+pub struct ModelRegistry {
+    models: RwLock<HashMap<String, Arc<Mutex<dyn AnyModel>>>>,
+    hub: ModelHub,
+    device: Device,
+    dtype: DType,
+}
+impl ModelRegistry {
+    pub async fn load(&self, repo: &str) -> Result<Arc<Mutex<dyn AnyModel>>>;   // from_pretrained + cache
+    pub fn get(&self, id: &str) -> Option<Arc<Mutex<dyn AnyModel>>>;
+    pub fn unload(&self, id: &str) -> bool;
+    pub fn swAP(&self, id: &str, repo: &str) -> Result<Arc<Mutex<dyn AnyModel>>>;
+    pub fn list(&self) -> Vec<String>;
+}
+```
+
+## 4. Détection de l'architecture (le "Auto" porte sur ceci)
+
+`AutoModel::from_pretrained` doit deviner le type à partir de `config.json` + sniff de clés :
+1. Si `model_type` dans `config.json` → `"qwen3"`, `"mistral"`, `"flux"`, `"sdxl"`, `"sd15"` → familles directes.
+2. Sinon sniff de clés (`guidance_in`, `double_stream_modulation`, compte de single-blocks) comme aujourd'hui.
+3. → `ModelKind`: `Text` (a `lm_head`/`output` + weights), `Diffusion` (a `double_blocks.*`/`unet`), `Image`.
+
+> On centralise ce qui est aujourd'hui éparpillé (`QwenTextConfig::detect`, `from_single_file_streaming`
+> sniffing) dans `src/models/config/`, sans casser les appels existants (on garde les anciens detect).
+
+## 5. Flux HF "repo" → modèle Candle (le "pourquoi c'est du vrai transformers")
+
+```
+repo_id (HF) ou chemin local
+   │  ModelHub::resolve_hf (télécharge + cache, déjà existant)
+   ▼
+config.json + model-*.safetensors + tokenizer*.json
+   │  AutoConfig::detect
+   ▼
+ModelKind / family / dtype
+   │  constructeur de famille (from_archive / from_dir / from_single_file_streaming — existants)
+   ▼
+Arc<Mutex<dyn AnyModel>>  (TextModel | DiffusionModel)
+   │  trait méthode
+   ▼
+String (LLM) ou RgbImage (diffusion)
+```
+
+## 6. Ce qui N'EST PAS le but (≠ mon ancienne SPÉC image)
+
+- **`src/models/` n'est PAS un registry de diffusion.** C'est un **port d'API `transformers`**.
+  La diffusion est juste un des `ModelKind` qu'on peut charger. La "multi-checkpoint" devient un détail
+  du `ModelRegistry`, pas l'objet central.
+- Queue / jobs / workflows / métadonnées ComfyUI : **toujours hors moteur** (plateforme).
+
+## 7. Fichiers impactés (estimation — objectif zéro régression)
+
+| Fichier | Action |
+|---|---|
+| `src/models/mod.rs`, `auto.rs`, `common.rs`, `registry.rs` | **Nouveau** : API Auto + traits + cache |
+| `src/models/text/`, `src/models/image/` | **Nouveau** : wrappers `TextModel` / `DiffusionModel` |
+| `src/models/config/` | **Nouveau (optionnel)** : centraliser la détection, garder les anciens |
+| `src/lib.rs` | ajouter `pub mod models;` + re-exports `AutoModel`, `AutoTokenizer`, ... |
+| `src/hub.rs` | prévoir `resolve_hf` pour un dossier complet (config + shards) — déjà `resolve_hf_repo` |
+
+**Aucun changement** à `src/text/*`, `src/pipelines/*`, `src/diffusion/*` : on les wrappe.
+
+## 8. Exemple d'usage (l'app qui pensait à `transformers`)
+
+```rust
+// usage minimal, familier :
+let model = AutoModel::from_pretrained(&hub, "Qwen/Qwen3-8B", Device::Cuda(0), DType::F16).await?;
+let text = model.lock().unwrap().generate("Write a haiku about snow", 128, 0.7)?;
+
+// ou diffusion :
+let flux = AutoModel::from_pretrained(&hub, "black-forest-labs/FLUX.2-dev", ...).await?;
+let img = image_model.generate_t2i(DiffusionParams { prompt: "a fox".into(), ..Default::default() }, None)?;
+```
+
+## 9. Critères d'acceptation
+
+- [ ] `from_pretrained("Qwen/Qwen3-8B")` → `TextModel` qui génère du texte (Milestone 16).
+- [ ] `from_pretrained` sur un chemin local de checkpoint Flux réel → `DiffusionModel`.
+- [ ] `AutoTokenizer::from_pretrained` + `encode/decode` round-trip.
+- [ ] `build --release` sans warning ; `cargo test --lib` : 14/14 verts.
+- [ ] Aucune modification de `src/text/*` ni `src/pipelines/*` (on wrappe).
+```
+```
