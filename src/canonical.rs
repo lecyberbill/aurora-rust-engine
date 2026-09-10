@@ -77,8 +77,10 @@ fn sd35_to_canonical(raw: &str) -> Option<String> {
         ("context_embedder", "txt_in"),
         ("y_embedder.mlp.0", "vector_in.in_layer"),
         ("y_embedder.mlp.2", "vector_in.out_layer"),
-        ("t_embedder.mlp.0", "time_in.mlp.0"),
-        ("t_embedder.mlp.2", "time_in.mlp.2"),
+        // The engine's TimestepEmbedder reads `in_layer`/`out_layer` (Flux naming), so map SD3's
+        // `t_embedder.mlp.0/.2` onto that canonical shape.
+        ("t_embedder.mlp.0", "time_in.in_layer"),
+        ("t_embedder.mlp.2", "time_in.out_layer"),
         ("pos_embed", "pos_embed"),
         ("final_layer.adaLN_modulation.1", "final_layer.adaLN_modulation.1"),
         ("final_layer.linear", "final_layer.linear"),
@@ -156,7 +158,7 @@ mod tests {
         assert_eq!(sd35_to_canonical("model.diffusion_model.x_embedder.proj.weight").as_deref(), Some("img_in.weight"));
         assert_eq!(sd35_to_canonical("model.diffusion_model.context_embedder.weight").as_deref(), Some("txt_in.weight"));
         assert_eq!(sd35_to_canonical("model.diffusion_model.y_embedder.mlp.0.weight").as_deref(), Some("vector_in.in_layer.weight"));
-        assert_eq!(sd35_to_canonical("model.diffusion_model.t_embedder.mlp.2.bias").as_deref(), Some("time_in.mlp.2.bias"));
+        assert_eq!(sd35_to_canonical("model.diffusion_model.t_embedder.mlp.2.bias").as_deref(), Some("time_in.out_layer.bias"));
         assert_eq!(sd35_to_canonical("model.diffusion_model.pos_embed").as_deref(), Some("pos_embed"));
     }
 

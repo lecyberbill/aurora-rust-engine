@@ -537,6 +537,14 @@ impl<'a> WeightRouter<'a> {
             let candidate = candidate.strip_prefix("model.diffusion_model.").unwrap_or(candidate);
             if flux_prefixes.iter().any(|p| candidate.starts_with(p)) {
                 let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
+                // SD3.5 stores `x_embedder.proj` as a Conv2d `[hidden, in_ch, 2, 2]`; reshape to the
+                // equivalent Linear `[hidden, in_ch*4]` so the shared `img_in` Linear consumes it.
+                let tensor = if candidate == "img_in.weight" && tensor.dims().len() == 4 {
+                    let d = tensor.dims();
+                    tensor.reshape((d[0], d[1] * d[2] * d[3]))?
+                } else {
+                    tensor
+                };
                 tensors.insert(candidate.to_string(), tensor);
             }
         }
@@ -948,35 +956,28 @@ pub fn flux_header_var_builder_src(
     dtype: DType,
 ) -> Result<VarBuilder<'static>> {
     let mut tensors = HashMap::new();
-    let header_prefixes = ["img_in.", "txt_in.", "time_in.", "vector_in.", "guidance_in.", "final_layer."];
+    let keys: Vec<String> = src.keys();
+    let family = crate::canonical::detect_family(keys.iter().map(|s| s.as_str()));
+    let header_prefixes = [
+        "img_in.", "txt_in.", "time_in.", "vector_in.", "guidance_in.", "final_layer.", "pos_embed",
+    ];
 
-    for key in src.keys() {
-        let mut matched = false;
-        for prefix in &header_prefixes {
-            if key.starts_with(prefix) {
-                let tensor = src.get_tensor(&key, device, dtype)?;
-                tensors.insert(key.clone(), tensor);
-                matched = true;
-                break;
-            } else if let Some(stripped) = key.strip_prefix("model.diffusion_model.") {
-                if stripped.starts_with(prefix) {
-                    let tensor = src.get_tensor(&key, device, dtype)?;
-                    tensors.insert(stripped.to_string(), tensor);
-                    matched = true;
-                    break;
-                }
-            }
-        }
-        if !matched {
-            if let Some(bfl) = flux_diffusers_to_bfl(&key) {
-                if bfl.starts_with("img_in.") || bfl.starts_with("txt_in.")
-                    || bfl.starts_with("time_in.") || bfl.starts_with("guidance_in.")
-                    || bfl.starts_with("final_layer.")
-                {
-                    let tensor = src.get_tensor(&key, device, dtype)?;
-                    tensors.insert(bfl, tensor);
-                }
-            }
+    for key in &keys {
+        // Canonicalise first (identity for BFL Flux; remaps SD3.5 x_embedder/context_embedder/y_embedder/
+        // t_embedder, and Diffusers transformer.*). Then strip the optional BFL model.diffusion_model. prefix.
+        let canon = crate::canonical::canonicalize(family, key);
+        let candidate = canon.as_deref().unwrap_or(key.as_str());
+        let candidate = candidate.strip_prefix("model.diffusion_model.").unwrap_or(candidate);
+        if header_prefixes.iter().any(|p| candidate.starts_with(p)) {
+            let tensor = src.get_tensor(key, device, dtype)?;
+            // SD3.5 Conv2d patch embed -> Linear.
+            let tensor = if candidate == "img_in.weight" && tensor.dims().len() == 4 {
+                let d = tensor.dims();
+                tensor.reshape((d[0], d[1] * d[2] * d[3]))?
+            } else {
+                tensor
+            };
+            tensors.insert(candidate.to_string(), tensor);
         }
     }
 

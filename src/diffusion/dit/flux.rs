@@ -150,6 +150,10 @@ pub struct FluxTransformer {
     pub final_mod: Linear,
     pub final_linear: Linear,
     pub config: FluxConfig,
+    /// SD3 / SD3.5 fixed 2D-sincos positional embedding `[1, max_h*max_w, hidden]`, centre-cropped to
+    /// the actual patch grid at forward time (added to the image tokens after `img_in`). When set,
+    /// the model does **not** use RoPE (SD3 attention is position-agnostic). `None` for Flux.
+    pub pos_embed: Option<Tensor>,
     /// When true, the final AdaLN chunk order is `[shift, scale]` (BFL native); when false it is
     /// `[scale, shift]` (Diffusers convention). Diffusers `norm_out` chunk(2) yields [scale, shift];
     /// BFL-exported checkpoints store [shift, scale]. Mismatching this collapses the output variance
@@ -163,9 +167,17 @@ impl FluxTransformer {
         let txt_in = linear(4096, config.hidden_size, vb.pp("txt_in"))?; // 4096 dim from T5-XXL
 
         let time_embedder = TimestepEmbedder::new(config.hidden_size, 256, vb.pp("time_in"))?;
-        let vector_in = match (linear(768, config.hidden_size, vb.pp("vector_in.in_layer")), linear(config.hidden_size, config.hidden_size, vb.pp("vector_in.out_layer"))) {
-            (Ok(in_l), Ok(out_l)) => Some((in_l, out_l)),
-            _ => None,
+        // Pooled-projection input width varies by family: Flux = 768 (CLIP-L pooled), SD3.5 = 2048
+        // (CLIP-L+G pooled). Probe the checkpoint's actual width.
+        let vector_in = {
+            let mut found = None;
+            for in_dim in [768usize, 2048, 1280] {
+                if let (Ok(in_l), Ok(out_l)) = (
+                    linear(in_dim, config.hidden_size, vb.pp("vector_in.in_layer")),
+                    linear(config.hidden_size, config.hidden_size, vb.pp("vector_in.out_layer")),
+                ) { found = Some((in_l, out_l)); break; }
+            }
+            found
         };
         let guidance_embedder = if config.guidance_embed {
             Some(TimestepEmbedder::new_with_factor(config.hidden_size, 256, 1000.0, vb.pp("guidance_in"))?)
@@ -209,8 +221,17 @@ impl FluxTransformer {
             final_mod,
             final_linear,
             config,
+            pos_embed: None,
             swap_scale_shift: true, // BFL native order
         })
+    }
+
+    /// Attach the SD3/SD3.5 fixed sincos positional embedding `[1, max_h*max_w, hidden]`. Setting it
+    /// also switches the model into position-agnostic (no-RoPE) mode. Loaded from the checkpoint by
+    /// the pipeline (its shape varies with `pos_embed_max_size`, so it is set explicitly rather than
+    /// through the fixed-shape `VarBuilder`).
+    pub fn set_pos_embed(&mut self, pos_embed: Tensor) {
+        self.pos_embed = Some(pos_embed);
     }
 
     /// Construct FluxTransformer in Streaming Mode (< 100MB VRAM header footprint)
@@ -227,12 +248,15 @@ impl FluxTransformer {
             .or_else(|_| linear_layer(15360, config.hidden_size, vb.pp("txt_in")))?;
 
         let time_embedder = TimestepEmbedder::new(config.hidden_size, 256, vb.pp("time_in"))?;
-        let vector_in = match (
-            linear_layer(768, config.hidden_size, vb.pp("vector_in.in_layer")),
-            linear_layer(config.hidden_size, config.hidden_size, vb.pp("vector_in.out_layer")),
-        ) {
-            (Ok(in_l), Ok(out_l)) => Some((in_l, out_l)),
-            _ => None,
+        let vector_in = {
+            let mut found = None;
+            for in_dim in [768usize, 2048, 1280] {
+                if let (Ok(in_l), Ok(out_l)) = (
+                    linear_layer(in_dim, config.hidden_size, vb.pp("vector_in.in_layer")),
+                    linear_layer(config.hidden_size, config.hidden_size, vb.pp("vector_in.out_layer")),
+                ) { found = Some((in_l, out_l)); break; }
+            }
+            found
         };
         let guidance_embedder = if config.guidance_embed {
             Some(TimestepEmbedder::new_with_factor(config.hidden_size, 256, 1000.0, vb.pp("guidance_in"))?)
@@ -254,6 +278,7 @@ impl FluxTransformer {
             final_mod,
             final_linear,
             config,
+            pos_embed: None,
             swap_scale_shift: true, // BFL native order
         })
     }
@@ -290,6 +315,27 @@ impl FluxTransformer {
         let txt_len = txt_h.dim(1)?;
         let img_seq = img_h.dim(1)?;
         let patch_side = (img_seq as f64).sqrt() as usize;
+
+        // SD3 / SD3.5: add the fixed sincos positional embedding (centre-cropped to the patch grid)
+        // to the image tokens. When present, the model uses NO RoPE (position is entirely in the
+        // pos_embed; SD3 attention is position-agnostic).
+        let ropeless = self.pos_embed.is_some();
+        if let Some(pe) = &self.pos_embed {
+            let total = pe.dim(1)?;
+            let max_side = (total as f64).sqrt() as usize;
+            if max_side >= patch_side {
+                let pe4 = pe.reshape((1, max_side, max_side, self.config.hidden_size))?;
+                let top = (max_side - patch_side) / 2;
+                let left = (max_side - patch_side) / 2;
+                let cropped = pe4
+                    .narrow(1, top, patch_side)?
+                    .narrow(2, left, patch_side)?
+                    .reshape((1, patch_side * patch_side, self.config.hidden_size))?
+                    .to_dtype(img_h.dtype())?;
+                img_h = (img_h + cropped)?;
+            }
+        }
+
         let axes_dim = self.config.axes_dim.clone();
         let (freqs_cos, freqs_sin) = crate::diffusion::dit::embeddings::create_flux_rope_embeddings(
             txt_len,
@@ -317,6 +363,12 @@ impl FluxTransformer {
             };
             rms(&img_h, "img_h-in"); rms(&txt_h, "txt_h-in"); rms(&temb, "temb");
         }
+        // SD3/SD3.5 pass no rotary (position lives in pos_embed); Flux passes the RoPE tables.
+        let img_cos_o = if ropeless { None } else { Some(&img_cos) };
+        let img_sin_o = if ropeless { None } else { Some(&img_sin) };
+        let txt_cos_o = if ropeless { None } else { Some(&txt_cos) };
+        let txt_sin_o = if ropeless { None } else { Some(&txt_sin) };
+
         if let Some(s) = streamer {
             for i in 0..self.config.num_double_blocks {
                 let (next_img, next_txt) = s.execute_double_block(
@@ -324,10 +376,10 @@ impl FluxTransformer {
                     &img_h,
                     &txt_h,
                     &temb,
-                    Some(&img_cos),
-                    Some(&img_sin),
-                    Some(&txt_cos),
-                    Some(&txt_sin),
+                    img_cos_o,
+                    img_sin_o,
+                    txt_cos_o,
+                    txt_sin_o,
                 )?;
                 img_h = next_img;
                 txt_h = next_txt;
@@ -345,10 +397,10 @@ impl FluxTransformer {
                     &img_h,
                     &txt_h,
                     &temb,
-                    Some(&img_cos),
-                    Some(&img_sin),
-                    Some(&txt_cos),
-                    Some(&txt_sin),
+                    img_cos_o,
+                    img_sin_o,
+                    txt_cos_o,
+                    txt_sin_o,
                 )?;
                 img_h = next_img;
                 txt_h = next_txt;
@@ -369,13 +421,15 @@ impl FluxTransformer {
                 eprintln!("    [TRACE] pre-single: unified_rms={:.4} img_rms={:.4} txt_rms={:.4} txt_len={} img_len={}",
                     rms(&unified), rms(&img_h), rms(&txt_h), txt_h.dim(1)?, img_h.dim(1)?);
             }
+            let fcos = if ropeless { None } else { Some(&freqs_cos) };
+            let fsin = if ropeless { None } else { Some(&freqs_sin) };
             if let Some(s) = streamer {
                 for i in 0..self.config.num_single_blocks {
-                    unified = s.execute_single_block(i, &unified, &temb, Some(&freqs_cos), Some(&freqs_sin))?;
+                    unified = s.execute_single_block(i, &unified, &temb, fcos, fsin)?;
                 }
             } else {
                 for block in &self.single_blocks {
-                    unified = block.forward(&unified, &temb, Some(&freqs_cos), Some(&freqs_sin))?;
+                    unified = block.forward(&unified, &temb, fcos, fsin)?;
                 }
             }
             let txt_len = txt_h.dim(1)?;

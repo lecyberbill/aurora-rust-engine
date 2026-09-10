@@ -31,6 +31,46 @@ impl RMSNorm {
     }
 }
 
+/// LayerNorm QK-norm used by SD3 / SD3.5 (`ln_q` / `ln_k`): normalise over the head_dim with
+/// mean-variance and an elementwise-affine `weight` (eps 1e-5), unlike Flux's RMSNorm (`scale`).
+#[derive(Debug, Clone)]
+pub struct LayerNormQK {
+    weight: Tensor,
+}
+
+impl LayerNormQK {
+    pub fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
+        let weight = vb.get(dim, "weight")?;
+        Ok(Self { weight })
+    }
+
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let orig = x.dtype();
+        let xf = x.to_dtype(candle_core::DType::F32)?;
+        let mean = xf.mean_keepdim(xf.dims().len() - 1)?;
+        let centered = xf.broadcast_sub(&mean)?;
+        let var = centered.sqr()?.mean_keepdim(centered.dims().len() - 1)?;
+        let norm = centered.broadcast_div(&(var + 1e-5)?.sqrt()?)?;
+        norm.broadcast_mul(&self.weight.to_dtype(candle_core::DType::F32)?)?.to_dtype(orig)
+    }
+}
+
+/// QK normalisation variant: RMSNorm (Flux) or LayerNorm (SD3 / SD3.5).
+#[derive(Debug, Clone)]
+pub enum QkNorm {
+    Rms(RMSNorm),
+    Layer(LayerNormQK),
+}
+
+impl QkNorm {
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            QkNorm::Rms(n) => n.forward(x),
+            QkNorm::Layer(n) => n.forward(x),
+        }
+    }
+}
+
 /// Exact GELU(approximate="tanh") for Flux.1 MLP transformations
 fn gelu_tanh(x: &Tensor) -> Result<Tensor> {
     let orig_dtype = x.dtype();
@@ -48,16 +88,16 @@ fn gelu_tanh(x: &Tensor) -> Result<Tensor> {
 pub struct DoubleStreamBlock {
     // Image stream transformations
     img_qkv: Linear,
-    img_q_norm: Option<RMSNorm>,
-    img_k_norm: Option<RMSNorm>,
+    img_q_norm: Option<QkNorm>,
+    img_k_norm: Option<QkNorm>,
     img_proj: Linear,
     img_mlp: (Linear, Linear),
     img_mod: AdaLNZeroModulation,
 
     // Text stream transformations
     txt_qkv: Linear,
-    txt_q_norm: Option<RMSNorm>,
-    txt_k_norm: Option<RMSNorm>,
+    txt_q_norm: Option<QkNorm>,
+    txt_k_norm: Option<QkNorm>,
     txt_proj: Linear,
     txt_mlp: (Linear, Linear),
     txt_mod: AdaLNZeroModulation,
@@ -82,10 +122,25 @@ impl DoubleStreamBlock {
             linear(in_d, out_d, path.clone()).or_else(|_| candle_nn::linear_no_bias(in_d, out_d, path))
         };
 
+        // Auto-detect the QK-norm convention: SD3/3.5 use LayerNorm (`query_ln.weight`), Flux uses
+        // RMSNorm (`query_norm.scale`). Absent in neither case -> no QK-norm.
+        let build_qk = |prefix: &str| -> (Option<QkNorm>, Option<QkNorm>) {
+            let layer = (
+                LayerNormQK::new(head_dim, vb.pp(format!("{prefix}.norm.query_ln"))).ok().map(QkNorm::Layer),
+                LayerNormQK::new(head_dim, vb.pp(format!("{prefix}.norm.key_ln"))).ok().map(QkNorm::Layer),
+            );
+            if layer.0.is_some() {
+                return layer;
+            }
+            (
+                RMSNorm::new(head_dim, vb.pp(format!("{prefix}.norm.query_norm"))).ok().map(QkNorm::Rms),
+                RMSNorm::new(head_dim, vb.pp(format!("{prefix}.norm.key_norm"))).ok().map(QkNorm::Rms),
+            )
+        };
+
         // Image stream layers
         let img_qkv = linear_layer(dim, dim * 3, vb.pp("img_attn.qkv"))?;
-        let img_q_norm = RMSNorm::new(head_dim, vb.pp("img_attn.norm.query_norm")).ok();
-        let img_k_norm = RMSNorm::new(head_dim, vb.pp("img_attn.norm.key_norm")).ok();
+        let (img_q_norm, img_k_norm) = build_qk("img_attn");
         let img_proj = linear_layer(dim, dim, vb.pp("img_attn.proj"))?;
         let swiglu_in_dim = dim * 6;
         let swiglu_mid_dim = dim * 3;
@@ -99,8 +154,7 @@ impl DoubleStreamBlock {
 
         // Text stream layers
         let txt_qkv = linear_layer(dim, dim * 3, vb.pp("txt_attn.qkv"))?;
-        let txt_q_norm = RMSNorm::new(head_dim, vb.pp("txt_attn.norm.query_norm")).ok();
-        let txt_k_norm = RMSNorm::new(head_dim, vb.pp("txt_attn.norm.key_norm")).ok();
+        let (txt_q_norm, txt_k_norm) = build_qk("txt_attn");
         let txt_proj = linear_layer(dim, dim, vb.pp("txt_attn.proj"))?;
         let txt_mlp = (
             linear_layer(dim, mlp_dim, vb.pp("txt_mlp.0"))

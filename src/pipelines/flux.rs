@@ -214,6 +214,8 @@ impl FluxPipeline {
         println!("📦 Constructing Pure Rust Flux Streaming Transformer (Ultra-Low VRAM)...");
         let has_guidance = src.keys().iter().any(|k| k.contains("guidance_in") || k.contains("time_guidance_embed"));
         let is_klein = src.keys().iter().any(|k| k.contains("double_stream_modulation") || k.contains("img_attn.norm.key_norm.scale"));
+        // SD3 / SD3.5 (BFL native `joint_blocks` or canonical `x_embedder`/`context_embedder`).
+        let is_sd35 = src.keys().iter().any(|k| k.contains("joint_blocks.") || k.contains("x_embedder."));
 
         let count_single = |prefixes: &[&str]| -> usize {
             let mut max_s = 0;
@@ -229,7 +231,21 @@ impl FluxPipeline {
             max_s
         };
 
-        let config = if is_klein && has_guidance {
+        let config = if is_sd35 {
+            let max_joint = {
+                let mut m = 0;
+                for k in src.keys() {
+                    for p in ["joint_blocks.", "model.diffusion_model.joint_blocks."] {
+                        if let Some(rest) = k.strip_prefix(p) {
+                            if let Some(i) = rest.split('.').next().and_then(|s| s.parse::<usize>().ok()) { m = m.max(i + 1); }
+                        }
+                    }
+                }
+                m
+            };
+            if max_joint > 30 { println!("✨ Detected SD 3.5 Large ({max_joint} joint blocks, 2432 hidden)!"); FluxConfig::sd35_large() }
+            else { println!("✨ Detected SD 3.5 Medium ({max_joint} joint blocks, 1536 hidden)!"); FluxConfig::sd35_medium() }
+        } else if is_klein && has_guidance {
             let max_s = count_single(&["single_blocks.", "single_transformer_blocks."]);
             if max_s > 40 { println!("✨ Detected Flux.2-Dev (guidance, 8 double / 48 single, 6144 hidden)!"); FluxConfig::flux2_dev() }
             else { println!("✨ Detected Flux.1-Dev (guidance embedder)!"); FluxConfig::dev() }
@@ -256,8 +272,19 @@ impl FluxPipeline {
 
         let vb = crate::weights::flux_header_var_builder_src(src.as_ref(), &device, dtype)?;
         let mut transformer = FluxTransformer::new_streaming(config.clone(), vb)?;
-        let is_diffusers = src.keys().iter().any(|k| k.starts_with("x_embedder.") || k.starts_with("context_embedder."));
+        let is_diffusers = !is_sd35 && src.keys().iter().any(|k| k.starts_with("x_embedder.") || k.starts_with("context_embedder."));
         transformer.swap_scale_shift = !is_diffusers;
+        // SD3 / SD3.5 fixed sincos positional embedding (variable shape -> loaded explicitly).
+        if is_sd35 {
+            for key in ["pos_embed", "model.diffusion_model.pos_embed"] {
+                if src.contains(key) {
+                    let pe = src.get_tensor(key, &device, dtype)?;
+                    transformer.set_pos_embed(pe);
+                    println!("✨ Attached SD3.5 pos_embed (shape {:?})", transformer.pos_embed.as_ref().map(|t| t.dims().to_vec()));
+                    break;
+                }
+            }
+        }
 
         let streamer = Some(crate::diffusion::dit::streamer::SequentialBlockStreamer::new(
             src.clone(), device.clone(), dtype, config.hidden_size, config.num_heads, config.mlp_ratio,
@@ -315,7 +342,22 @@ impl FluxPipeline {
             max_s
         };
 
-        let config = if is_klein && has_guidance {
+        let is_sd35 = archive.keys().any(|k| k.contains("joint_blocks.") || k.contains("x_embedder."));
+        let config = if is_sd35 {
+            let max_joint = {
+                let mut m = 0;
+                for k in archive.keys() {
+                    for p in ["joint_blocks.", "model.diffusion_model.joint_blocks."] {
+                        if let Some(rest) = k.strip_prefix(p) {
+                            if let Some(i) = rest.split('.').next().and_then(|s| s.parse::<usize>().ok()) { m = m.max(i + 1); }
+                        }
+                    }
+                }
+                m
+            };
+            if max_joint > 30 { println!("✨ Detected SD 3.5 Large ({max_joint} joint blocks, 2432 hidden)!"); FluxConfig::sd35_large() }
+            else { println!("✨ Detected SD 3.5 Medium ({max_joint} joint blocks, 1536 hidden)!"); FluxConfig::sd35_medium() }
+        } else if is_klein && has_guidance {
             // Flux.2-Dev also carries `double_stream_modulation` + `single_stream_modulation`,
             // but has a guidance embedder and 48 single blocks -> it is NOT a Klein model.
             let max_s = count_single(&["single_blocks.", "single_transformer_blocks."]);
@@ -393,8 +435,18 @@ impl FluxPipeline {
 
         // Diffusers-layout checkpoints (official flux2-dev BF16) use [scale, shift] chunk order in the
         // final AdaLN; BFL native uses [shift, scale]. Detect via a Diffusers-only header key.
-        let is_diffusers = archive.keys().any(|k| k.starts_with("x_embedder.") || k.starts_with("context_embedder."));
+        let is_diffusers = !is_sd35 && archive.keys().any(|k| k.starts_with("x_embedder.") || k.starts_with("context_embedder."));
         transformer.swap_scale_shift = !is_diffusers;
+        if is_sd35 {
+            for key in ["pos_embed", "model.diffusion_model.pos_embed"] {
+                if archive.contains(key) {
+                    let pe = archive.get_tensor(key, &device, dtype)?;
+                    transformer.set_pos_embed(pe);
+                    println!("✨ Attached SD3.5 pos_embed");
+                    break;
+                }
+            }
+        }
 
         let streamer = Some(crate::diffusion::dit::streamer::SequentialBlockStreamer::new(
             archive.clone(),
