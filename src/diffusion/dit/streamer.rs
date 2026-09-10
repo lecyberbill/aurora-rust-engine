@@ -1,9 +1,10 @@
-﻿// [WFGY] Zone: SAFE | Î»: 0.25 | Fallbacks: 0 | Action: Sequential Block Streamer for MMDiT Low-VRAM Inference
+// [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Sequential Block Streamer for MMDiT Low-VRAM Inference
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 use std::collections::HashMap;
 use std::sync::Arc;
+use crate::canonical::{canonicalize, detect_family, CheckpointFamily};
 use crate::diffusion::dit::blocks::{DoubleStreamBlock, SingleStreamBlock};
 use crate::weights::{WeightsSource, apply_flux_deltas_to_tensor};
 
@@ -16,6 +17,8 @@ pub struct SequentialBlockStreamer {
     hidden_dim: usize,
     num_heads: usize,
     mlp_ratio: usize,
+    /// The checkpoint's key convention, detected once. Drives [`canonicalize`].
+    family: CheckpointFamily,
     /// Optional LoRA deltas (BFL-style names, possibly `@Q`/`@K`/`@V`-tagged) to splice into each
     /// block's weights as it is streamed in.
     lora_deltas: Option<Arc<HashMap<String, Tensor>>>,
@@ -30,6 +33,7 @@ impl SequentialBlockStreamer {
         num_heads: usize,
         mlp_ratio: usize,
     ) -> Self {
+        let family = detect_family(archive.keys().iter().map(|s| s.as_str()));
         Self {
             archive,
             device,
@@ -37,6 +41,7 @@ impl SequentialBlockStreamer {
             hidden_dim,
             num_heads,
             mlp_ratio,
+            family,
             lora_deltas: None,
         }
     }
@@ -69,7 +74,7 @@ impl SequentialBlockStreamer {
         let mut tensors = HashMap::new();
 
         for key in self.archive.keys() {
-            let bfl = crate::weights::flux_diffusers_to_bfl(&key).unwrap_or_else(|| key.clone());
+            let bfl = canonicalize(self.family, &key).unwrap_or_else(|| key.clone());
             let matched_suffix = if let Some(suffix) = bfl.strip_prefix(&prefix) {
                 Some(suffix.to_string())
             } else if let Some(suffix) = bfl.strip_prefix(&prefix_alt) {
@@ -145,7 +150,7 @@ impl SequentialBlockStreamer {
         let mut tensors = HashMap::new();
 
         for key in self.archive.keys() {
-            let bfl = crate::weights::flux_diffusers_to_bfl(&key).unwrap_or_else(|| key.clone());
+            let bfl = canonicalize(self.family, &key).unwrap_or_else(|| key.clone());
             let matched_suffix = if let Some(suffix) = bfl.strip_prefix(&prefix) {
                 Some(suffix.to_string())
             } else if let Some(suffix) = bfl.strip_prefix(&prefix_alt) {

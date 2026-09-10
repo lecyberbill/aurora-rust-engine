@@ -522,31 +522,22 @@ impl<'a> WeightRouter<'a> {
 
     pub fn flux_var_builder(&self) -> Result<VarBuilder<'static>> {
         let mut tensors = HashMap::new();
-        let flux_prefixes = ["double_blocks.", "single_blocks.", "img_in.", "txt_in.", "time_in.", "vector_in.", "guidance_in.", "final_layer."];
+        let keys: Vec<String> = self.archive.keys().cloned().collect();
+        let family = crate::canonical::detect_family(keys.iter().map(|s| s.as_str()));
+        let flux_prefixes = [
+            "double_blocks.", "single_blocks.", "img_in.", "txt_in.", "time_in.",
+            "vector_in.", "guidance_in.", "final_layer.", "pos_embed",
+        ];
 
-        for key in self.archive.keys() {
-            let mut matched = false;
-            for prefix in &flux_prefixes {
-                if key.starts_with(prefix) {
-                    let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
-                    tensors.insert(key.clone(), tensor);
-                    matched = true;
-                    break;
-                } else if let Some(stripped) = key.strip_prefix("model.diffusion_model.") {
-                    if stripped.starts_with(prefix) {
-                        let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
-                        tensors.insert(stripped.to_string(), tensor);
-                        matched = true;
-                        break;
-                    }
-                }
-            }
-            // Fall back to the Diffusers layout (official flux2-dev BF16) mapping.
-            if !matched {
-                if let Some(bfl) = flux_diffusers_to_bfl(key) {
-                    let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
-                    tensors.insert(bfl, tensor);
-                }
+        for key in &keys {
+            // Canonicalise first (identity for BFL Flux; remaps SD3.5 `joint_blocks`/`x_embedder`,
+            // Diffusers `transformer.*`). Then strip the optional BFL `model.diffusion_model.` prefix.
+            let canon = crate::canonical::canonicalize(family, key);
+            let candidate = canon.as_deref().unwrap_or(key.as_str());
+            let candidate = candidate.strip_prefix("model.diffusion_model.").unwrap_or(candidate);
+            if flux_prefixes.iter().any(|p| candidate.starts_with(p)) {
+                let tensor = self.archive.get_tensor(key, &self.device, self.dtype)?;
+                tensors.insert(candidate.to_string(), tensor);
             }
         }
 

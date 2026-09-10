@@ -116,8 +116,8 @@ fn remap_block_leaf(leaf: &str) -> Option<String> {
     let mapped = match stem {
         "attn.qkv" => "attn.qkv",
         "attn.proj" => "attn.proj",
-        "attn.ln_q" => "attn.norm.query_norm",
-        "attn.ln_k" => "attn.norm.key_norm",
+        "attn.ln_q" => "attn.norm.query_ln",
+        "attn.ln_k" => "attn.norm.key_ln",
         "mlp.fc1" => "mlp.0",
         "mlp.fc2" => "mlp.2",
         "adaLN_modulation.1" => "mod.lin",
@@ -172,7 +172,7 @@ mod tests {
         );
         assert_eq!(
             sd35_to_canonical("model.diffusion_model.joint_blocks.0.x_block.attn.ln_q.weight").as_deref(),
-            Some("double_blocks.0.img_attn.norm.query_norm.weight")
+            Some("double_blocks.0.img_attn.norm.query_ln.weight")
         );
         assert_eq!(
             sd35_to_canonical("model.diffusion_model.joint_blocks.12.x_block.adaLN_modulation.1.weight").as_deref(),
