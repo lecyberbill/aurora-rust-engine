@@ -193,6 +193,29 @@ SD3.5 : Flow Match Euler avec **`shift = 3.0`** statique (pas l'empirique Flux.2
 - [ ] Ajout à la vitrine `aurora_studio` (dropdown) une fois validé.
 - [ ] `cargo test --lib` 20/20 ; build sans warning.
 
+## 9bis. ÉTAT ACTUEL (2026-09-11) — pipeline complet, sortie grise (dernier bug)
+
+`test_sd35.rs` exécute **tout le pipeline de bout en bout sans crash** : SD3.5 Large charge,
+conditionnement texte (CLIP-L+G+T5) fini, sampler, VAE 16ch décode. **Mais la sortie est uniformément
+grise.** Diagnostic (via FLUX_TRACE) :
+- `temb` rms ≈ 6.6 ; `silu(temb)` a une **moyenne positive** ; poids `adaLN_modulation.1` rms ≈ 0.016.
+- → sortie de modulation `proj` rms ≈ **69**, dont `scale_msa` ≈ 102 et `gate_msa` ≈ 30 (**énormes** ;
+  AdaLN-Zero devrait donner des gates ≈ 0).
+- Le flux texte explose alors (bloc 0 : txt 1.6 → 35k → clamp 50000) puis NaN → latents constants → gris.
+
+`linear.forward == matmul manuel` (pas un bug de candle). Le poids adaLN chargé est correct (0.016).
+**Donc `temb` (ou son échelle) ne correspond pas à ce que SD3.5 attend.**
+
+Pistes (prochaine session) :
+1. Vérifier l'ordre `cos/sin` et `downscale_freq_shift` du `TimestepEmbedder` vs `diffusers.Timesteps(256,
+   flip_sin_to_cos=True, downscale_freq_shift=0)`.
+2. Vérifier que `temb` ne doit pas être centré/normalisé (peut-être que l'`out_layer` de `vector_in`
+   ou `time_in` charge un mauvais tenseur, gonflant la moyenne).
+3. Comparer `silu(temb)` et la sortie `adaLN_modulation` à une référence diffusers (dump des tenseurs).
+4. Confirmer que `guidance_embed=false` (pas de guidance vector) et que le `swap_scale_shift` du final
+   layer est correct.
+5. Rappel : SD3.5 Large **Turbo** → 4 steps, guidance basse.
+
 ## 10. Hors-scope (plus tard)
 
 - SD3 Medium (24 blocks) — config presque prête.
