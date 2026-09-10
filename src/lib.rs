@@ -16,8 +16,8 @@ pub mod weights;
 pub use device::{auto_device, select_device, GenerationMetrics, KernelDispatchConfig};
 pub use error::{LuminaError, Result};
 pub use models::{
-    Architecture, AutoModel, EncodeModel, GenerationModel, ImageGenerationModel, ModelKind,
-    ModelLoadConfig, ModelRegistry,
+    Architecture, AutoModel, EncodeModel, GenerationModel, ImageGenerationModel, ModelDescriptor,
+    ModelKind, ModelLoadConfig, ModelRegistry, TextEncoderSpec,
 };
 pub use lora::{LoRALoader, LoRAManager, LoRAMerger, LoRAPair, LoRATarget, LoadedLoRA};
 pub use traits::{ControlNetParams, DiffusionParams, Img2ImgParams, InpaintParams, TextGenerationPipeline, TextToImagePipeline};

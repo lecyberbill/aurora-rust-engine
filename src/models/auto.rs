@@ -100,6 +100,106 @@ impl AutoModel {
         Self::build(arch, folder, cfg.device, cfg.dtype)
     }
 
+    /// Build a model from an explicit [`ModelDescriptor`], attaching any external VLM/VAE the family
+    /// needs (e.g. Qwen3 + 32-ch VAE for Flux.2-Klein-4B). This is the control-plane entry point a
+    /// platform uses so it can load / swap / unload models by descriptor.
+    pub fn from_descriptor(
+        desc: &super::descriptor::ModelDescriptor,
+        device: Device,
+        dtype: DType,
+    ) -> Result<BoxedModel> {
+        let arch = match &desc.family {
+            Some(a) => a.clone(),
+            None => {
+                let archive: Arc<dyn crate::weights::WeightsSource> = if desc.checkpoint.is_dir() {
+                    Arc::new(SafeTensorsArchive::open_shards_dir(&desc.checkpoint)?)
+                } else if desc.checkpoint.to_string_lossy().to_lowercase().ends_with(".gguf") {
+                    Arc::new(crate::gguf::GgufWeights::open(&desc.checkpoint)?)
+                } else {
+                    Arc::new(SafeTensorsArchive::open(&desc.checkpoint)?)
+                };
+                detect_architecture(&*archive)
+            }
+        };
+
+        let boxed: BoxedModel = match arch {
+            Architecture::Flux2Dev
+            | Architecture::Flux2Klein4B
+            | Architecture::Flux2Klein9B
+            | Architecture::Flux1Dev
+            | Architecture::Flux1Schnell => {
+                let mut pipeline = if desc.checkpoint.to_string_lossy().to_lowercase().ends_with(".gguf") {
+                    crate::pipelines::FluxPipeline::from_gguf_dtype(&desc.checkpoint, device.clone(), dtype)?
+                } else {
+                    crate::pipelines::FluxPipeline::from_single_file_streaming(&desc.checkpoint, device.clone())?
+                };
+                pipeline.enable_flash_attn();
+
+                // Attach external text encoder (Flux.2-Klein/Dev don't embed one).
+                if let Some(spec) = &desc.text_encoder {
+                    match spec {
+                        super::descriptor::TextEncoderSpec::Qwen3 { path } => {
+                            let archive: Arc<dyn crate::weights::WeightsSource> = if path.is_dir() {
+                                Arc::new(SafeTensorsArchive::open_shards_dir(path)?)
+                            } else {
+                                Arc::new(SafeTensorsArchive::open(path)?)
+                            };
+                            let enc = crate::text::Qwen3TextEncoder::from_archive(
+                                &*archive,
+                                Some(std::path::Path::new("qwen_tokenizer.json")),
+                                &device,
+                                dtype,
+                            )?;
+                            pipeline.set_qwen3(enc);
+                        }
+                        super::descriptor::TextEncoderSpec::Mistral3 { dir } => {
+                            let enc = crate::text::Mistral3TextEncoder::from_dir(
+                                dir,
+                                Some(std::path::Path::new("mistral_tokenizer.json")),
+                                device.clone(),
+                                dtype,
+                            )?;
+                            pipeline.set_mistral(enc);
+                        }
+                        super::descriptor::TextEncoderSpec::T5 { path: _ } => {
+                            // Flux.1 embeds T5-XXL and wires it internally, so an external T5 is
+                            // intentionally not wired here. Keep the variant for completeness.
+                        }
+                    }
+                }
+
+                // Attach the 32-channel Flux VAE if given (Flux.2 needs the external flux2-vae).
+                if let Some(vae_path) = &desc.vae {
+                    let vae_archive = if vae_path.is_dir() {
+                        SafeTensorsArchive::open_shards_dir(vae_path)?
+                    } else {
+                        SafeTensorsArchive::open(vae_path)?
+                    };
+                    let vae_router = crate::weights::WeightRouter::new(&vae_archive, device.clone(), dtype);
+                    let vae_vb = vae_router.vae_var_builder()?;
+                    let decoder = crate::diffusion::vae_flux::FluxVaeDecoder::new(vae_vb.clone())?;
+                    let encoder = crate::diffusion::vae_flux::FluxVaeEncoder::new(vae_vb)?;
+                    pipeline.set_vae(decoder);
+                    pipeline.set_vae_encoder(encoder);
+                }
+
+                Arc::new(Mutex::new(DiffusionModel::flux(desc.id.clone(), arch.slug(), pipeline)))
+            }
+            Architecture::Sdxl => {
+                let pipeline = crate::pipelines::StableDiffusionXLPipeline::from_single_file(&desc.checkpoint, device.clone())?;
+                Arc::new(Mutex::new(DiffusionModel::sdxl(desc.id.clone(), pipeline)))
+            }
+            Architecture::Sd15 => {
+                let pipeline = <crate::pipelines::StableDiffusionPipeline as crate::traits::TextToImagePipeline>::from_safetensors(&desc.checkpoint, &device)?;
+                Arc::new(Mutex::new(DiffusionModel::sd15(desc.id.clone(), pipeline)))
+            }
+            other => {
+                return Err(LuminaError::UnsupportedOp(format!("from_descriptor for {}", other.slug())));
+            }
+        };
+        Ok(boxed)
+    }
+
     /// Build a concrete model object from a detected architecture.
     fn build(arch: Architecture, weights: PathBuf, device: Device, dtype: DType) -> Result<BoxedModel> {
         let boxed: BoxedModel = match arch {
