@@ -1,5 +1,6 @@
 // [WFGY] Zone: SAFE | λ: 0.15 | Fallbacks: 0 | Action: Lumina root library and API re-exports
 
+pub mod canonical;
 pub mod device;
 pub mod diffusion;
 pub mod error;
