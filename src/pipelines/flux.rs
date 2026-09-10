@@ -35,6 +35,7 @@ pub struct FluxPipeline {
     pub transformer: FluxTransformer,
     pub scheduler: FlowMatchEulerScheduler,
     pub clip_l: Option<crate::text::ClipTextEncoder>,
+    pub openclip_g: Option<crate::text::OpenClipTextEncoder>,
     pub t5xxl: Option<crate::text::T5TextEncoder>,
     pub qwen3: Option<crate::text::Qwen3TextEncoder>,
     pub mistral: Option<crate::text::Mistral3TextEncoder>,
@@ -65,6 +66,58 @@ impl FluxPipeline {
     /// Attach Mistral-3-Small text encoder for Flux.2 Klein 9B / Dev
     pub fn set_mistral(&mut self, mistral: crate::text::Mistral3TextEncoder) {
         self.mistral = Some(mistral);
+    }
+
+    /// Attach OpenCLIP-G (CLIP-G) for SD 3.5 conditioning (`clip_g.safetensors`).
+    pub fn set_openclip_g(&mut self, g: crate::text::OpenClipTextEncoder) {
+        self.openclip_g = Some(g);
+    }
+
+    /// Attach the T5-XXL and CLIP-L encoders needed by SD 3.5 (in addition to CLIP-G).
+    pub fn set_sd35_encoders(&mut self, t5: crate::text::T5TextEncoder, clip_l: crate::text::ClipTextEncoder) {
+        self.t5xxl = Some(t5);
+        self.clip_l = Some(clip_l);
+    }
+
+    /// True when this pipeline is an SD3 / SD3.5 model (has a fixed sincos pos_embed).
+    pub fn is_sd35(&self) -> bool {
+        self.transformer.pos_embed.is_some()
+    }
+
+    /// SD 3.5 text conditioning: returns `(context, pooled)`.
+    ///
+    /// - `context` = `concat(CLIP_L+G hidden [77, 2048] zero-padded → 4096, T5 [t5_len, 4096])` on the
+    ///   sequence axis → `[1, 77+t5_len, 4096]`.
+    /// - `pooled` = `concat(CLIP-L pooled (768), CLIP-G pooled (1280))` → `[1, 2048]`.
+    ///
+    /// Matches `diffusers` `StableDiffusion3Pipeline.encode_prompt`.
+    pub fn encode_sd35(&mut self, prompt: &str) -> crate::error::Result<(Tensor, Tensor)> {
+        // CLIP-L (768) then CLIP-G (1280) on the feature dim. Encoders may live on CPU, so bring the
+        // (small) outputs onto the pipeline device before concatenating.
+        let clip = self.clip_l.as_ref().ok_or_else(|| crate::error::LuminaError::Config("SD3.5 needs CLIP-L".into()))?;
+        let clip_l_hidden = clip.encode_prompt(prompt)?.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let clip_l_pooled = clip.encode_pooled(prompt)?.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let g = self.openclip_g.as_ref().ok_or_else(|| crate::error::LuminaError::Config("SD3.5 needs CLIP-G".into()))?;
+        let (clip_g_hidden, clip_g_pooled) = g.encode_prompt_with_pooled(prompt)?;
+        let clip_g_hidden = clip_g_hidden.to_device(&self.device)?.to_dtype(self.dtype)?;
+        let clip_g_pooled = clip_g_pooled.to_device(&self.device)?.to_dtype(self.dtype)?;
+
+        // [1, 77, 768] ++ [1, 77, 1280] -> [1, 77, 2048]
+        let clip_hidden = Tensor::cat(&[&clip_l_hidden, &clip_g_hidden], 2)?;
+        // Zero-pad feature dim 2048 -> 4096 to match T5.
+        let (b, s, feat) = clip_hidden.dims3()?;
+        let pad = Tensor::zeros((b, s, 4096 - feat), self.dtype, &self.device)?;
+        let clip_padded = Tensor::cat(&[&clip_hidden, &pad], 2)?.contiguous()?;
+
+        let t5 = self.t5xxl.as_mut().ok_or_else(|| crate::error::LuminaError::Config("SD3.5 needs T5-XXL".into()))?;
+        let t5_hidden = t5.encode(prompt, 256)?.to_device(&self.device)?.to_dtype(self.dtype)?;
+
+        // Sequence: CLIP(77) then T5(t5_len).
+        let context = Tensor::cat(&[&clip_padded, &t5_hidden], 1)?.contiguous()?;
+
+        // Pooled: CLIP-L (768) then CLIP-G (1280) -> 2048.
+        let pooled = Tensor::cat(&[&clip_l_pooled, &clip_g_pooled], 1)?.to_device(&self.device)?.contiguous()?;
+        Ok((context, pooled))
     }
 
     /// Enable the FlashAttention-2 fast path for MMDiT blocks (~2x faster denoise on CUDA).
@@ -297,6 +350,7 @@ impl FluxPipeline {
             transformer,
             scheduler,
             clip_l: None,
+            openclip_g: None,
             t5xxl: None,
             qwen3: None,
             mistral: None,
@@ -527,6 +581,7 @@ impl FluxPipeline {
             transformer,
             scheduler,
             clip_l,
+            openclip_g: None,
             t5xxl,
             qwen3: None,
             mistral: None,
@@ -582,8 +637,17 @@ impl FluxPipeline {
             permuted.reshape((1, h_patches * w_patches, in_channels))?
         };
 
-        // 1. Text conditioning: encode prompt via Mistral-3, Qwen3, or T5-XXL
-        let raw_txt_tokens = if let Some(ref mut mistral) = self.mistral {
+        // 1. Text conditioning: SD3.5 (CLIP-L+G+T5) or Mistral-3 / Qwen3 / T5-XXL.
+        let sd35_pooled = if self.is_sd35() {
+            println!("📝 Encoding prompt with SD3.5 (CLIP-L+G + T5-XXL)...");
+            let (ctx, pooled) = self.encode_sd35(params.prompt)?;
+            Some((ctx, pooled))
+        } else {
+            None
+        };
+        let raw_txt_tokens = if let Some((ctx, _)) = &sd35_pooled {
+            ctx.clone()
+        } else if let Some(ref mut mistral) = self.mistral {
             let txt_dim = if in_channels == 128 {
                 if self.transformer.config.hidden_size == 4096 { 4096 } else { 5120 } // 9B narrow, Dev full
             } else { 0 };
@@ -624,7 +688,9 @@ impl FluxPipeline {
             raw_txt_tokens.contiguous()?
         };
 
-        let y_vec = if let Some(ref mut clip) = self.clip_l {
+        let y_vec = if let Some((_, pooled)) = &sd35_pooled {
+            Some(pooled.clone())
+        } else if let Some(ref mut clip) = self.clip_l {
             if !clip.has_tokenizer() {
                 let _ = clip.load_tokenizer("clip_tokenizer.json");
             }

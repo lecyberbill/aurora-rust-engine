@@ -98,9 +98,13 @@ pub struct DoubleStreamBlock {
     txt_qkv: Linear,
     txt_q_norm: Option<QkNorm>,
     txt_k_norm: Option<QkNorm>,
-    txt_proj: Linear,
-    txt_mlp: (Linear, Linear),
+    /// Absent on the last SD3.5 block (`context_pre_only`): the context stream feeds attention but
+    /// its output is not projected back.
+    txt_proj: Option<Linear>,
+    txt_mlp: Option<(Linear, Linear)>,
     txt_mod: AdaLNZeroModulation,
+    /// True when `txt_mod` emits only 2 params (shift, scale) instead of 6 (`context_pre_only`).
+    txt_mod_pair: bool,
 
     heads: usize,
     head_dim: usize,
@@ -155,14 +159,23 @@ impl DoubleStreamBlock {
         // Text stream layers
         let txt_qkv = linear_layer(dim, dim * 3, vb.pp("txt_attn.qkv"))?;
         let (txt_q_norm, txt_k_norm) = build_qk("txt_attn");
-        let txt_proj = linear_layer(dim, dim, vb.pp("txt_attn.proj"))?;
-        let txt_mlp = (
-            linear_layer(dim, mlp_dim, vb.pp("txt_mlp.0"))
-                .or_else(|_| linear_layer(dim, swiglu_in_dim, vb.pp("txt_mlp.0")))?,
-            linear_layer(mlp_dim, dim, vb.pp("txt_mlp.2"))
-                .or_else(|_| linear_layer(swiglu_mid_dim, dim, vb.pp("txt_mlp.2")))?,
-        );
-        let txt_mod = AdaLNZeroModulation::new(dim, dim * 6, vb.pp("txt_mod"))?;
+        // Optional: the last SD3.5 block (`context_pre_only`) has neither a text output projection
+        // nor a text MLP.
+        let txt_proj = linear_layer(dim, dim, vb.pp("txt_attn.proj")).ok();
+        let txt_mlp = {
+            let a = linear_layer(dim, mlp_dim, vb.pp("txt_mlp.0"))
+                .or_else(|_| linear_layer(dim, swiglu_in_dim, vb.pp("txt_mlp.0")))
+                .ok();
+            let b = linear_layer(mlp_dim, dim, vb.pp("txt_mlp.2"))
+                .or_else(|_| linear_layer(swiglu_mid_dim, dim, vb.pp("txt_mlp.2")))
+                .ok();
+            match (a, b) { (Some(a), Some(b)) => Some((a, b)), _ => None }
+        };
+        // 6 params normally; the SD3.5 last block (`context_pre_only`) has only 2 (shift, scale).
+        let (txt_mod, txt_mod_pair) = match AdaLNZeroModulation::new(dim, dim * 6, vb.pp("txt_mod")) {
+            Ok(m) => (m, false),
+            Err(_) => (AdaLNZeroModulation::new(dim, dim * 2, vb.pp("txt_mod"))?, true),
+        };
 
         Ok(Self {
             img_qkv,
@@ -177,6 +190,7 @@ impl DoubleStreamBlock {
             txt_proj,
             txt_mlp,
             txt_mod,
+            txt_mod_pair,
             heads,
             head_dim,
             scale,
@@ -231,9 +245,15 @@ impl DoubleStreamBlock {
         let img_shift1 = img_shift1.unsqueeze(1)?;
         let img_normed = img_norm1.broadcast_mul(&img_scale1)?.broadcast_add(&img_shift1)?;
 
-        // 2. Modulate Text tokens with AdaLN-Zero: (1 + scale) * LayerNorm(txt) + shift
-        let (txt_shift1, txt_scale1, txt_gate1, txt_shift2, txt_scale2, txt_gate2) =
-            self.txt_mod.modulate_double(temb)?;
+        // 2. Modulate Text tokens with AdaLN-Zero: (1 + scale) * LayerNorm(txt) + shift.
+        // The SD3.5 last block (`context_pre_only`) emits only (shift, scale); the other four are unused
+        // (its text output projection / MLP are absent), so placeholders are fine.
+        let (txt_shift1, txt_scale1, txt_gate1, txt_shift2, txt_scale2, txt_gate2) = if self.txt_mod_pair {
+            let (sh, sc) = self.txt_mod.modulate_pair(temb)?;
+            (sh.clone(), sc.clone(), sh.clone(), sh, sc.clone(), sc)
+        } else {
+            self.txt_mod.modulate_double(temb)?
+        };
         let txt_norm1 = norm_layer(txt)?;
         let txt_scale1 = (txt_scale1.unsqueeze(1)? + 1.0)?;
         let txt_shift1 = txt_shift1.unsqueeze(1)?;
@@ -301,11 +321,14 @@ impl DoubleStreamBlock {
         let txt_attn = attn_out.narrow(1, 0, txt_len)?;
         let img_attn = attn_out.narrow(1, txt_len, img_len)?;
 
-        // 7. Apply Attention Output Projection & Gated Residual (in F32 to preserve numerical dynamic range)
-        let txt_attn_proj = self.txt_proj.forward(&txt_attn)?;
-        let txt_gate1 = txt_gate1.unsqueeze(1)?;
-        let txt_after_attn = (txt.to_dtype(candle_core::DType::F32)? + txt_attn_proj.to_dtype(candle_core::DType::F32)?.broadcast_mul(&txt_gate1.to_dtype(candle_core::DType::F32)?)?)?.clamp(-50000.0f32, 50000.0f32)?.to_dtype(orig_dtype)?;
-        let txt = txt_after_attn.clone();
+        // 7. Apply Attention Output Projection & Gated Residual (in F32 to preserve numerical dynamic
+        // range). `txt_proj` is absent on the SD3.5 last block (context_pre_only) -> keep txt unchanged.
+        let mut txt = txt.clone();
+        if let Some(ref txt_proj) = self.txt_proj {
+            let txt_attn_proj = txt_proj.forward(&txt_attn)?;
+            let txt_gate1 = txt_gate1.unsqueeze(1)?;
+            txt = (txt.to_dtype(candle_core::DType::F32)? + txt_attn_proj.to_dtype(candle_core::DType::F32)?.broadcast_mul(&txt_gate1.to_dtype(candle_core::DType::F32)?)?)?.clamp(-50000.0f32, 50000.0f32)?.to_dtype(orig_dtype)?;
+        }
 
         let img_attn_proj = self.img_proj.forward(&img_attn)?;
         let img_gate1 = img_gate1.unsqueeze(1)?;
@@ -330,23 +353,26 @@ impl DoubleStreamBlock {
         let img_gate2 = img_gate2.unsqueeze(1)?;
         let img = (img.to_dtype(candle_core::DType::F32)? + img_mlp_out.to_dtype(candle_core::DType::F32)?.broadcast_mul(&img_gate2.to_dtype(candle_core::DType::F32)?)?)?.to_dtype(orig_dtype)?;
 
-        let txt_norm2 = norm_layer(&txt)?;
-        let txt_scale2 = (txt_scale2.unsqueeze(1)? + 1.0)?;
-        let txt_shift2 = txt_shift2.unsqueeze(1)?;
-        let txt_normed2 = txt_norm2.broadcast_mul(&txt_scale2)?.broadcast_add(&txt_shift2)?;
-        let txt_h1 = self.txt_mlp.0.forward(&txt_normed2)?;
-        let txt_mlp_h = if txt_h1.dim(2)? > self.heads * self.head_dim * 4 {
-            // SwiGLU activation for Klein (dim * 6 input, dim * 3 output)
-            let mid_dim = txt_h1.dim(2)? / 2;
-            let gate = candle_nn::ops::silu(&txt_h1.narrow(2, 0, mid_dim)?)?;
-            let val = txt_h1.narrow(2, mid_dim, mid_dim)?;
-            (gate * val)?
-        } else {
-            gelu_tanh(&txt_h1)?
-        };
-        let txt_mlp_out = self.txt_mlp.1.forward(&txt_mlp_h)?;
-        let txt_gate2 = txt_gate2.unsqueeze(1)?;
-        let txt = (txt.to_dtype(candle_core::DType::F32)? + txt_mlp_out.to_dtype(candle_core::DType::F32)?.broadcast_mul(&txt_gate2.to_dtype(candle_core::DType::F32)?)?)?.clamp(-50000.0f32, 50000.0f32)?.to_dtype(orig_dtype)?;
+        // Text MLP (absent on the SD3.5 last block -> context stream left unchanged).
+        if let Some((txt_mlp0, txt_mlp1)) = &self.txt_mlp {
+            let txt_norm2 = norm_layer(&txt)?;
+            let txt_scale2 = (txt_scale2.unsqueeze(1)? + 1.0)?;
+            let txt_shift2 = txt_shift2.unsqueeze(1)?;
+            let txt_normed2 = txt_norm2.broadcast_mul(&txt_scale2)?.broadcast_add(&txt_shift2)?;
+            let txt_h1 = txt_mlp0.forward(&txt_normed2)?;
+            let txt_mlp_h = if txt_h1.dim(2)? > self.heads * self.head_dim * 4 {
+                // SwiGLU activation for Klein (dim * 6 input, dim * 3 output)
+                let mid_dim = txt_h1.dim(2)? / 2;
+                let gate = candle_nn::ops::silu(&txt_h1.narrow(2, 0, mid_dim)?)?;
+                let val = txt_h1.narrow(2, mid_dim, mid_dim)?;
+                (gate * val)?
+            } else {
+                gelu_tanh(&txt_h1)?
+            };
+            let txt_mlp_out = txt_mlp1.forward(&txt_mlp_h)?;
+            let txt_gate2 = txt_gate2.unsqueeze(1)?;
+            txt = (txt.to_dtype(candle_core::DType::F32)? + txt_mlp_out.to_dtype(candle_core::DType::F32)?.broadcast_mul(&txt_gate2.to_dtype(candle_core::DType::F32)?)?)?.clamp(-50000.0f32, 50000.0f32)?.to_dtype(orig_dtype)?;
+        }
 
         if std::env::var("FLUX_TRACE").is_ok() {
             let rms = |t: &Tensor| -> f32 {
@@ -356,9 +382,8 @@ impl DoubleStreamBlock {
                     m.sqrt() as f32
                 } else { 0.0 }
             };
-            // Note txt_attn_proj / txt_mlp_out / txt are only in scope at this point; capture under names.
-            eprintln!("      [DBLOCK] txt_mod_rms={:.3} txt_attn_rms={:.3} txt_attn_proj_rms={:.3} txt_mlp_out_rms={:.3} txt_after_attn={:.3} txt_out_rms={:.3}",
-                rms(&txt_normed), rms(&txt_attn), rms(&txt_attn_proj), rms(&txt_mlp_out), rms(&txt_after_attn), rms(&txt));
+            eprintln!("      [DBLOCK] txt_mod_rms={:.3} txt_attn_rms={:.3} txt_out_rms={:.3}",
+                rms(&txt_normed), rms(&txt_attn), rms(&txt));
         }
 
         Ok((img, txt))

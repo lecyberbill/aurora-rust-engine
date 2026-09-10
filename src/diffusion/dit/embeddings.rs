@@ -159,6 +159,15 @@ impl AdaLNZeroModulation {
         Ok((chunks[0].clone(), chunks[1].clone(), chunks[2].clone()))
     }
 
+    /// Predict 2 parameters (shift, scale) — used by the SD3.5 last block (`context_pre_only`),
+    /// whose text stream is normalised for attention but never updated.
+    pub fn modulate_pair(&self, conditioning: &Tensor) -> Result<(Tensor, Tensor)> {
+        let act = candle_nn::ops::silu(conditioning)?;
+        let proj = self.linear.forward(&act)?;
+        let chunks = proj.chunk(2, proj.dims().len() - 1)?;
+        Ok((chunks[0].clone(), chunks[1].clone()))
+    }
+
     /// Predict 6 parameters for DoubleStreamBlock: (shift_qkv, scale_qkv, gate_qkv, shift_mlp, scale_mlp, gate_mlp)
     pub fn modulate_double(&self, conditioning: &Tensor) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)> {
         let act = candle_nn::ops::silu(conditioning)?;
