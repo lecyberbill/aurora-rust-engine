@@ -206,6 +206,7 @@ impl AutoModel {
             // ---- Diffusion ------------------------------------------------------
             Architecture::Flux2Dev | Architecture::Flux2Klein4B | Architecture::Flux2Klein9B
             | Architecture::Flux1Dev | Architecture::Flux1Schnell
+            | Architecture::Sd35Large | Architecture::Sd35Medium
             | Architecture::Sdxl | Architecture::Sd15 => {
                 let diff = super::auto::build_diffusion(&arch, &weights, &device, dtype)?;
                 Arc::new(Mutex::new(diff))
@@ -244,6 +245,12 @@ fn build_diffusion(
             };
             pipeline.enable_flash_attn();
             Ok(DiffusionModel::flux(id, arch.slug(), pipeline))
+        }
+        Architecture::Sd35Large | Architecture::Sd35Medium => {
+            // TODO(sd35): needs the MMDiT forward extensions (fixed sincos pos_embed centre-crop,
+            // Conv2d patch embed -> Linear, LayerNorm QK-norm) before it can generate. The canonical
+            // key adapter, config and detection are already in place.
+            Err(LuminaError::UnsupportedOp(format!("SD3.5 forward extensions pending ({id})")))
         }
         Architecture::Sdxl => {
             let pipeline = crate::pipelines::StableDiffusionXLPipeline::from_single_file(weights, device.clone())?;

@@ -17,6 +17,8 @@ pub enum Architecture {
     Flux2Klein9B,
     Flux1Dev,
     Flux1Schnell,
+    Sd35Large,
+    Sd35Medium,
     Qwen3,
     Mistral3,
     T5,
@@ -37,6 +39,8 @@ impl Architecture {
             | Architecture::Flux2Klein9B
             | Architecture::Flux1Dev
             | Architecture::Flux1Schnell
+            | Architecture::Sd35Large
+            | Architecture::Sd35Medium
             | Architecture::Sdxl
             | Architecture::Sd15 => ModelKind::Diffusion,
             Architecture::Unknown(_) => ModelKind::Unknown,
@@ -50,6 +54,8 @@ impl Architecture {
             Architecture::Flux2Klein9B => "flux2-klein-9b".into(),
             Architecture::Flux1Dev => "flux1-dev".into(),
             Architecture::Flux1Schnell => "flux1-schnell".into(),
+            Architecture::Sd35Large => "sd35-large".into(),
+            Architecture::Sd35Medium => "sd35-medium".into(),
             Architecture::Qwen3 => "qwen3".into(),
             Architecture::Mistral3 => "mistral3".into(),
             Architecture::T5 => "t5".into(),
@@ -92,6 +98,12 @@ pub fn detect_architecture(src: &dyn WeightsSource) -> Architecture {
         // Flux.1 (no guidance embedder): distinguish Schnell/Dev via block count.
         let max_single = count_blocks(&keys, &["single_blocks.", "single_transformer_blocks."]);
         return if max_single > 20 { Architecture::Flux1Dev } else { Architecture::Flux1Schnell };
+    }
+
+    // --- SD3 / SD3.5 (BFL native: joint_blocks + x_embedder/context_embedder) ---
+    if has("joint_blocks.") || has("x_embedder.proj") {
+        let max_joint = count_blocks(&keys, &["joint_blocks.", "model.diffusion_model.joint_blocks."]);
+        return if max_joint > 30 { Architecture::Sd35Large } else { Architecture::Sd35Medium };
     }
 
     // --- Text encoders -------------------------------------------------------
@@ -144,6 +156,7 @@ pub fn detect_from_model_type(model_type: Option<&str>) -> Result<Architecture> 
         "flux2-klein-9b" | "flux2klein9b" => Architecture::Flux2Klein9B,
         "flux2" => Architecture::Flux2Dev,
         "flux1" | "flux" => Architecture::Flux1Dev,
+        "sd3" | "sd35" | "sd3.5" | "stable-diffusion-3" | "stable-diffusion-3.5" => Architecture::Sd35Large,
         "qwen3" | "qwen2" | "qwen" => Architecture::Qwen3,
         "mistral" | "mistral3" => Architecture::Mistral3,
         "t5" | "t5xxl" => Architecture::T5,
@@ -228,6 +241,20 @@ mod tests {
         ];
         let src = FakeSource { keys };
         assert_eq!(detect_architecture(&src), Architecture::Sdxl);
+    }
+
+    #[test]
+    fn shape_sniff_detects_sd35() {
+        let mut keys = vec![
+            "model.diffusion_model.x_embedder.proj.weight".to_string(),
+            "model.diffusion_model.context_embedder.weight".to_string(),
+        ];
+        for i in 0..38 { keys.push(format!("model.diffusion_model.joint_blocks.{i}.x_block.attn.qkv.weight")); }
+        assert_eq!(detect_architecture(&FakeSource { keys }), Architecture::Sd35Large);
+
+        let mut med = vec!["model.diffusion_model.x_embedder.proj.weight".to_string()];
+        for i in 0..24 { med.push(format!("model.diffusion_model.joint_blocks.{i}.x_block.attn.qkv.weight")); }
+        assert_eq!(detect_architecture(&FakeSource { keys: med }), Architecture::Sd35Medium);
     }
 
     #[test]

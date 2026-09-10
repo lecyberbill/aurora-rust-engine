@@ -103,11 +103,28 @@ impl FluxConfig {
         }
     }
 
-    /// Stable Diffusion 3.5 Large (24 DoubleStreamBlocks, 1536 hidden dim)
+    /// Stable Diffusion 3.5 **Large** (38 DoubleStreamBlocks, 2432 hidden, head_dim 64, 16-ch).
+    /// Verified against `stableDiffusion35Fp8_v35LargeTurbo.safetensors`.
     pub fn sd35_large() -> Self {
         Self {
-            in_channels: 16,
-            out_channels: 16,
+            in_channels: 64, // 16 latent channels * 2x2 patchify
+            out_channels: 64,
+            hidden_size: 2432,
+            num_heads: 38,
+            num_double_blocks: 38,
+            num_single_blocks: 0,
+            mlp_ratio: 4,
+            theta: 10_000.0,
+            guidance_embed: false,
+            axes_dim: vec![16, 56, 56], // SD3.5 (3 axes)
+        }
+    }
+
+    /// Stable Diffusion 3.5 **Medium** (24 DoubleStreamBlocks, 1536 hidden, head_dim 64, 16-ch).
+    pub fn sd35_medium() -> Self {
+        Self {
+            in_channels: 64, // 16 latent channels * 2x2 patchify
+            out_channels: 64,
             hidden_size: 1536,
             num_heads: 24,
             num_double_blocks: 24,
