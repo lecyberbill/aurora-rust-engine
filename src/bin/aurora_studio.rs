@@ -159,6 +159,46 @@ mod app {
         Ok(())
     }
 
+    /// Cœur du clic « Générer » : lit les contrôles, bascule le modèle si besoin puis génère.
+    /// Écrit des statuts d'avancement (`⏳ …`) pour que l'UI ne reste jamais muette.
+    fn generate(
+        state: &StudioState,
+        ctx: &mut Context,
+        choices: &[ModelChoice],
+    ) -> std::result::Result<(), String> {
+        let prompt: String = ctx.get("t2i_prompt").unwrap_or_default();
+        let negative: String = ctx.get("t2i_negative").unwrap_or_default();
+        let steps: f64 = ctx.get("t2i_steps").unwrap_or(25.0);
+        let guidance: f64 = ctx.get("t2i_guidance").unwrap_or(7.0);
+        let seed: f64 = ctx.get("t2i_seed").unwrap_or(42.0);
+        let model_label: String = ctx.get("t2i_model").unwrap_or_else(|_| choices[0].label.clone());
+        let size_label: String = ctx.get("t2i_size").unwrap_or_else(|_| "1024×1024".to_string());
+
+        // Mapping label -> id depuis la config (aucun label en dur).
+        let id = choices
+            .iter()
+            .find(|c| c.label == model_label)
+            .map(|c| c.id.clone())
+            .unwrap_or_else(|| choices[0].id.clone());
+
+        // Mapping résolution label -> pixels.
+        let (width, height) = match size_label.as_str() {
+            "512×512" => (512, 512),
+            "768×768" => (768, 768),
+            _ => (1024, 1024),
+        };
+
+        let already_active = state.active_id.lock().unwrap().as_deref() == Some(id.as_str());
+        if !already_active {
+            ctx.set("t2i_status", format!("⏳ Chargement du modèle « {model_label} »…"));
+        }
+        state.switch(choices, &id).map_err(|e| format!("bascule modèle: {e}"))?;
+        ctx.set("t2i_status", format!("⏳ Génération… {} steps · {width}×{height}", steps as usize));
+        run_t2i(state, ctx, &prompt, &negative, steps as usize, guidance, width, height, seed as u64)
+            .map_err(|e| format!("erreur: {e}"))?;
+        Ok(())
+    }
+
     pub async fn run() -> anyhow::Result<()> {
         let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
         let dtype = if device.is_cuda() { DType::F16 } else { DType::F32 };
@@ -268,33 +308,11 @@ mod app {
                 }
             })
             .on_click("t2i_go", move |ctx| {
-                let prompt: String = ctx.get("t2i_prompt").unwrap_or_default();
-                let negative: String = ctx.get("t2i_negative").unwrap_or_default();
-                let steps: f64 = ctx.get("t2i_steps").unwrap_or(25.0);
-                let guidance: f64 = ctx.get("t2i_guidance").unwrap_or(7.0);
-                let seed: f64 = ctx.get("t2i_seed").unwrap_or(42.0);
-                let model_label: String = ctx.get("t2i_model").unwrap_or_else(|_| choices[0].label.clone());
-                let size_label: String = ctx.get("t2i_size").unwrap_or_else(|_| "1024×1024".to_string());
-
-                // Mapping label -> id depuis la config (aucun label en dur).
-                let id = choices
-                    .iter()
-                    .find(|c| c.label == model_label)
-                    .map(|c| c.id.clone())
-                    .unwrap_or_else(|| choices[0].id.clone());
-
-                // Mapping résolution label -> pixels.
-                let (width, height) = match size_label.as_str() {
-                    "512×512" => (512, 512),
-                    "768×768" => (768, 768),
-                    _ => (1024, 1024),
-                };
-
-                state.switch(&choices, &id).map_err(|e| format!("bascule modèle: {e}"))?;
-                run_t2i(&state, ctx, &prompt, &negative, steps as usize, guidance, width, height, seed as u64)
-                    .map_err(|e| format!("erreur: {e}"))?;
-
-                Ok(())
+                // Verrouille le bouton pendant le travail (retour visuel immédiat), puis génère.
+                ctx.set_prop("t2i_go", "disabled", true);
+                let result = generate(&state, ctx, &choices);
+                ctx.set_prop("t2i_go", "disabled", false);
+                result.map_err(|e| e.into())
             });
 
         println!("\n🌐 Aurora Studio live: http://127.0.0.1:7860");
