@@ -10,6 +10,7 @@
 1. [Architecture & Key Highlights](#1-architecture--key-highlights)
 2. [Installation & Requirements](#2-installation--requirements)
 3. [Running the Interactive Web UI (Grio)](#3-running-the-interactive-web-ui-grio)
+   - [Multi-Model Studio (`aurora_studio.json`)](#multi-model-studio-aurora_studiojson)
 4. [Using Aurora in Rust Applications (SDK Reference)](#4-using-aurora-in-rust-applications-sdk-reference)
    - [Loading Models (Local & HuggingFace Hub)](#loading-models-local--huggingface-hub)
    - [Configuring Schedulers (DPM-Solver++, Euler, Flow-Matching)](#configuring-schedulers-dpm-solver-euler-ddim)
@@ -79,23 +80,58 @@ Adjust the Visual Studio path / CUDA version to your install. On Linux/macOS no 
 
 ## 3. Running the Interactive Web UI (Grio)
 
-Aurora includes a native web studio powered by [Grio](https://github.com/lecyberbill/grio):
+Aurora ships a native web studio (**Aurora Studio**) powered by [Grio](https://github.com/lecyberbill/grio):
 
 ```bash
-cargo run --release --bin grio_showcase --features cuda,flash-attn,ui
+cargo run --release --bin aurora_studio --features cuda,flash-attn,ui
 ```
 
 Once loaded, navigate in your browser to:
 👉 **`http://127.0.0.1:7860`**
 
+### Multi-Model Studio (`aurora_studio.json`)
+
+The studio is **fully config-driven**: no model path or label is hard-coded in the binary. It reads a
+models `config.json` (default `aurora_studio.json` in the working directory, overridable with the
+`STUDIO_CONFIG` environment variable). The dropdown is derived from the file and the first entry is
+pre-loaded:
+
+```json
+{
+  "models": [
+    {
+      "id": "sd35",
+      "label": "SD 3.5 Large (CLIP-L+G+T5)",
+      "family": "sd35",
+      "checkpoint": "G:/models/SD3/sd3.5_large.safetensors",
+      "text_encoder": {
+        "kind": "sd35",
+        "clip_l": "G:/models/clip/clip_l.safetensors",
+        "clip_g": "G:/models/clip/clip_g.safetensors",
+        "t5": "G:/models/clip/t5xxl_fp16.safetensors"
+      },
+      "vae": "G:/models/vae/sd3_vae.safetensors",
+      "defaults": { "steps": 28, "guidance": 3.5, "width": 1024, "height": 1024 }
+    }
+  ]
+}
+```
+
+Each entry has a stable `id` (used for loading), a presentation `label`, an optional `family` hint
+slug (`sdxl` / `sd15` / `sd35` / `flux1` / `flux2` / `flux2-klein-4b` / ...), the `checkpoint`, the
+optional external `text_encoder` (`kind`: `qwen3` / `mistral3` / `t5` / `sd35`) and `vae`, plus an
+optional `defaults` block. **When a model is selected in the dropdown, its `defaults` are applied to
+the controls** (steps, guidance, resolution, negative prompt); any omitted field keeps its current
+value. An unknown `family` slug is a hard error (fail-fast, no silent guess).
+
 ### Features Available in the Web Studio:
-- **Prompt & Negative Prompt Fields**: Full multi-line input with pre-configured high-quality negative prompt defaults.
-- **Scheduler Switcher**: Select between **DPM-Solver++ 2M Karras (18 steps)**, **Euler Discrete Karras (30 steps)**, and **DDIM**.
-- **Dimension Selector**: $1024\times 1024$ (Square 1:1), $832\times 1216$ (Portrait 2:3), $1216\times 832$ (Landscape 3:2).
-- **Interactive VRAM Controls**: Toggles for Seamless Tiled VAE, Dual-CLIP CPU Offloading, and FP8 precision.
-- **Progressive Real-Time Latent Previews**: Watch the image materialize live during the denoising process.
-- **Session History Gallery**: View all generated images side-by-side.
-- **Observability Cards**: Live telemetry of UNet speed (`it/s`), wall-clock latency (`s`), and peak VRAM.
+- **Model Switcher with Strict VRAM Ejection**: switching a model unloads the previous one, so only one model is resident in VRAM at a time.
+- **Per-Model Generation Defaults**: steps / guidance / resolution / negative prompt read from the config and applied automatically on model switch.
+- **Prompt & Negative Prompt Fields**: multi-line input; the negative prompt is forwarded to the pipeline (real CFG when `guidance != 1.0`, single-pass otherwise).
+- **Resolution Selector**: 512×512 / 768×768 / 1024×1024.
+- **Progressive Real-Time Latent Previews**: watch the image materialize live during the denoising process.
+- **Session History Gallery**: view all generated images side-by-side.
+- **Observability Output**: generation parameters (steps, resolution, seed) echoed after each run.
 
 ---
 

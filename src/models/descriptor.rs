@@ -119,6 +119,34 @@ pub struct ModelDescriptorEntry {
     pub text_encoder: Option<TextEncoderConfig>,
     #[serde(default)]
     pub vae: Option<PathBuf>,
+    /// Optional per-model generation defaults (steps / guidance / size / negative prompt).
+    #[serde(default)]
+    pub defaults: ModelDefaults,
+}
+
+/// Per-model generation defaults carried by the config (all optional). A UI can apply them when
+/// switching models instead of hard-coding slider values.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelDefaults {
+    #[serde(default)]
+    pub steps: Option<usize>,
+    #[serde(default)]
+    pub guidance: Option<f64>,
+    #[serde(default)]
+    pub width: Option<usize>,
+    #[serde(default)]
+    pub height: Option<usize>,
+    #[serde(default)]
+    pub negative_prompt: Option<String>,
+}
+
+/// A fully-resolved model entry: presentation label + descriptor + generation defaults.
+#[derive(Debug, Clone)]
+pub struct ResolvedModel {
+    pub id: String,
+    pub label: String,
+    pub descriptor: ModelDescriptor,
+    pub defaults: ModelDefaults,
 }
 
 /// Serde mirror of [`TextEncoderSpec`], discriminated by a `"kind"` field.
@@ -184,6 +212,21 @@ impl ModelDescriptorFile {
             .map(|e| Ok((e.label.clone().unwrap_or_else(|| e.id.clone()), e.to_descriptor()?)))
             .collect()
     }
+
+    /// Resolve every entry, keeping the id, presentation label and per-model generation defaults.
+    pub fn resolve(&self) -> Result<Vec<ResolvedModel>> {
+        self.models
+            .iter()
+            .map(|e| {
+                Ok(ResolvedModel {
+                    id: e.id.clone(),
+                    label: e.label.clone().unwrap_or_else(|| e.id.clone()),
+                    descriptor: e.to_descriptor()?,
+                    defaults: e.defaults.clone(),
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -217,5 +260,37 @@ mod tests {
         let json = r#"{"models":[{"id":"x","family":"gpt42","checkpoint":"x.safetensors"}]}"#;
         let file = ModelDescriptorFile::from_json(json).unwrap();
         assert!(file.descriptors().is_err());
+    }
+
+    #[test]
+    fn parse_model_defaults() {
+        let json = r#"{"models":[
+            {"id":"sdxl","label":"SDXL","family":"sdxl","checkpoint":"a.safetensors",
+             "defaults":{"steps":25,"guidance":7.0,"width":1024,"height":1024}},
+            {"id":"sd35","label":"SD 3.5","family":"sd35","checkpoint":"b.safetensors",
+             "defaults":{"steps":28,"guidance":3.5,"negative_prompt":"blurry"}}
+        ]}"#;
+        let file = ModelDescriptorFile::from_json(json).unwrap();
+        let ms = file.resolve().unwrap();
+        assert_eq!(ms.len(), 2);
+        assert_eq!(ms[0].id, "sdxl");
+        assert_eq!(ms[0].label, "SDXL");
+        assert_eq!(ms[0].defaults.steps, Some(25));
+        assert_eq!(ms[0].defaults.guidance, Some(7.0));
+        assert_eq!(ms[0].defaults.width, Some(1024));
+        assert_eq!(ms[0].defaults.height, Some(1024));
+        assert_eq!(ms[0].defaults.negative_prompt, None);
+        assert_eq!(ms[1].defaults.steps, Some(28));
+        assert_eq!(ms[1].defaults.guidance, Some(3.5));
+        assert_eq!(ms[1].defaults.negative_prompt.as_deref(), Some("blurry"));
+        assert_eq!(ms[1].descriptor.family, Some(Architecture::Sd35Large));
+    }
+
+    #[test]
+    fn defaults_are_optional() {
+        let json = r#"{"models":[{"id":"x","family":"sdxl","checkpoint":"x.safetensors"}]}"#;
+        let ms = ModelDescriptorFile::from_json(json).unwrap().resolve().unwrap();
+        assert_eq!(ms[0].defaults.steps, None);
+        assert_eq!(ms[0].defaults.negative_prompt, None);
     }
 }

@@ -246,7 +246,9 @@ modèles depuis un `config.json`, pour ne plus câbler les chemins dans les bina
       "checkpoint": "G:/models/SD3/sd3.5_large.safetensors",
       "text_encoder": { "kind": "sd35",
         "clip_l": "…", "clip_g": "…", "t5": "…" },
-      "vae": "G:/models/vae/sd3_vae.safetensors" }
+      "vae": "G:/models/vae/sd3_vae.safetensors",
+      "defaults": { "steps": 28, "guidance": 3.5, "width": 1024, "height": 1024,
+                    "negative_prompt": "blurry, low quality" } }
   ]
 }
 ```
@@ -254,10 +256,15 @@ modèles depuis un `config.json`, pour ne plus câbler les chemins dans les bina
 - `family` : slug **optionnel** parmi `sdxl`/`sd15`/`sd35`/`flux1`/`flux2`/`flux2-klein-4b`/… (absent →
   sniff du checkpoint ; slug inconnu → erreur `Config`).
 - `text_encoder.kind` ∈ `qwen3` | `mistral3` | `t5` | `sd35` (`sd35` porte `clip_l`/`clip_g`/`t5`).
-- `ModelDescriptorFile::load(path)` → `.descriptors()` → `Vec<(label, ModelDescriptor)>`.
+- `defaults` : bloc **optionnel** de valeurs de génération par modèle (`ModelDefaults` : `steps`,
+  `guidance`, `width`, `height`, `negative_prompt`, tous optionnels). Purement présentationnel côté
+  moteur ; une UI l'applique à la bascule de modèle.
+- `ModelDescriptorFile::load(path)` → `.descriptors()` → `Vec<(label, ModelDescriptor)>`, ou
+  `.resolve()` → `Vec<ResolvedModel>` (garde l'`id`, le `label`, le descripteur **et** les `defaults`).
 
 `aurora_studio` s'en sert via `aurora_studio.json` (surchargeable par l'env `STUDIO_CONFIG`), ne
-pré-charge plus qu'un seul modèle, et dérive le dropdown du config. Tests : `parse_model_list_config`,
-`unknown_family_slug_is_error`.
+pré-charge plus qu'un seul modèle, dérive le dropdown du config et applique les `defaults` à la
+bascule (handler grio `on_change`). Tests : `parse_model_list_config`, `unknown_family_slug_is_error`,
+`parse_model_defaults`, `defaults_are_optional`.
 
 

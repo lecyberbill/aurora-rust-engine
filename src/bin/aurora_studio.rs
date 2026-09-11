@@ -26,17 +26,19 @@ mod app {
     use grio::*;
 
     use aurora_rust_engine::models::{
-        downcast_model, AnyModel, AutoModel, DiffusionModel, ImageGenerationModel, ModelDescriptor,
-        ModelDescriptorFile,
+        downcast_model, AnyModel, AutoModel, DiffusionModel, ImageGenerationModel, ModelDefaults,
+        ModelDescriptor, ModelDescriptorFile,
     };
     use aurora_rust_engine::traits::DiffusionParams;
     use aurora_rust_engine::FastLatentPreviewer;
 
-    /// Un modèle déclaré dans la vitrine (id + descripteur pour le chargement).
+    /// Un modèle déclaré dans la vitrine (id + descripteur pour le chargement + défauts de génération).
+    #[derive(Clone)]
     struct ModelChoice {
         id: String,
         label: String,
         desc: ModelDescriptor,
+        defaults: ModelDefaults,
     }
 
     /// État partagé (Send + Sync) : le modèle actif (éjection stricte) + device/dtype.
@@ -116,6 +118,7 @@ mod app {
         state: &StudioState,
         ctx: &mut Context,
         prompt: &str,
+        negative: &str,
         steps: usize,
         guidance: f64,
         width: usize,
@@ -131,11 +134,12 @@ mod app {
             push_preview(ctx, "t2i_output", latent);
         };
 
+        let negative_prompt = if negative.trim().is_empty() { None } else { Some(negative) };
         let img = ImageGenerationModel::generate_t2i(
             gen,
             DiffusionParams {
                 prompt,
-                negative_prompt: None,
+                negative_prompt,
                 num_steps: steps,
                 guidance_scale: guidance,
                 width,
@@ -166,16 +170,23 @@ mod app {
         let cfg = ModelDescriptorFile::load(&config_path)
             .map_err(|e| anyhow::anyhow!("{e} (voir aurora_studio.json à la racine du repo)"))?;
         let choices: Vec<ModelChoice> = cfg
-            .descriptors()?
+            .resolve()?
             .into_iter()
-            .map(|(label, desc)| {
-                let id = desc.id.clone();
-                ModelChoice { id, label, desc }
-            })
+            .map(|m| ModelChoice { id: m.id, label: m.label, desc: m.descriptor, defaults: m.defaults })
             .collect();
         if choices.is_empty() {
             anyhow::bail!("aucun modèle déclaré dans {config_path}");
         }
+
+        // Défauts de génération du 1ᵉʳ modèle (côté config) : valeurs initiales des contrôles.
+        let d0 = &choices[0].defaults;
+        let def_steps = d0.steps.unwrap_or(25) as f64;
+        let def_guidance = d0.guidance.unwrap_or(7.0);
+        let def_size = match (d0.width, d0.height) {
+            (Some(w), Some(h)) => format!("{w}×{h}"),
+            _ => "1024×1024".to_string(),
+        };
+        let def_negative = d0.negative_prompt.clone().unwrap_or_default();
 
         let state = Arc::new(StudioState::new(device.clone(), dtype));
         // Pré-charge le premier modèle déclaré (éjection stricte ensuite).
@@ -205,7 +216,7 @@ mod app {
                             Dropdown::new("t2i_size")
                                 .label("Résolution")
                                 .options(&["512×512", "768×768", "1024×1024"])
-                                .value("1024×1024"),
+                                .value(&def_size),
                         );
                         r.item(
                             Text::new("t2i_prompt")
@@ -215,8 +226,16 @@ mod app {
                         );
                     });
                     b.row(|r| {
-                        r.item(Slider::new("t2i_steps").label("Steps").min(1.0).max(50.0).step(1.0).value(25.0));
-                        r.item(Slider::new("t2i_guidance").label("Guidance").min(0.0).max(15.0).step(0.1).value(7.0));
+                        r.item(
+                            Text::new("t2i_negative")
+                                .label("Negative prompt")
+                                .placeholder("(vide — décrit ce qu'on ne veut pas)")
+                                .value(&def_negative),
+                        );
+                    });
+                    b.row(|r| {
+                        r.item(Slider::new("t2i_steps").label("Steps").min(1.0).max(50.0).step(1.0).value(def_steps));
+                        r.item(Slider::new("t2i_guidance").label("Guidance").min(0.0).max(15.0).step(0.1).value(def_guidance));
                         r.item(Slider::new("t2i_seed").label("Seed").min(0.0).max(999999.0).step(1.0).value(42.0));
                     });
                     b.item(Button::new("t2i_go").label("🎨 Générer").primary());
@@ -225,8 +244,32 @@ mod app {
                     b.item(Gallery::new("t2i_gallery").label("Historique").title("Galerie de la session"));
                 })
             })
+            .on_change("t2i_model", {
+                let lookup = choices.clone();
+                move |ctx| {
+                    // Applique les défauts déclarés dans le config JSON à la bascule de modèle.
+                    let label: String = ctx.get("t2i_model").unwrap_or_default();
+                    if let Some(c) = lookup.iter().find(|c| c.label == label) {
+                        let d = &c.defaults;
+                        if let Some(s) = d.steps {
+                            ctx.set("t2i_steps", s as f64);
+                        }
+                        if let Some(g) = d.guidance {
+                            ctx.set("t2i_guidance", g);
+                        }
+                        if let (Some(w), Some(h)) = (d.width, d.height) {
+                            ctx.set("t2i_size", format!("{w}×{h}"));
+                        }
+                        if let Some(n) = &d.negative_prompt {
+                            ctx.set("t2i_negative", n.clone());
+                        }
+                    }
+                    Ok(())
+                }
+            })
             .on_click("t2i_go", move |ctx| {
                 let prompt: String = ctx.get("t2i_prompt").unwrap_or_default();
+                let negative: String = ctx.get("t2i_negative").unwrap_or_default();
                 let steps: f64 = ctx.get("t2i_steps").unwrap_or(25.0);
                 let guidance: f64 = ctx.get("t2i_guidance").unwrap_or(7.0);
                 let seed: f64 = ctx.get("t2i_seed").unwrap_or(42.0);
@@ -248,7 +291,7 @@ mod app {
                 };
 
                 state.switch(&choices, &id).map_err(|e| format!("bascule modèle: {e}"))?;
-                run_t2i(&state, ctx, &prompt, steps as usize, guidance, width, height, seed as u64)
+                run_t2i(&state, ctx, &prompt, &negative, steps as usize, guidance, width, height, seed as u64)
                     .map_err(|e| format!("erreur: {e}"))?;
 
                 Ok(())
