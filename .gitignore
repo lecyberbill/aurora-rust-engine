@@ -6,6 +6,7 @@ Cargo.lock
 # Generated outputs & heavy images
 outputs/**/*.png
 outputs/*.png
+outputs/*.part
 
 # Model weights
 *.safetensors
