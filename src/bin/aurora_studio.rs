@@ -159,12 +159,18 @@ mod app {
         let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
         let dtype = if device.is_cuda() { DType::F16 } else { DType::F32 };
 
-        // Les 3 modèles vitrine. Env surcharge les chemins.
+        // Les 4 modèles vitrine. Env surcharge les chemins.
         let sdxl_ckpt = std::env::var("SDXL_CKPT").unwrap_or_else(|_| "G:\\models\\checkpoints\\Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors".into());
         let flux1_ckpt = std::env::var("FLUX1_CKPT").unwrap_or_else(|_| "G:\\models\\flux\\flux1-dev-fp8.safetensors".into());
         let klein_ckpt = std::env::var("KLEIN_CKPT").unwrap_or_else(|_| "G:\\models\\flux\\fluxKlein4BPro_v10.safetensors".into());
         let qwen_path = std::env::var("QWEN_CKPT").unwrap_or_else(|_| "G:\\models\\clip\\qwen_3_4b.safetensors".into());
         let flux_vae = std::env::var("FLUX_VAE").unwrap_or_else(|_| "G:\\models\\vae\\flux2-vae.safetensors".into());
+        // SD 3.5 : checkpoint + 3 encodeurs texte + VAE 16ch.
+        let sd35_ckpt = std::env::var("SD35_CKPT").unwrap_or_else(|_| "G:\\models\\SD3\\sd3.5_large.safetensors".into());
+        let sd35_clip_l = std::env::var("SD35_CLIP_L").unwrap_or_else(|_| "G:\\models\\clip\\clip_l.safetensors".into());
+        let sd35_clip_g = std::env::var("SD35_CLIP_G").unwrap_or_else(|_| "G:\\models\\clip\\clip_g.safetensors".into());
+        let sd35_t5 = std::env::var("SD35_T5").unwrap_or_else(|_| "G:\\models\\clip\\t5xxl_fp16.safetensors".into());
+        let sd35_vae = std::env::var("SD35_VAE").unwrap_or_else(|_| "G:\\models\\vae\\sd3_vae.safetensors".into());
 
         let choices: Vec<ModelChoice> = vec![
             ModelChoice {
@@ -186,6 +192,11 @@ mod app {
                     TextEncoderSpec::Qwen3 { path: std::path::PathBuf::from(&qwen_path) },
                     &flux_vae,
                 ),
+            },
+            ModelChoice {
+                id: "sd35",
+                label: "SD 3.5 Large (CLIP-L+G+T5)",
+                desc: ModelDescriptor::sd35("sd35", &sd35_ckpt, &sd35_clip_l, &sd35_clip_g, &sd35_t5, &sd35_vae),
             },
         ];
 
@@ -210,7 +221,7 @@ mod app {
                         r.item(
                             Dropdown::new("t2i_model")
                                 .label("Modèle")
-                                .options(&["SDXL (Juggernaut XL)", "Flux.1 Dev (embarqué VLM)", "Flux.2 Klein-4B (Qwen3)"])
+                                .options(&["SDXL (Juggernaut XL)", "Flux.1 Dev (embarqué VLM)", "Flux.2 Klein-4B (Qwen3)", "SD 3.5 Large (CLIP-L+G+T5)"])
                                 .value("SDXL (Juggernaut XL)"),
                         );
                         r.item(
@@ -249,6 +260,7 @@ mod app {
                 let id = match model_label.as_str() {
                     "Flux.1 Dev (embarqué VLM)" => "flux1",
                     "Flux.2 Klein-4B (Qwen3)" => "klein4b",
+                    "SD 3.5 Large (CLIP-L+G+T5)" => "sd35",
                     _ => "sdxl",
                 };
 
