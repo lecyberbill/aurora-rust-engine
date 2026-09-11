@@ -29,6 +29,17 @@ pub fn unpatchify(latents: &Tensor, height: usize, width: usize) -> Result<Tenso
     Ok(unpatchified)
 }
 
+/// SD3 / SD3.5 unpatchify. Unlike Flux (`[c, ph, pw]`), SD3's `proj_out` yields the fused 2×2×C
+/// channels as `[ph, pw, c]` (`einsum "nhwpqc->nchpwq"`). Using the Flux order produces a
+/// green/detailed checkerboard.
+pub fn sd3_unpatchify(latents: &Tensor, height: usize, width: usize) -> Result<Tensor> {
+    let h_patches = (height + 15) / 16;
+    let w_patches = (width + 15) / 16;
+    let reshaped = latents.reshape((1, h_patches, w_patches, 2, 2, 16))?;
+    let permuted = reshaped.permute((0, 5, 1, 3, 2, 4))?.contiguous()?;
+    permuted.reshape((1, 16, h_patches * 2, w_patches * 2))
+}
+
 /// Pure Rust Pipeline for Flux.1 (Schnell / Dev) Multimodal Diffusion Transformer
 pub struct FluxPipeline {
     pub checkpoint_path: PathBuf,
@@ -781,6 +792,9 @@ impl FluxPipeline {
             let reshaped = spatial_first.reshape((1, h_patches, w_patches, 32, 2, 2))?;
             let permuted = reshaped.permute((0, 3, 1, 4, 2, 5))?.contiguous()?; // [1, 32, H_p, 2, W_p, 2]
             permuted.reshape((1, 32, h_patches * 2, w_patches * 2))? // [1, 32, H_p*2, W_p*2]
+        } else if self.is_sd35() {
+            // SD3 / SD3.5 use the `[ph, pw, c]` fused-channel order (no BatchNorm in the SD3 VAE).
+            sd3_unpatchify(&latents, params.height, params.width)?
         } else {
             let normalized = if let Some(ref vae) = self.vae {
                 if let (Some(mean), Some(var)) = (vae.bn_mean(), vae.bn_var()) {
@@ -799,6 +813,13 @@ impl FluxPipeline {
                 latents.clone()
             };
             unpatchify(&normalized, params.height, params.width)?
+        };
+        // SD3 / SD3.5 VAE operates in a scaled + shifted latent space (scaling_factor 1.5305,
+        // shift_factor 0.0609). Undo both before decoding.
+        let unpatchified_latents = if self.is_sd35() {
+            unpatchified_latents.to_dtype(DType::F32)?.affine(1.0 / 1.5305, 0.0609)?.to_dtype(self.dtype)?
+        } else {
+            unpatchified_latents
         };
 
         // 3. Decode via Flux VAE if attached
@@ -1043,6 +1064,8 @@ impl FluxPipeline {
             let reshaped = spatial_first.reshape((1, h_patches, w_patches, 32, 2, 2))?;
             let permuted = reshaped.permute((0, 3, 1, 4, 2, 5))?.contiguous()?; // [1, 32, H_p, 2, W_p, 2]
             permuted.reshape((1, 32, h_patches * 2, w_patches * 2))? // [1, 32, H_p*2, W_p*2]
+        } else if self.is_sd35() {
+            sd3_unpatchify(&latents, height, width)?
         } else {
             unpatchify(&latents, height, width)?
         };
@@ -1288,6 +1311,8 @@ impl FluxPipeline {
             let reshaped = spatial_first.reshape((1, h_patches, w_patches, 32, 2, 2))?;
             let permuted = reshaped.permute((0, 3, 1, 4, 2, 5))?.contiguous()?; // [1, 32, H_p, 2, W_p, 2]
             permuted.reshape((1, 32, h_patches * 2, w_patches * 2))? // [1, 32, H_p*2, W_p*2]
+        } else if self.is_sd35() {
+            sd3_unpatchify(&latents, height, width)?
         } else {
             unpatchify(&latents, height, width)?
         };
