@@ -204,5 +204,31 @@ let img = image_model.generate_t2i(DiffusionParams { prompt: "a fox".into(), ..D
 - [ ] `AutoTokenizer::from_pretrained` + `encode/decode` round-trip.
 - [ ] `build --release` sans warning ; `cargo test --lib` : 14/14 verts.
 - [ ] Aucune modification de `src/text/*` ni `src/pipelines/*` (on wrappe).
-```
-```
+
+## 10. État actuel (2026-09-11) — familles supportées
+
+`AutoModel` détecte et construit aujourd'hui :
+
+| Famille | Détection (`detect_architecture`) | Construction |
+|---|---|---|
+| Flux.1 (Dev/Schnell) | `double_blocks.*` + guidance/compte | `FluxPipeline` (T5 embarqué) |
+| Flux.2 (Klein-4B/9B, Dev) | `double_stream_modulation` + comptes | `FluxPipeline` + `TextEncoderSpec::{Qwen3,Mistral3}` + VAE 32ch |
+| SDXL | `conditioner.embedders` (avant les clés texte) | `StableDiffusionXLPipeline` (encodeurs embarqués) |
+| SD1.5 | `model.diffusion_model.input_blocks.*` | `StableDiffusionPipeline` |
+| **SD3.5 Large/Medium** | `joint_blocks.*` + compte (>30 = Large) | `FluxPipeline` + `TextEncoderSpec::Sd35` + VAE 16ch |
+
+**SD3.5** est le seul modèle à charger **trois** encodeurs texte externes. On les expose via
+`ModelDescriptor::sd35(id, checkpoint, clip_l, clip_g, t5, vae)` puis
+`AutoModel::from_descriptor(&desc, device, dtype)`. `from_descriptor` attache CLIP-L, CLIP-G, T5-XXL
+(T5 en **F32**, CLIP en F16, sur CPU) et le VAE 16-ch au `FluxPipeline`, qui détecte l'architecture
+`Sd35Large`/`Sd35Medium` depuis le checkpoint. Les tokenizers (`clip_tokenizer.json`,
+`openclip_tokenizer.json`, `t5xxl_tokenizer.json`) sont résolus relativement au cwd, comme pour
+Qwen/Mistral.
+
+Démo : `test_sd35_auto` (`CKPT`/`CLIP_L`/`CLIP_G`/`T5`/`VAE` surchargables). Validé :
+`outputs/sd35_auto_model.png` (loup net) via la façade, sur SD3.5 Turbo et non-turbo.
+
+Note : `AutoModel::from_local`/`from_pretrained` détectent bien SD3.5 et chargent le transformer, mais
+**sans** encodeurs/VAE (ils n'ont pas les fichiers externes) ; la génération réclame alors la voie
+`from_descriptor`. C'est le seul cas où le descripteur explicite est obligatoire.
+

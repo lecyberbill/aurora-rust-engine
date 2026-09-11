@@ -14,6 +14,8 @@ pub enum TextEncoderSpec {
     Mistral3 { dir: PathBuf },
     /// T5-XXL (rarely external — Flux.1 embeds it) from a safetensors file.
     T5 { path: PathBuf },
+    /// SD 3.5 uses **three** text encoders at once: CLIP-L, CLIP-G (OpenCLIP bigG) and T5-XXL.
+    Sd35 { clip_l: PathBuf, clip_g: PathBuf, t5: PathBuf },
 }
 
 /// Explicit, per-model wiring: the DiT/UNet checkpoint plus the external VLM + VAE it needs
@@ -49,6 +51,28 @@ impl ModelDescriptor {
             checkpoint: checkpoint.into(),
             family: None,
             text_encoder: Some(text_encoder),
+            vae: Some(vae.into()),
+        }
+    }
+
+    /// An SD 3.5 model: attach CLIP-L + CLIP-G + T5-XXL and the 16-ch SD3 VAE.
+    pub fn sd35(
+        id: impl Into<String>,
+        checkpoint: impl Into<PathBuf>,
+        clip_l: impl Into<PathBuf>,
+        clip_g: impl Into<PathBuf>,
+        t5: impl Into<PathBuf>,
+        vae: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            checkpoint: checkpoint.into(),
+            family: None,
+            text_encoder: Some(TextEncoderSpec::Sd35 {
+                clip_l: clip_l.into(),
+                clip_g: clip_g.into(),
+                t5: t5.into(),
+            }),
             vae: Some(vae.into()),
         }
     }

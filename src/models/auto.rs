@@ -165,6 +165,11 @@ impl AutoModel {
                             // Flux.1 embeds T5-XXL and wires it internally, so an external T5 is
                             // intentionally not wired here. Keep the variant for completeness.
                         }
+                        super::descriptor::TextEncoderSpec::Sd35 { .. } => {
+                            return Err(LuminaError::Config(
+                                "TextEncoderSpec::Sd35 used with a Flux model".into(),
+                            ));
+                        }
                     }
                 }
 
@@ -188,6 +193,51 @@ impl AutoModel {
             Architecture::Sdxl => {
                 let pipeline = crate::pipelines::StableDiffusionXLPipeline::from_single_file(&desc.checkpoint, device.clone())?;
                 Arc::new(Mutex::new(DiffusionModel::sdxl(desc.id.clone(), pipeline)))
+            }
+            Architecture::Sd35Large | Architecture::Sd35Medium => {
+                let mut pipeline = crate::pipelines::FluxPipeline::from_single_file_streaming(&desc.checkpoint, device.clone())?;
+                pipeline.enable_flash_attn();
+
+                // SD 3.5 needs three external text encoders (they are not embedded in the checkpoint).
+                match &desc.text_encoder {
+                    Some(super::descriptor::TextEncoderSpec::Sd35 { clip_l, clip_g, t5 }) => {
+                        // T5-XXL must run in F32 (F16 overflows to NaN); CLIP-L/G in F16 on CPU.
+                        let t5_enc = crate::text::T5TextEncoder::new(
+                            vb_from_file(t5, &Device::Cpu, DType::F32)?,
+                            Some(Path::new("t5xxl_tokenizer.json")),
+                        )?;
+                        let mut clip_l_enc = crate::text::ClipTextEncoder::new_sd15(
+                            vb_from_file(clip_l, &Device::Cpu, DType::F16)?,
+                        )?;
+                        let _ = clip_l_enc.load_tokenizer("clip_tokenizer.json");
+                        let mut clip_g_enc = crate::text::OpenClipTextEncoder::new_sdxl(
+                            vb_from_file(clip_g, &Device::Cpu, DType::F16)?,
+                        )?;
+                        clip_g_enc.load_tokenizer("openclip_tokenizer.json")?;
+                        pipeline.set_sd35_encoders(t5_enc, clip_l_enc);
+                        pipeline.set_openclip_g(clip_g_enc);
+                    }
+                    other => {
+                        return Err(LuminaError::Config(format!(
+                            "SD3.5 needs TextEncoderSpec::Sd35 {{ clip_l, clip_g, t5 }} (got {})",
+                            if other.is_some() { "another spec" } else { "None" }
+                        )));
+                    }
+                }
+
+                // 16-channel SD3 VAE.
+                if let Some(vae_path) = &desc.vae {
+                    let vae_archive = if vae_path.is_dir() {
+                        SafeTensorsArchive::open_shards_dir(vae_path)?
+                    } else {
+                        SafeTensorsArchive::open(vae_path)?
+                    };
+                    let vae_router = crate::weights::WeightRouter::new(&vae_archive, device.clone(), dtype);
+                    let vae_vb = vae_router.vae_var_builder()?;
+                    pipeline.set_vae(crate::diffusion::vae_flux::FluxVaeDecoder::new(vae_vb)?);
+                }
+
+                Arc::new(Mutex::new(DiffusionModel::flux(desc.id.clone(), arch.slug(), pipeline)))
             }
             Architecture::Sd15 => {
                 let pipeline = <crate::pipelines::StableDiffusionPipeline as crate::traits::TextToImagePipeline>::from_safetensors(&desc.checkpoint, &device)?;
@@ -247,18 +297,20 @@ fn build_diffusion(
             Ok(DiffusionModel::flux(id, arch.slug(), pipeline))
         }
         Architecture::Sd35Large | Architecture::Sd35Medium => {
-            // TODO(sd35): needs the MMDiT forward extensions (fixed sincos pos_embed centre-crop,
-            // Conv2d patch embed -> Linear, LayerNorm QK-norm) before it can generate. The canonical
-            // key adapter, config and detection are already in place.
-            Err(LuminaError::UnsupportedOp(format!("SD3.5 forward extensions pending ({id})")))
+            // The transformer loads and detects; text encoders + VAE are attached by the caller via
+            // `from_descriptor` (see `ModelDescriptor::sd35`). Generation without them errors clearly
+            // in `encode_sd35`.
+            let mut pipeline = crate::pipelines::FluxPipeline::from_single_file_streaming(weights, device.clone())?;
+            pipeline.enable_flash_attn();
+            Ok(DiffusionModel::flux(id, arch.slug(), pipeline))
         }
-        Architecture::Sdxl => {
-            let pipeline = crate::pipelines::StableDiffusionXLPipeline::from_single_file(weights, device.clone())?;
-            Ok(DiffusionModel::sdxl(id, pipeline))
-        }
-        Architecture::Sd15 => {
-            let pipeline = <crate::pipelines::StableDiffusionPipeline as crate::traits::TextToImagePipeline>::from_safetensors(weights, device)?;
-            Ok(DiffusionModel::sd15(id, pipeline))
+            Architecture::Sdxl => {
+                let pipeline = crate::pipelines::StableDiffusionXLPipeline::from_single_file(weights, device.clone())?;
+                Ok(DiffusionModel::sdxl(id, pipeline))
+            }
+            Architecture::Sd15 => {
+                let pipeline = <crate::pipelines::StableDiffusionPipeline as crate::traits::TextToImagePipeline>::from_safetensors(weights, device)?;
+                Ok(DiffusionModel::sd15(id, pipeline))
         }
         _ => Err(LuminaError::UnsupportedOp(format!("diffusion build for {}", arch.slug()))),
     }
@@ -308,6 +360,21 @@ fn build_text(
         }
         _ => Err(LuminaError::UnsupportedOp(format!("text build for {}", arch.slug()))),
     }
+}
+
+/// Build a `VarBuilder` exposing a standalone safetensors file's keys verbatim (no remapping).
+/// Used to attach the SD3.5 text encoders (CLIP-L / CLIP-G / T5-XXL are separate files).
+fn vb_from_file(path: &Path, device: &Device, dtype: DType) -> Result<candle_nn::VarBuilder<'static>> {
+    let archive = if path.is_dir() {
+        SafeTensorsArchive::open_shards_dir(path)?
+    } else {
+        SafeTensorsArchive::open(path)?
+    };
+    let mut map = std::collections::HashMap::new();
+    for key in archive.tensor_names() {
+        map.insert(key.clone(), archive.get_tensor(&key, device, dtype)?);
+    }
+    Ok(candle_nn::VarBuilder::from_tensors(map, dtype, device))
 }
 
 /// Read `model_type` from a repo's `config.json` without loading weights.
