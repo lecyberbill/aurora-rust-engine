@@ -203,17 +203,31 @@ grise.** Diagnostic (via FLUX_TRACE) :
   AdaLN-Zero devrait donner des gates ≈ 0).
 - Le flux texte explose alors (bloc 0 : txt 1.6 → 35k → clamp 50000) puis NaN → latents constants → gris.
 
-`linear.forward == matmul manuel` (pas un bug de candle). Le poids adaLN chargé est correct (0.016).
-**Donc `temb` (ou son échelle) ne correspond pas à ce que SD3.5 attend.**
+**CONSTAT CORRIGÉ (2026-09-11) — la modulation et le `temb` sont CORRECTS :**
+Une référence PyTorch (`C:\...\Temp\opencode\sd35_ref.py`) recalculant `temb` et la modulation avec les
+poids du checkpoint et nos `sigma`/`pooled` dumpés donne **exactement** les mêmes valeurs
+(`proj_rms 69.309` ref vs `69.305` nous ; `max|Δtemb|=0.02`). Donc ni le conditionnement ni la
+modulation ne sont fautifs : **à σ=1 le modèle produit légitimement `scale≈102, gate≈30`.**
+
+Le vrai problème est ailleurs — **runaway numérique dans le forward du bloc** :
+- Bloc 0 (F32) : `q` (post LayerNorm QK) rms 1.18 ✓, `k` 1.10 ✓, **`v` rms 226** (V n'est pas
+  normalisé — normal), `attn_out` 134, `gate1` 42, `img_attn_proj` 140 → **`img_after_attn = inf`**.
+- Le flux `img` devient NaN/inf dès le bloc 0 puis se propage.
+
+L'attention (scale `1/√head_dim` OK, F32) et la QK-norm (LayerNorm, sortie rms ~1.2) sont correctes.
+À σ=1, `img_normed` rms ~127 et `txt_normed` ~153 sont grands mais **attendus** (le modèle SD3.5 a des
+modulations fortes au premier pas) ; diffusers ne diverge pas pour autant. Il reste donc une
+divergence bloc-à-bloc avec la référence diffusers.
 
 Pistes (prochaine session) :
-1. Vérifier l'ordre `cos/sin` et `downscale_freq_shift` du `TimestepEmbedder` vs `diffusers.Timesteps(256,
-   flip_sin_to_cos=True, downscale_freq_shift=0)`.
-2. Vérifier que `temb` ne doit pas être centré/normalisé (peut-être que l'`out_layer` de `vector_in`
-   ou `time_in` charge un mauvais tenseur, gonflant la moyenne).
-3. Comparer `silu(temb)` et la sortie `adaLN_modulation` à une référence diffusers (dump des tenseurs).
-4. Confirmer que `guidance_embed=false` (pas de guidance vector) et que le `swap_scale_shift` du final
-   layer est correct.
+1. **Porter le bloc 0 SD3.5 (`JointTransformerBlock`) en PyTorch** sur les mêmes entrées dumpées
+   (img, context) et comparer `attn_out`, `img_after_attn`, `mlp_out` → localiser l'op qui diverge
+   (ordre des chunks de modulation, placement du gate, `to_out`/`to_add_out`, `image`/`text` split).
+2. Vérifier le **clamp** : le flux txt est clampé à ±50000 mais **pas le flux img** → laisser `img`
+   dériver à l'inf. Diffusers ne clampe pas mais reste stable ; notre img divergeavant le clamp.
+3. Vérifier l'ordre **`[txt, img]` vs `[img, txt]`** dans la concaténation d'attention (sans effet sur
+   l'attention pleine, mais critique si l'un des deux streams est traité différemment).
+4. Retirer `FORCE_F32`/`FLUX_DUMP` (debug) une fois résolu.
 5. Rappel : SD3.5 Large **Turbo** → 4 steps, guidance basse.
 
 ## 10. Hors-scope (plus tard)

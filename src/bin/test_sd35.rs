@@ -23,7 +23,7 @@ fn vb_from(path: &str, device: &Device, dtype: DType) -> Result<VarBuilder<'stat
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-    let dtype = if device.is_cuda() { DType::F16 } else { DType::F32 };
+    let dtype = if std::env::var("FORCE_F32").is_ok() { DType::F32 } else if device.is_cuda() { DType::F16 } else { DType::F32 };
 
     let ckpt = std::env::var("CKPT").unwrap_or_else(|_| "G:\\models\\SD3\\stableDiffusion35Fp8_v35LargeTurbo.safetensors".into());
     let clip_l_path = "G:\\models\\clip\\clip_l.safetensors";
