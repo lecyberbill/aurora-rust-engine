@@ -1,0 +1,37 @@
+{
+  "models": [
+    {
+      "id": "sdxl",
+      "label": "SDXL (Juggernaut XL)",
+      "family": "sdxl",
+      "checkpoint": "G:/models/checkpoints/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"
+    },
+    {
+      "id": "flux1",
+      "label": "Flux.1 Dev (embarqué VLM)",
+      "family": "flux1",
+      "checkpoint": "G:/models/flux/flux1-dev-fp8.safetensors"
+    },
+    {
+      "id": "klein4b",
+      "label": "Flux.2 Klein-4B (Qwen3)",
+      "family": "flux2-klein-4b",
+      "checkpoint": "G:/models/flux/fluxKlein4BPro_v10.safetensors",
+      "text_encoder": { "kind": "qwen3", "path": "G:/models/clip/qwen_3_4b.safetensors" },
+      "vae": "G:/models/vae/flux2-vae.safetensors"
+    },
+    {
+      "id": "sd35",
+      "label": "SD 3.5 Large (CLIP-L+G+T5)",
+      "family": "sd35",
+      "checkpoint": "G:/models/SD3/sd3.5_large.safetensors",
+      "text_encoder": {
+        "kind": "sd35",
+        "clip_l": "G:/models/clip/clip_l.safetensors",
+        "clip_g": "G:/models/clip/clip_g.safetensors",
+        "t5": "G:/models/clip/t5xxl_fp16.safetensors"
+      },
+      "vae": "G:/models/vae/sd3_vae.safetensors"
+    }
+  ]
+}

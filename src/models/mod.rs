@@ -18,7 +18,9 @@ pub mod text;
 pub use auto::{AutoModel, BoxedModel, ModelLoadConfig};
 pub use common::{downcast_model, AnyModel, EncodeModel, GenerationModel, ImageGenerationModel, ModelKind};
 pub use config::{detect_architecture, Architecture};
-pub use descriptor::{ModelDescriptor, TextEncoderSpec};
+pub use descriptor::{
+    ModelDescriptor, ModelDescriptorEntry, ModelDescriptorFile, TextEncoderConfig, TextEncoderSpec,
+};
 pub use image::DiffusionModel;
 pub use registry::ModelRegistry;
 pub use text::TextModel;

@@ -1,6 +1,8 @@
 // [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Model descriptor — explicit checkpoint + VLM + VAE wiring per model family
 
 use std::path::PathBuf;
+use serde::Deserialize;
+use crate::error::{LuminaError, Result};
 use crate::models::config::Architecture;
 
 /// Which text encoder to attach to a diffusion model (for families like Flux.2-Klein/Dev that do NOT
@@ -75,5 +77,145 @@ impl ModelDescriptor {
             }),
             vae: Some(vae.into()),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON model list ("config.json") — a declarative, reusable alternative to
+// hard-coding checkpoint paths in an application (studio, server, CLI).
+// ---------------------------------------------------------------------------
+
+/// A JSON list of models, e.g.:
+///
+/// ```json
+/// {
+///   "models": [
+///     { "id": "sdxl", "label": "SDXL", "family": "sdxl",
+///       "checkpoint": "G:/models/checkpoints/sdxl.safetensors" },
+///     { "id": "sd35", "label": "SD 3.5 Large", "family": "sd35",
+///       "checkpoint": "G:/models/SD3/sd3.5_large.safetensors",
+///       "text_encoder": { "kind": "sd35", "clip_l": "…", "clip_g": "…", "t5": "…" },
+///       "vae": "G:/models/vae/sd3_vae.safetensors" }
+///   ]
+/// }
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelDescriptorFile {
+    pub models: Vec<ModelDescriptorEntry>,
+}
+
+/// One entry in a [`ModelDescriptorFile`]. `label` is presentation-only.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelDescriptorEntry {
+    pub id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Architecture hint slug (`"sdxl"`, `"sd35"`, `"flux1"`, `"flux2-klein-4b"`, `"sd15"`, ...).
+    /// `None` (or absent) means the family is sniffed from the checkpoint.
+    #[serde(default)]
+    pub family: Option<String>,
+    pub checkpoint: PathBuf,
+    #[serde(default)]
+    pub text_encoder: Option<TextEncoderConfig>,
+    #[serde(default)]
+    pub vae: Option<PathBuf>,
+}
+
+/// Serde mirror of [`TextEncoderSpec`], discriminated by a `"kind"` field.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TextEncoderConfig {
+    Qwen3 { path: PathBuf },
+    Mistral3 { dir: PathBuf },
+    T5 { path: PathBuf },
+    Sd35 { clip_l: PathBuf, clip_g: PathBuf, t5: PathBuf },
+}
+
+impl TextEncoderConfig {
+    pub fn to_spec(&self) -> TextEncoderSpec {
+        match self {
+            Self::Qwen3 { path } => TextEncoderSpec::Qwen3 { path: path.clone() },
+            Self::Mistral3 { dir } => TextEncoderSpec::Mistral3 { dir: dir.clone() },
+            Self::T5 { path } => TextEncoderSpec::T5 { path: path.clone() },
+            Self::Sd35 { clip_l, clip_g, t5 } => TextEncoderSpec::Sd35 {
+                clip_l: clip_l.clone(),
+                clip_g: clip_g.clone(),
+                t5: t5.clone(),
+            },
+        }
+    }
+}
+
+impl ModelDescriptorEntry {
+    /// Build a [`ModelDescriptor`] from this entry, resolving the optional family hint slug.
+    pub fn to_descriptor(&self) -> Result<ModelDescriptor> {
+        let family = match &self.family {
+            Some(s) => Some(crate::models::config::detect_from_model_type(Some(s))?),
+            None => None,
+        };
+        Ok(ModelDescriptor {
+            id: self.id.clone(),
+            checkpoint: self.checkpoint.clone(),
+            family,
+            text_encoder: self.text_encoder.as_ref().map(TextEncoderConfig::to_spec),
+            vae: self.vae.clone(),
+        })
+    }
+}
+
+impl ModelDescriptorFile {
+    /// Parse a models `config.json` string.
+    pub fn from_json(json: &str) -> Result<Self> {
+        serde_json::from_str(json).map_err(|e| LuminaError::Config(format!("models config.json: {e}")))
+    }
+
+    /// Load a models `config.json` from disk.
+    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| LuminaError::Config(format!("cannot read {}: {e}", path.display())))?;
+        Self::from_json(&text)
+    }
+
+    /// Resolve every entry to `(label, ModelDescriptor)` (label falls back to the id).
+    pub fn descriptors(&self) -> Result<Vec<(String, ModelDescriptor)>> {
+        self.models
+            .iter()
+            .map(|e| Ok((e.label.clone().unwrap_or_else(|| e.id.clone()), e.to_descriptor()?)))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_model_list_config() {
+        let json = r#"{"models":[
+            {"id":"sdxl","label":"SDXL","family":"sdxl","checkpoint":"a.safetensors"},
+            {"id":"sd35","label":"SD 3.5","family":"sd35","checkpoint":"b.safetensors",
+             "text_encoder":{"kind":"sd35","clip_l":"l","clip_g":"g","t5":"t"},"vae":"v"}
+        ]}"#;
+        let file = ModelDescriptorFile::from_json(json).unwrap();
+        let ds = file.descriptors().unwrap();
+        assert_eq!(ds.len(), 2);
+        assert_eq!(ds[0].0, "SDXL");
+        assert_eq!(ds[0].1.family, Some(Architecture::Sdxl));
+        match &ds[1].1.text_encoder {
+            Some(TextEncoderSpec::Sd35 { clip_l, t5, .. }) => {
+                assert_eq!(clip_l.to_string_lossy(), "l");
+                assert_eq!(t5.to_string_lossy(), "t");
+            }
+            other => panic!("expected Sd35 spec, got {other:?}"),
+        }
+        assert_eq!(ds[1].1.vae.as_deref(), Some(std::path::Path::new("v")));
+    }
+
+    #[test]
+    fn unknown_family_slug_is_error() {
+        let json = r#"{"models":[{"id":"x","family":"gpt42","checkpoint":"x.safetensors"}]}"#;
+        let file = ModelDescriptorFile::from_json(json).unwrap();
+        assert!(file.descriptors().is_err());
     }
 }

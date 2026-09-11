@@ -27,15 +27,15 @@ mod app {
 
     use aurora_rust_engine::models::{
         downcast_model, AnyModel, AutoModel, DiffusionModel, ImageGenerationModel, ModelDescriptor,
-        TextEncoderSpec,
+        ModelDescriptorFile,
     };
     use aurora_rust_engine::traits::DiffusionParams;
     use aurora_rust_engine::FastLatentPreviewer;
 
     /// Un modèle déclaré dans la vitrine (id + descripteur pour le chargement).
     struct ModelChoice {
-        id: &'static str,
-        label: &'static str,
+        id: String,
+        label: String,
         desc: ModelDescriptor,
     }
 
@@ -159,53 +159,30 @@ mod app {
         let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
         let dtype = if device.is_cuda() { DType::F16 } else { DType::F32 };
 
-        // Les 4 modèles vitrine. Env surcharge les chemins.
-        let sdxl_ckpt = std::env::var("SDXL_CKPT").unwrap_or_else(|_| "G:\\models\\checkpoints\\Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors".into());
-        let flux1_ckpt = std::env::var("FLUX1_CKPT").unwrap_or_else(|_| "G:\\models\\flux\\flux1-dev-fp8.safetensors".into());
-        let klein_ckpt = std::env::var("KLEIN_CKPT").unwrap_or_else(|_| "G:\\models\\flux\\fluxKlein4BPro_v10.safetensors".into());
-        let qwen_path = std::env::var("QWEN_CKPT").unwrap_or_else(|_| "G:\\models\\clip\\qwen_3_4b.safetensors".into());
-        let flux_vae = std::env::var("FLUX_VAE").unwrap_or_else(|_| "G:\\models\\vae\\flux2-vae.safetensors".into());
-        // SD 3.5 : checkpoint + 3 encodeurs texte + VAE 16ch.
-        let sd35_ckpt = std::env::var("SD35_CKPT").unwrap_or_else(|_| "G:\\models\\SD3\\sd3.5_large.safetensors".into());
-        let sd35_clip_l = std::env::var("SD35_CLIP_L").unwrap_or_else(|_| "G:\\models\\clip\\clip_l.safetensors".into());
-        let sd35_clip_g = std::env::var("SD35_CLIP_G").unwrap_or_else(|_| "G:\\models\\clip\\clip_g.safetensors".into());
-        let sd35_t5 = std::env::var("SD35_T5").unwrap_or_else(|_| "G:\\models\\clip\\t5xxl_fp16.safetensors".into());
-        let sd35_vae = std::env::var("SD35_VAE").unwrap_or_else(|_| "G:\\models\\vae\\sd3_vae.safetensors".into());
-
-        let choices: Vec<ModelChoice> = vec![
-            ModelChoice {
-                id: "sdxl",
-                label: "SDXL (Juggernaut XL)",
-                desc: ModelDescriptor::standalone("sdxl", &sdxl_ckpt),
-            },
-            ModelChoice {
-                id: "flux1",
-                label: "Flux.1 Dev (embarqué VLM)",
-                desc: ModelDescriptor::standalone("flux1", &flux1_ckpt),
-            },
-            ModelChoice {
-                id: "klein4b",
-                label: "Flux.2 Klein-4B (Qwen3)",
-                desc: ModelDescriptor::flux2(
-                    "klein4b",
-                    &klein_ckpt,
-                    TextEncoderSpec::Qwen3 { path: std::path::PathBuf::from(&qwen_path) },
-                    &flux_vae,
-                ),
-            },
-            ModelChoice {
-                id: "sd35",
-                label: "SD 3.5 Large (CLIP-L+G+T5)",
-                desc: ModelDescriptor::sd35("sd35", &sd35_ckpt, &sd35_clip_l, &sd35_clip_g, &sd35_t5, &sd35_vae),
-            },
-        ];
+        // Les modèles sont déclarés dans un fichier JSON (aucun chemin en dur ici) : chemin via
+        // `STUDIO_CONFIG`, défaut `aurora_studio.json` dans le répertoire courant.
+        let config_path = std::env::var("STUDIO_CONFIG").unwrap_or_else(|_| "aurora_studio.json".into());
+        println!("📄 Chargement des modèles : {config_path}");
+        let cfg = ModelDescriptorFile::load(&config_path)
+            .map_err(|e| anyhow::anyhow!("{e} (voir aurora_studio.json à la racine du repo)"))?;
+        let choices: Vec<ModelChoice> = cfg
+            .descriptors()?
+            .into_iter()
+            .map(|(label, desc)| {
+                let id = desc.id.clone();
+                ModelChoice { id, label, desc }
+            })
+            .collect();
+        if choices.is_empty() {
+            anyhow::bail!("aucun modèle déclaré dans {config_path}");
+        }
 
         let state = Arc::new(StudioState::new(device.clone(), dtype));
-        // Pré-charge le défaut (SDXL).
+        // Pré-charge le premier modèle déclaré (éjection stricte ensuite).
         let st0 = state.clone();
-        st0.switch(&choices, "sdxl")?;
+        st0.switch(&choices, &choices[0].id)?;
 
-        println!("✅ Aurora Studio : SDXL prêt. Modèles disponibles à la bascule (éjection stricte).");
+        println!("✅ Aurora Studio : '{}' prêt. Modèles disponibles à la bascule (éjection stricte).", choices[0].label);
         for c in &choices {
             println!("   • {} — {}", c.id, c.label);
         }
@@ -215,14 +192,14 @@ mod app {
             .theme(Theme::dark().primary("#6366f1").radius("12px"))
             .tabs(|t| {
                 t.tab("🎨 Text-to-Image", |b| {
+                    let model_labels: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
+                    let default_label = choices.first().map(|c| c.label.clone()).unwrap_or_default();
                     b.row(|r| {
-                        let opts: Vec<&str> = choices.iter().map(|c| c.label).collect();
-                        let _ = &opts;
                         r.item(
                             Dropdown::new("t2i_model")
                                 .label("Modèle")
-                                .options(&["SDXL (Juggernaut XL)", "Flux.1 Dev (embarqué VLM)", "Flux.2 Klein-4B (Qwen3)", "SD 3.5 Large (CLIP-L+G+T5)"])
-                                .value("SDXL (Juggernaut XL)"),
+                                .options(&model_labels)
+                                .value(&default_label),
                         );
                         r.item(
                             Dropdown::new("t2i_size")
@@ -253,16 +230,15 @@ mod app {
                 let steps: f64 = ctx.get("t2i_steps").unwrap_or(25.0);
                 let guidance: f64 = ctx.get("t2i_guidance").unwrap_or(7.0);
                 let seed: f64 = ctx.get("t2i_seed").unwrap_or(42.0);
-                let model_label: String = ctx.get("t2i_model").unwrap_or_else(|_| "SDXL (Juggernaut XL)".to_string());
+                let model_label: String = ctx.get("t2i_model").unwrap_or_else(|_| choices[0].label.clone());
                 let size_label: String = ctx.get("t2i_size").unwrap_or_else(|_| "1024×1024".to_string());
 
-                // Mapping label -> id.
-                let id = match model_label.as_str() {
-                    "Flux.1 Dev (embarqué VLM)" => "flux1",
-                    "Flux.2 Klein-4B (Qwen3)" => "klein4b",
-                    "SD 3.5 Large (CLIP-L+G+T5)" => "sd35",
-                    _ => "sdxl",
-                };
+                // Mapping label -> id depuis la config (aucun label en dur).
+                let id = choices
+                    .iter()
+                    .find(|c| c.label == model_label)
+                    .map(|c| c.id.clone())
+                    .unwrap_or_else(|| choices[0].id.clone());
 
                 // Mapping résolution label -> pixels.
                 let (width, height) = match size_label.as_str() {
@@ -271,7 +247,7 @@ mod app {
                     _ => (1024, 1024),
                 };
 
-                state.switch(&choices, id).map_err(|e| format!("bascule modèle: {e}"))?;
+                state.switch(&choices, &id).map_err(|e| format!("bascule modèle: {e}"))?;
                 run_t2i(&state, ctx, &prompt, steps as usize, guidance, width, height, seed as u64)
                     .map_err(|e| format!("erreur: {e}"))?;
 
