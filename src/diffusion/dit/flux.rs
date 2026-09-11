@@ -20,6 +20,10 @@ pub struct FluxConfig {
     /// RoPE axis widths. Sum must equal `hidden_size / num_heads` (128 typically).
     /// Flux.2-Klein-4B/Dev use 4 axes `[32,32,32,32]`; Flux.2-Klein-9B uses 3 axes `[16,56,56]`.
     pub axes_dim: Vec<usize>,
+    /// Multiplier applied to the incoming timestep before the sinusoidal time embedding. The pipeline
+    /// feeds the FlowMatch sigma in `[0, 1]`; BFL/Flux and diffusers SD3/SD3.5 both expect the raw
+    /// `0..1000` timestep in `time_text_embed`, so this is `1000.0` for every family.
+    pub timestep_scale: f64,
 }
 
 impl FluxConfig {
@@ -36,6 +40,7 @@ impl FluxConfig {
             theta: 10_000.0,
             guidance_embed: false,
             axes_dim: vec![16, 56, 56],
+            timestep_scale: 1000.0,
         }
     }
 
@@ -52,6 +57,7 @@ impl FluxConfig {
             theta: 10_000.0,
             guidance_embed: true,
             axes_dim: vec![16, 56, 56],
+            timestep_scale: 1000.0,
         }
     }
 
@@ -68,6 +74,7 @@ impl FluxConfig {
             theta: 2000.0,
             guidance_embed: false,
             axes_dim: vec![32, 32, 32, 32], // Flux.2-Klein-4B (4 axes, validated)
+            timestep_scale: 1000.0,
         }
     }
 
@@ -84,6 +91,7 @@ impl FluxConfig {
             theta: 2000.0,
             guidance_embed: false,
             axes_dim: vec![32, 32, 32, 32], // Flux.2-Klein-9B (4 axes; 3D [16,56,56] produced a flat grey render)
+            timestep_scale: 1000.0,
         }
     }
 
@@ -100,6 +108,7 @@ impl FluxConfig {
             theta: 2000.0,
             guidance_embed: true,
             axes_dim: vec![32, 32, 32, 32], // Flux.2-Dev (4 axes, validated by recognisable fox render)
+            timestep_scale: 1000.0,
         }
     }
 
@@ -117,6 +126,7 @@ impl FluxConfig {
             theta: 10_000.0,
             guidance_embed: false,
             axes_dim: vec![16, 56, 56], // SD3.5 (3 axes)
+            timestep_scale: 1000.0,     // diffusers SD3 passes the raw 0..1000 timestep to `time_text_embed`
         }
     }
 
@@ -133,6 +143,7 @@ impl FluxConfig {
             theta: 10_000.0,
             guidance_embed: false,
             axes_dim: vec![16, 56, 56], // SD3.5 (3 axes)
+            timestep_scale: 1000.0,     // diffusers SD3 passes the raw 0..1000 timestep to `time_text_embed`
         }
     }
 }
@@ -166,7 +177,7 @@ impl FluxTransformer {
         let img_in = linear(config.in_channels, config.hidden_size, vb.pp("img_in"))?;
         let txt_in = linear(4096, config.hidden_size, vb.pp("txt_in"))?; // 4096 dim from T5-XXL
 
-        let time_embedder = TimestepEmbedder::new(config.hidden_size, 256, vb.pp("time_in"))?;
+        let time_embedder = TimestepEmbedder::new_with_factor(config.hidden_size, 256, config.timestep_scale, vb.pp("time_in"))?;
         // Pooled-projection input width varies by family: Flux = 768 (CLIP-L pooled), SD3.5 = 2048
         // (CLIP-L+G pooled). Probe the checkpoint's actual width.
         let vector_in = {
@@ -247,7 +258,7 @@ impl FluxTransformer {
             .or_else(|_| linear_layer(12288, config.hidden_size, vb.pp("txt_in")))
             .or_else(|_| linear_layer(15360, config.hidden_size, vb.pp("txt_in")))?;
 
-        let time_embedder = TimestepEmbedder::new(config.hidden_size, 256, vb.pp("time_in"))?;
+        let time_embedder = TimestepEmbedder::new_with_factor(config.hidden_size, 256, config.timestep_scale, vb.pp("time_in"))?;
         let vector_in = {
             let mut found = None;
             for in_dim in [768usize, 2048, 1280] {
@@ -293,6 +304,13 @@ impl FluxTransformer {
         guidance: Option<&Tensor>,
         streamer: Option<&crate::diffusion::dit::streamer::SequentialBlockStreamer>,
     ) -> Result<Tensor> {
+        if let Ok(dir) = std::env::var("FLUX_MODEL_DUMP") {
+            let f = |t: &Tensor| -> String { let v=t.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap(); format!("{:?}", v) };
+            let _ = std::fs::write(format!("{dir}/m_img.txt"), f(img));
+            let _ = std::fs::write(format!("{dir}/m_txt.txt"), f(txt));
+            let _ = std::fs::write(format!("{dir}/m_sigma.txt"), format!("{:?}", timesteps.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1::<f32>()?));
+            if let Some(y) = y { let _ = std::fs::write(format!("{dir}/m_y.txt"), f(y)); }
+        }
         // 1. Timestep (+ Vector In + Guidance) Embedding
         let mut temb = self.time_embedder.forward(timesteps)?;
 
@@ -468,7 +486,25 @@ impl FluxTransformer {
         let shift = shift.unsqueeze(1)?;
         let img_modulated = img_normed.broadcast_mul(&scale)?.broadcast_add(&shift)?;
 
-        self.final_linear.forward(&img_modulated)
+        let out = self.final_linear.forward(&img_modulated)?;
+        // SD3/SD3.5 `proj_out` yields the fused 2x2 patch channels as `(ph, pw, c)` (diffusers
+        // `einsum "nhwpqc->nchpwq"`), whereas the packed input consumed by `img_in` (from the patch
+        // Conv2d) is `(c, ph, pw)`. Reorder the velocity so the output packing matches the input,
+        // keeping the latent state (and the Euler step) self-consistent.
+        let out = if self.pos_embed.is_some() {
+            let (b, seq, oc) = out.dims3()?;
+            out.reshape((b, seq, 2, 2, oc / 4))?
+                .permute((0, 1, 4, 2, 3))?
+                .contiguous()?
+                .reshape((b, seq, oc))?
+        } else {
+            out
+        };
+        if let Ok(dir) = std::env::var("FLUX_MODEL_DUMP") {
+            let f = |t: &Tensor| -> String { let v=t.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap(); format!("{:?}", v) };
+            let _ = std::fs::write(format!("{dir}/m_out.txt"), f(&out));
+        }
+        Ok(out)
     }
 
     /// Forward pass through the Multimodal Diffusion Transformer (in-memory blocks)

@@ -31,8 +31,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t5_path = "G:\\models\\clip\\t5xxl_fp16.safetensors";
     let vae_path = "G:\\models\\vae\\sd3_vae.safetensors";
     let prompt = std::env::var("PROMPT").unwrap_or_else(|_| "a majestic white wolf on a snowy cliff at golden hour, photorealistic, 8k".into());
-    let steps: usize = std::env::var("STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
-    let guidance: f64 = std::env::var("GUIDANCE").ok().and_then(|s| s.parse().ok()).unwrap_or(4.5);
+    // Official SD3.5 Large defaults: 28 steps, guidance 3.5 (real CFG). Override with STEPS/GUIDANCE.
+    // Turbo checkpoints: STEPS=4..20 GUIDANCE=1.0.
+    let steps: usize = std::env::var("STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(28);
+    let guidance: f64 = std::env::var("GUIDANCE").ok().and_then(|s| s.parse().ok()).unwrap_or(3.5);
     let width: usize = std::env::var("WIDTH").ok().and_then(|s| s.parse().ok()).unwrap_or(512);
     let height: usize = std::env::var("HEIGHT").ok().and_then(|s| s.parse().ok()).unwrap_or(512);
 

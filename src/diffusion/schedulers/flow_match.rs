@@ -14,6 +14,10 @@ pub struct FlowMatchEulerConfig {
     /// `base_shift` (256 seq) and `max_shift` (4096 seq) based on the image sequence length — the
     /// Flux.2-Dev behaviour. Grounded (non-distilled) models such as Flux.2-Dev require this.
     pub use_dynamic_shifting: bool,
+    /// SD3 / SD3.5 use the diffusers `FlowMatchEulerDiscreteScheduler` non-dynamic schedule: a
+    /// **linspace between the shifted `sigma_max`/`sigma_min`** that is shifted a *second* time.
+    /// This differs from the Flux.1 `exp(mu)` schedule and is required for SD3.5.
+    pub double_shift_linspace: bool,
 }
 
 impl Default for FlowMatchEulerConfig {
@@ -24,6 +28,7 @@ impl Default for FlowMatchEulerConfig {
             max_shift: 1.15,
             min_shift: 0.5,
             use_dynamic_shifting: false,
+            double_shift_linspace: false,
         }
     }
 }
@@ -57,6 +62,30 @@ impl FlowMatchEulerScheduler {
     pub fn set_timesteps_with_seq_len(&mut self, num_steps: usize, image_seq_len: usize) -> Result<()> {
         self.step_index = 0;
         let mut sigmas = Vec::with_capacity(num_steps + 1);
+
+        // SD3 / SD3.5: diffusers `FlowMatchEulerDiscreteScheduler` non-dynamic schedule. linspace from
+        // the already-shifted sigma_max (=1) to sigma_min, then shift a second time. Matches diffusers
+        // `[1, 0.8577, 0.6021, 0.0089, 0]` for shift=3/4 steps.
+        if self.config.double_shift_linspace {
+            let s = self.config.shift;
+            let ntrain = 1000.0f64;
+            let sigma_max = 1.0f64;
+            let sigma_min = s * (1.0 / ntrain) / (1.0 + (s - 1.0) * (1.0 / ntrain));
+            for i in 0..num_steps {
+                let pre = if num_steps > 1 {
+                    sigma_max + (sigma_min - sigma_max) * (i as f64) / ((num_steps - 1) as f64)
+                } else {
+                    sigma_max
+                };
+                sigmas.push(s * pre / (1.0 + (s - 1.0) * pre));
+            }
+            sigmas.push(0.0);
+            let mut timesteps = Vec::with_capacity(num_steps);
+            for i in 0..num_steps { timesteps.push((sigmas[i] * 1000.0) as usize); }
+            self.sigmas = sigmas;
+            self.timesteps = timesteps;
+            return Ok(());
+        }
 
         // Official Flux.2 get_schedule: mu = compute_empirical_mu(image_seq_len, num_steps)
         let exp_mu = if self.config.use_dynamic_shifting {

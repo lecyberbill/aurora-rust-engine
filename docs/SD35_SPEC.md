@@ -187,11 +187,11 @@ SD3.5 : Flow Match Euler avec **`shift = 3.0`** statique (pas l'empirique Flux.2
 
 ## 9. Critères d'acceptation
 
-- [ ] Chargement du checkpoint SD3.5 FP8 sans erreur, architecture détectée `Sd35Large`.
-- [ ] T2I 512×512, ~20 steps : image cohérente (pas de bruit/grain), orientée.
+- [x] Chargement du checkpoint SD3.5 FP8 sans erreur, architecture détectée `Sd35Large`.
+- [x] T2I 512×512, 20 steps : **loup blanc net** (`outputs/sd35_test.png`), orienté.
 - [ ] `AutoModel::from_descriptor` charge SD3.5 (avec ses TEK) comme les autres familles.
 - [ ] Ajout à la vitrine `aurora_studio` (dropdown) une fois validé.
-- [ ] `cargo test --lib` 20/20 ; build sans warning.
+- [x] `cargo test --lib` 25/25 ; build sans warning.
 
 ## 9bis. ÉTAT ACTUEL (2026-09-11) — pipeline complet, sortie grise (dernier bug)
 
@@ -257,6 +257,36 @@ Pistes (prochaine session) :
    l'attention pleine, mais critique si l'un des deux streams est traité différemment).
 4. Retirer `FORCE_F32`/`FLUX_DUMP` (debug) une fois résolu.
 5. Rappel : SD3.5 Large **Turbo** → 4 steps, guidance basse.
+
+## 9ter. RÉSOLU (2026-09-11) — SD3.5 Large Turbo rend un loup net
+
+**Deux bugs réels** (les 3 "fixes" précédents étaient nécessaires mais pas suffisants ; le forward du
+transformer était en fait **exact**, vérifié bloc-à-bloc) :
+
+1. **`text_projection` CLIP-G jamais chargé.** `OpenClipTextEncoder::new_sdxl` testait
+   `vb.contains_tensor("text_projection")` alors que la clé réelle est `text_projection.weight` →
+   `text_projection = None` → le pooled CLIP-G sortait **non projeté** (embedding EOT brut). Le
+   transformer recevait alors un `pooled_projections` faux → modulation énorme → vitesse rms 74 au lieu
+   de ~0.5 → bruit. Fix : détecter `.weight` **et** transposer (`eos @ W^T`, convention `nn.Linear`).
+   *Bonus : SDXL utilise le même encodeur → son pooled est désormais correct lui aussi (validé Juggernaut).*
+
+2. **Incohérence d'ordre "packed" `(c,ph,pw)` vs `(ph,pw,c)`.** SD3 `PatchEmbed` (Conv2d) consomme les
+   latents patchés en `(c, ph, pw)`, mais `proj_out` + unpatchify `einsum "nhwpqc->nchpwq"` **émet** en
+   `(ph, pw, c)`. diffusers reste dans le domaine latent naturel `[B,16,H,W]` donc l'asymétrie s'annule ;
+   notre pipeline travaille en **packed** et additionnait un vecteur `(ph,pw,c)` à un état `(c,ph,pw)`
+   → état corrompu à chaque pas Euler. Fix : le forward SD3 réordonne sa sortie en `(c,ph,pw)`
+   (après `final_linear`), et `sd3_unpatchify` repasse en `(c,ph,pw)`.
+
+**Deux pièges écartés en cours de route :**
+- `timestep_scale` : le pipeline diffusers passe le **timestep brut 0..1000** (pas `t/1000`) à
+  `time_text_embed`. Le `time_factor = 1000` BFL/Flux est donc **déjà correct pour SD3.5** — un passage
+  à `1.0` casse la sortie. Le champ `FluxConfig::timestep_scale` documente cette convention (uniforme 1000).
+- La "convergence à 0.02" de `temb`/modulation et l'égalité `cos=1.0` du forward complet **avec le bon
+  `pooled`** prouvaient que le MMDiT était bon ; le problème n'était ni l'attention, ni la QK-norm, ni
+  l'ordre des 6 chunks AdaLN (tous validés contre `diffusers`).
+
+**Validation :** `test_sd35` (512×512, 20 steps) → loup blanc photoréaliste. Non-régression : `cargo test
+--lib` 25/25, SDXL (Juggernaut-XL v9) toujours net.
 
 ## 10. Hors-scope (plus tard)
 

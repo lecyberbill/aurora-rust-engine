@@ -125,7 +125,9 @@ impl OpenClipTextEncoder {
         };
         let final_layer_norm = layer_norm(embed_dim, 1e-5, ln_vb)?;
 
-        let text_projection = if vb.contains_tensor("text_projection") {
+        let text_projection = if vb.contains_tensor("text_projection.weight") {
+            Some(vb.get((1280, 1280), "text_projection.weight")?)
+        } else if vb.contains_tensor("text_projection") {
             Some(vb.get((1280, 1280), "text_projection")?)
         } else {
             None
@@ -215,7 +217,7 @@ impl OpenClipTextEncoder {
         let eos_token_embed = final_normed.narrow(1, eos_idx, 1)?.squeeze(1)?; // [1, 1280]
 
         let pooled = if let Some(ref proj) = self.text_projection {
-            eos_token_embed.matmul(proj)?
+            eos_token_embed.matmul(&proj.t()?)?
         } else {
             eos_token_embed
         };

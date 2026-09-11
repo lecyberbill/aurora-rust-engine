@@ -29,14 +29,13 @@ pub fn unpatchify(latents: &Tensor, height: usize, width: usize) -> Result<Tenso
     Ok(unpatchified)
 }
 
-/// SD3 / SD3.5 unpatchify. Unlike Flux (`[c, ph, pw]`), SD3's `proj_out` yields the fused 2×2×C
-/// channels as `[ph, pw, c]` (`einsum "nhwpqc->nchpwq"`). Using the Flux order produces a
-/// green/detailed checkerboard.
+/// SD3 / SD3.5 unpatchify. `FluxTransformer` emits the SD3 velocity in the same `(c, ph, pw)` packed
+/// order it consumes, so this is the standard BFL `b (h w) (c ph pw) -> b c (h ph) (w pw)` rearrange.
 pub fn sd3_unpatchify(latents: &Tensor, height: usize, width: usize) -> Result<Tensor> {
     let h_patches = (height + 15) / 16;
     let w_patches = (width + 15) / 16;
-    let reshaped = latents.reshape((1, h_patches, w_patches, 2, 2, 16))?;
-    let permuted = reshaped.permute((0, 5, 1, 3, 2, 4))?.contiguous()?;
+    let reshaped = latents.reshape((1, h_patches, w_patches, 16, 2, 2))?;
+    let permuted = reshaped.permute((0, 3, 1, 4, 2, 5))?.contiguous()?;
     permuted.reshape((1, 16, h_patches * 2, w_patches * 2))
 }
 
@@ -249,6 +248,7 @@ impl FluxPipeline {
             max_shift: 1.15,
             min_shift: 0.5,
             use_dynamic_shifting: false,
+            double_shift_linspace: false,
         }
     }
     /// Load Flux pipeline from a llama.cpp **GGUF** checkpoint (quantized per-block weights). This is the
@@ -340,13 +340,10 @@ impl FluxPipeline {
         transformer.swap_scale_shift = !is_diffusers;
         // SD3 / SD3.5 fixed sincos positional embedding (variable shape -> loaded explicitly).
         if is_sd35 {
-            for key in ["pos_embed", "model.diffusion_model.pos_embed"] {
-                if src.contains(key) {
-                    let pe = src.get_tensor(key, &device, dtype)?;
-                    transformer.set_pos_embed(pe);
-                    println!("✨ Attached SD3.5 pos_embed (shape {:?})", transformer.pos_embed.as_ref().map(|t| t.dims().to_vec()));
-                    break;
-                }
+            if let Some(key) = src.keys().into_iter().find(|k| k.ends_with("pos_embed")) {
+                let pe = src.get_tensor(&key, &device, dtype)?;
+                transformer.set_pos_embed(pe);
+                println!("✨ Attached SD3.5 pos_embed from `{key}` (shape {:?})", transformer.pos_embed.as_ref().map(|t| t.dims().to_vec()));
             }
         }
 
@@ -507,13 +504,10 @@ impl FluxPipeline {
         let is_diffusers = !is_sd35 && archive.keys().any(|k| k.starts_with("x_embedder.") || k.starts_with("context_embedder."));
         transformer.swap_scale_shift = !is_diffusers;
         if is_sd35 {
-            for key in ["pos_embed", "model.diffusion_model.pos_embed"] {
-                if archive.contains(key) {
-                    let pe = archive.get_tensor(key, &device, dtype)?;
-                    transformer.set_pos_embed(pe);
-                    println!("✨ Attached SD3.5 pos_embed");
-                    break;
-                }
+            if let Some(key) = archive.keys().find(|k| k.ends_with("pos_embed")).cloned() {
+                let pe = archive.get_tensor(&key, &device, dtype)?;
+                transformer.set_pos_embed(pe);
+                println!("✨ Attached SD3.5 pos_embed from `{key}`");
             }
         }
 
@@ -637,6 +631,11 @@ impl FluxPipeline {
 
         if in_channels == 128 {
             self.scheduler = FlowMatchEulerScheduler::new(self.flux2_scheduler_config());
+        } else if self.is_sd35() {
+            // SD3 / SD3.5: the diffusers double-shift linspace schedule (see FlowMatchEulerConfig).
+            let mut cfg = crate::diffusion::schedulers::FlowMatchEulerConfig::default();
+            cfg.double_shift_linspace = true;
+            self.scheduler = FlowMatchEulerScheduler::new(cfg);
         }
         self.scheduler.set_timesteps_with_seq_len(num_steps, image_seq_len)?;
 
@@ -653,14 +652,22 @@ impl FluxPipeline {
         };
 
         // 1. Text conditioning: SD3.5 (CLIP-L+G+T5) or Mistral-3 / Qwen3 / T5-XXL.
-        let sd35_pooled = if self.is_sd35() {
+        // SD3.5 non-turbo needs real CFG (two passes with a negative prompt); the Turbo checkpoints run
+        // at guidance 1.0 (single conditional pass).
+        let sd35_cfg = self.is_sd35() && (params.guidance_scale - 1.0).abs() > 1e-3;
+        let sd35_cond = if self.is_sd35() {
             println!("📝 Encoding prompt with SD3.5 (CLIP-L+G + T5-XXL)...");
-            let (ctx, pooled) = self.encode_sd35(params.prompt)?;
-            Some((ctx, pooled))
+            Some(self.encode_sd35(params.prompt)?)
         } else {
             None
         };
-        let raw_txt_tokens = if let Some((ctx, _)) = &sd35_pooled {
+        let sd35_uncond = if sd35_cfg {
+            println!("📝 Encoding negative prompt with SD3.5 (CFG)...");
+            Some(self.encode_sd35(params.negative_prompt.unwrap_or(""))?)
+        } else {
+            None
+        };
+        let raw_txt_tokens = if let Some((ctx, _)) = &sd35_cond {
             ctx.clone()
         } else if let Some(ref mut mistral) = self.mistral {
             let txt_dim = if in_channels == 128 {
@@ -694,16 +701,24 @@ impl FluxPipeline {
             4096 // Flux.1
         };
 
-        let txt_tokens = if raw_txt_tokens.dim(2)? < expected_txt_dim {
-            let pad = Tensor::zeros((raw_txt_tokens.dim(0)?, raw_txt_tokens.dim(1)?, expected_txt_dim - raw_txt_tokens.dim(2)?), self.dtype, &self.device)?;
-            Tensor::cat(&[&raw_txt_tokens, &pad], 2)?.contiguous()?
-        } else if raw_txt_tokens.dim(2)? > expected_txt_dim {
-            raw_txt_tokens.narrow(2, 0, expected_txt_dim)?.contiguous()?
-        } else {
-            raw_txt_tokens.contiguous()?
+        let align_txt = |t: &Tensor| -> Result<Tensor> {
+            if t.dim(2)? < expected_txt_dim {
+                let pad = Tensor::zeros((t.dim(0)?, t.dim(1)?, expected_txt_dim - t.dim(2)?), self.dtype, &self.device)?;
+                Tensor::cat(&[t, &pad], 2)?.contiguous()
+            } else if t.dim(2)? > expected_txt_dim {
+                t.narrow(2, 0, expected_txt_dim)?.contiguous()
+            } else {
+                t.contiguous()
+            }
         };
 
-        let y_vec = if let Some((_, pooled)) = &sd35_pooled {
+        let txt_tokens = align_txt(&raw_txt_tokens)?;
+        let txt_tokens_uncond = match &sd35_uncond {
+            Some((ctx, _)) => Some(align_txt(ctx)?),
+            None => None,
+        };
+
+        let y_vec = if let Some((_, pooled)) = &sd35_cond {
             Some(pooled.clone())
         } else if let Some(ref mut clip) = self.clip_l {
             if !clip.has_tokenizer() {
@@ -720,6 +735,7 @@ impl FluxPipeline {
         } else {
             None
         };
+        let y_vec_uncond = sd35_uncond.as_ref().map(|(_, p)| p.clone());
 
         println!("⚡ Executing Flux.1 Flow Matching ODE ({} steps)...", num_steps);
         let t_unet_start = Instant::now();
@@ -737,15 +753,40 @@ impl FluxPipeline {
             let sigma = if step_idx < sigmas.len() { sigmas[step_idx] } else { 0.0 };
             let t_tensor = Tensor::from_slice(&[sigma as f32], (1,), &self.device)?.to_dtype(self.dtype)?;
             
-            // Forward pass predicting velocity field v_t (with on-demand block streaming)
-            let velocity = self.transformer.forward_with_streamer(
-                &latents,
-                &txt_tokens,
-                &t_tensor,
-                y_vec.as_ref(),
-                guidance_tensor.as_ref(),
-                self.streamer.as_ref(),
-            )?;
+            // Forward pass predicting velocity field v_t (with on-demand block streaming).
+            // Classifier-free guidance (SD3.5 non-turbo): v = v_uncond + g * (v_cond - v_uncond).
+            let velocity = if let (Some(utxt), Some(uy)) = (&txt_tokens_uncond, &y_vec_uncond) {
+                let v_cond = self.transformer.forward_with_streamer(
+                    &latents,
+                    &txt_tokens,
+                    &t_tensor,
+                    y_vec.as_ref(),
+                    guidance_tensor.as_ref(),
+                    self.streamer.as_ref(),
+                )?;
+                let v_uncond = self.transformer.forward_with_streamer(
+                    &latents,
+                    utxt,
+                    &t_tensor,
+                    Some(uy),
+                    guidance_tensor.as_ref(),
+                    self.streamer.as_ref(),
+                )?;
+                let g = params.guidance_scale as f32;
+                let vc = v_cond.to_dtype(DType::F32)?;
+                let vu = v_uncond.to_dtype(DType::F32)?;
+                let delta = (&vc - &vu)?.affine(g as f64, 0.0)?;
+                (&vu + &delta)?.to_dtype(self.dtype)?
+            } else {
+                self.transformer.forward_with_streamer(
+                    &latents,
+                    &txt_tokens,
+                    &t_tensor,
+                    y_vec.as_ref(),
+                    guidance_tensor.as_ref(),
+                    self.streamer.as_ref(),
+                )?
+            };
 
             // Euler integration step: x_{t-1} = x_t + dt * v_t
             latents = self.scheduler.step(&velocity, t, &latents)?;
@@ -874,6 +915,11 @@ impl FluxPipeline {
 
         if in_channels == 128 {
             self.scheduler = FlowMatchEulerScheduler::new(self.flux2_scheduler_config());
+        } else if self.is_sd35() {
+            // SD3 / SD3.5: the diffusers double-shift linspace schedule (see FlowMatchEulerConfig).
+            let mut cfg = crate::diffusion::schedulers::FlowMatchEulerConfig::default();
+            cfg.double_shift_linspace = true;
+            self.scheduler = FlowMatchEulerScheduler::new(cfg);
         }
         self.scheduler.set_timesteps_with_seq_len(num_steps, image_seq_len)?;
 
@@ -1120,6 +1166,11 @@ impl FluxPipeline {
 
         if in_channels == 128 {
             self.scheduler = FlowMatchEulerScheduler::new(self.flux2_scheduler_config());
+        } else if self.is_sd35() {
+            // SD3 / SD3.5: the diffusers double-shift linspace schedule (see FlowMatchEulerConfig).
+            let mut cfg = crate::diffusion::schedulers::FlowMatchEulerConfig::default();
+            cfg.double_shift_linspace = true;
+            self.scheduler = FlowMatchEulerScheduler::new(cfg);
         }
         self.scheduler.set_timesteps_with_seq_len(num_steps, image_seq_len)?;
 

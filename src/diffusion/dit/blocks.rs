@@ -15,7 +15,8 @@ pub struct RMSNorm {
 
 impl RMSNorm {
     pub fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let scale = vb.get(dim, "scale")?;
+        // Flux stores the RMSNorm parameter as `scale`; SD3/SD3.5 as `weight`.
+        let scale = vb.get(dim, "scale").or_else(|_| vb.get(dim, "weight"))?;
         Ok(Self { scale })
     }
 
