@@ -203,7 +203,22 @@ grise.** Diagnostic (via FLUX_TRACE) :
   AdaLN-Zero devrait donner des gates ≈ 0).
 - Le flux texte explose alors (bloc 0 : txt 1.6 → 35k → clamp 50000) puis NaN → latents constants → gris.
 
-**CONSTAT CORRIGÉ (2026-09-11) — la modulation et le `temb` sont CORRECTS :**
+**MISE À JOUR (2026-09-11) — 3 bugs trouvés et corrigés, il reste le RENDU :**
+1. **La modulation et le `temb` sont CORRECTS** (vérifié : référence PyTorch identique à 0.02 près).
+2. **F16 overflow = cause du gris/NaN.** À σ=1 SD3.5 produit des activations légitimes mais énormes
+   (V≈226, gates≈30, branche texte ≈200k > 65504) → inf → NaN en F16. **Fix : le pipeline tourne SD3.5
+   en F32** (`from_single_file_streaming` choisit F32 si `joint_blocks`). Diffusers exige bf16/fp32 pour SD3.5.
+3. **Unpatchify SD3 = `[ph,pw,c]`** (patch-major, `einsum nhwpqc->nchpwq`), pas `[c,ph,pw]` (Flux) →
+   c'était le damier vert. **Fix : `sd3_unpatchify`**. + `latents/scaling_factor + shift_factor` avant decode.
+
+**État : plus de NaN ni damier, mais l'image est du bruit** → il reste le **sampler ou le VAE decode**.
+Prochaines étapes : (a) dumper le latent final après sampling et le comparer à une référence diffusers
+(latent attendu ≈ N(0,1)*1.53) ; (b) décoder un latent de référence connu avec `FluxVaeDecoder` pour
+confirmer le VAE ; (c) vérifier le scheduler/sigma (SD3 shift=3.0) et le signe du scale/shift.
+
+---
+
+**CONSTAT PRÉCÉDENT (modulation) — conservé :**
 Une référence PyTorch (`C:\...\Temp\opencode\sd35_ref.py`) recalculant `temb` et la modulation avec les
 poids du checkpoint et nos `sigma`/`pooled` dumpés donne **exactement** les mêmes valeurs
 (`proj_rms 69.309` ref vs `69.305` nous ; `max|Δtemb|=0.02`). Donc ni le conditionnement ni la
