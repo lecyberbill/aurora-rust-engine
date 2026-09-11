@@ -5,7 +5,8 @@
       "label": "SDXL (Juggernaut XL)",
       "family": "sdxl",
       "checkpoint": "G:/models/checkpoints/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors",
-      "defaults": { "steps": 25, "guidance": 7.0, "width": 1024, "height": 1024 }
+      "defaults": { "steps": 25, "guidance": 7.0, "width": 1024, "height": 1024 },
+      "memory": { "vae_tile_size": 32, "vae_tile_overlap": 8 }
     },
     {
       "id": "flux1",
@@ -39,3 +40,6 @@
     }
   ]
 }
+
+
+

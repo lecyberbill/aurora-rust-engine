@@ -33,12 +33,14 @@ pub struct ModelDescriptor {
     /// Path to a 32-channel Flux VAE (`flux2-vae.safetensors`) for Flux.2 families that don't embed
     /// one. `None` means the VAE is embedded (Flux.1) or handled by the SDXL pipeline.
     pub vae: Option<PathBuf>,
+    /// Optional VRAM knobs (SDXL only today); `None` keeps the pipeline defaults.
+    pub memory: Option<ModelMemory>,
 }
 
 impl ModelDescriptor {
     /// A self-contained model (SDXL, Flux.1): no external VLM/VAE.
     pub fn standalone(id: impl Into<String>, checkpoint: impl Into<PathBuf>) -> Self {
-        Self { id: id.into(), checkpoint: checkpoint.into(), family: None, text_encoder: None, vae: None }
+        Self { id: id.into(), checkpoint: checkpoint.into(), family: None, text_encoder: None, vae: None, memory: None }
     }
 
     /// A Flux.2-Klein/Dev model: attach the matching VLM and the shared 32-ch Flux VAE.
@@ -54,6 +56,7 @@ impl ModelDescriptor {
             family: None,
             text_encoder: Some(text_encoder),
             vae: Some(vae.into()),
+            memory: None,
         }
     }
 
@@ -76,6 +79,7 @@ impl ModelDescriptor {
                 t5: t5.into(),
             }),
             vae: Some(vae.into()),
+            memory: None,
         }
     }
 }
@@ -122,6 +126,9 @@ pub struct ModelDescriptorEntry {
     /// Optional per-model generation defaults (steps / guidance / size / negative prompt).
     #[serde(default)]
     pub defaults: ModelDefaults,
+    /// Optional per-model VRAM knobs (tiled VAE / CPU offload / FP8 weights).
+    #[serde(default)]
+    pub memory: ModelMemory,
 }
 
 /// Per-model generation defaults carried by the config (all optional). A UI can apply them when
@@ -138,6 +145,60 @@ pub struct ModelDefaults {
     pub height: Option<usize>,
     #[serde(default)]
     pub negative_prompt: Option<String>,
+}
+
+/// Optional per-model memory/VRAM knobs, mirroring `PipelineMemoryConfig`. Every field is optional;
+/// omitted ones keep the pipeline default. Lets a config tune VRAM without a rebuild.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct ModelMemory {
+    #[serde(default)]
+    pub vae_tiling: Option<bool>,
+    #[serde(default)]
+    pub vae_tile_size: Option<usize>,
+    #[serde(default)]
+    pub vae_tile_overlap: Option<usize>,
+    #[serde(default)]
+    pub cpu_offload: Option<bool>,
+    #[serde(default)]
+    pub low_vram_load: Option<bool>,
+    #[serde(default)]
+    pub fp8_weights: Option<bool>,
+}
+
+impl ModelMemory {
+    /// `true` when no override is set (so it can be dropped instead of overriding the defaults).
+    pub fn is_empty(&self) -> bool {
+        self.vae_tiling.is_none()
+            && self.vae_tile_size.is_none()
+            && self.vae_tile_overlap.is_none()
+            && self.cpu_offload.is_none()
+            && self.low_vram_load.is_none()
+            && self.fp8_weights.is_none()
+    }
+
+    /// Build a `PipelineMemoryConfig` from the pipeline default, overriding only the set fields.
+    pub fn to_pipeline_config(&self) -> crate::pipelines::sdxl::PipelineMemoryConfig {
+        let mut cfg = crate::pipelines::sdxl::PipelineMemoryConfig::default();
+        if let Some(v) = self.vae_tiling {
+            cfg.vae_tiling = v;
+        }
+        if let Some(v) = self.vae_tile_size {
+            cfg.vae_tile_size = v;
+        }
+        if let Some(v) = self.vae_tile_overlap {
+            cfg.vae_tile_overlap = v;
+        }
+        if let Some(v) = self.cpu_offload {
+            cfg.cpu_offload = v;
+        }
+        if let Some(v) = self.low_vram_load {
+            cfg.low_vram_load = v;
+        }
+        if let Some(v) = self.fp8_weights {
+            cfg.fp8_weights = v;
+        }
+        cfg
+    }
 }
 
 /// A fully-resolved model entry: presentation label + descriptor + generation defaults.
@@ -187,6 +248,7 @@ impl ModelDescriptorEntry {
             family,
             text_encoder: self.text_encoder.as_ref().map(TextEncoderConfig::to_spec),
             vae: self.vae.clone(),
+            memory: if self.memory.is_empty() { None } else { Some(self.memory.clone()) },
         })
     }
 }
@@ -292,5 +354,28 @@ mod tests {
         let ms = ModelDescriptorFile::from_json(json).unwrap().resolve().unwrap();
         assert_eq!(ms[0].defaults.steps, None);
         assert_eq!(ms[0].defaults.negative_prompt, None);
+    }
+
+    #[test]
+    fn parse_model_memory() {
+        let json = r#"{"models":[
+            {"id":"sdxl","family":"sdxl","checkpoint":"a.safetensors",
+             "memory":{"vae_tiling":false,"vae_tile_size":48,"vae_tile_overlap":8,"fp8_weights":true}},
+            {"id":"plain","family":"sdxl","checkpoint":"b.safetensors"}
+        ]}"#;
+        let ms = ModelDescriptorFile::from_json(json).unwrap().resolve().unwrap();
+        let mem = ms[0].descriptor.memory.as_ref().expect("memory should be attached");
+        assert_eq!(mem.vae_tiling, Some(false));
+        assert_eq!(mem.vae_tile_size, Some(48));
+        assert_eq!(mem.vae_tile_overlap, Some(8));
+        assert_eq!(mem.cpu_offload, None);
+        assert_eq!(mem.fp8_weights, Some(true));
+        let cfg = mem.to_pipeline_config();
+        assert!(!cfg.vae_tiling);
+        assert_eq!(cfg.vae_tile_size, 48);
+        assert_eq!(cfg.vae_tile_overlap, 8);
+        assert!(cfg.fp8_weights);
+        assert!(cfg.cpu_offload, "unset cpu_offload keeps the pipeline default");
+        assert_eq!(ms[1].descriptor.memory, None, "empty memory is dropped");
     }
 }

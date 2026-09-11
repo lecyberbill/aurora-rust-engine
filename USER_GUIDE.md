@@ -124,6 +124,12 @@ optional `defaults` block. **When a model is selected in the dropdown, its `defa
 the controls** (steps, guidance, resolution, negative prompt); any omitted field keeps its current
 value. An unknown `family` slug is a hard error (fail-fast, no silent guess).
 
+An optional **`memory` block** tunes VRAM per model (SDXL today): `vae_tiling`, `vae_tile_size`,
+`vae_tile_overlap`, `cpu_offload`, plus the reserved `low_vram_load`/`fp8_weights`. The important
+lever is `vae_tile_size`: a large VAE tile inflates the decoded-tile im2col buffer and can push a
+12 GB card into Windows WDDM shared-memory paging (10-40x slowdown). The engine default is now
+`32×32` with `8` overlap, which keeps SDXL 1024×1024 at ~8.5 GB / ~12 s.
+
 ### Features Available in the Web Studio:
 - **Model Switcher with Strict VRAM Ejection**: switching a model unloads the previous one, so only one model is resident in VRAM at a time.
 - **Per-Model Generation Defaults**: steps / guidance / resolution / negative prompt read from the config and applied automatically on model switch.

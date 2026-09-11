@@ -19,8 +19,8 @@ pub use auto::{AutoModel, BoxedModel, ModelLoadConfig};
 pub use common::{downcast_model, AnyModel, EncodeModel, GenerationModel, ImageGenerationModel, ModelKind};
 pub use config::{detect_architecture, Architecture};
 pub use descriptor::{
-    ModelDefaults, ModelDescriptor, ModelDescriptorEntry, ModelDescriptorFile, ResolvedModel,
-    TextEncoderConfig, TextEncoderSpec,
+    ModelDefaults, ModelDescriptor, ModelDescriptorEntry, ModelDescriptorFile, ModelMemory,
+    ResolvedModel, TextEncoderConfig, TextEncoderSpec,
 };
 pub use image::DiffusionModel;
 pub use registry::ModelRegistry;

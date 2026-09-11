@@ -36,9 +36,9 @@ pub struct PipelineMemoryConfig {
 impl Default for PipelineMemoryConfig {
     fn default() -> Self {
         Self {
-            vae_tiling: true, // High-speed seamless Tiled VAE (72x72, 16 overlap) keeping peak VRAM < 7.2 GB with zero paging
-            vae_tile_size: 72,
-            vae_tile_overlap: 16, // Optimal 4-tile seamless cosine feathering (128px overlap)
+            vae_tiling: true, // High-speed seamless Tiled VAE (32x32, 8 overlap) keeping VAE peak VRAM low with zero paging
+            vae_tile_size: 32,
+            vae_tile_overlap: 8, // Small tiles keep the per-tile im2col buffer small (Tiled VAE is the dominant transient peak)
             cpu_offload: true, // Default enabled for < 7GB VRAM operation
             low_vram_load: true, // Prevent temporary VRAM spikes during VarBuilder model construction
             fp8_weights: false, // Optional FP8 Ada Lovelace acceleration
@@ -340,7 +340,7 @@ impl StableDiffusionXLPipeline {
     }
 
     /// Enable Tiled VAE Decoding:
-    /// - `None` -> Automatic 72x72 tiles with 16-latent seamless cosine overlap (4 tiles)
+    /// - `None` -> Automatic 32x32 tiles with 8-latent seamless cosine overlap (low VAE peak)
     /// - `Some((tile_size, overlap))` -> Explicit user-defined tiling dimensions
     pub fn enable_vae_tiling(&mut self, custom: Option<(usize, usize)>) -> &mut Self {
         self.memory_config.vae_tiling = true;
@@ -348,8 +348,8 @@ impl StableDiffusionXLPipeline {
             self.memory_config.vae_tile_size = tile_size;
             self.memory_config.vae_tile_overlap = overlap;
         } else {
-            self.memory_config.vae_tile_size = 72;
-            self.memory_config.vae_tile_overlap = 16;
+            self.memory_config.vae_tile_size = 32;
+            self.memory_config.vae_tile_overlap = 8;
         }
         self
     }

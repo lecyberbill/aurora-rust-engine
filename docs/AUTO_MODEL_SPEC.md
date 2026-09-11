@@ -248,7 +248,8 @@ modèles depuis un `config.json`, pour ne plus câbler les chemins dans les bina
         "clip_l": "…", "clip_g": "…", "t5": "…" },
       "vae": "G:/models/vae/sd3_vae.safetensors",
       "defaults": { "steps": 28, "guidance": 3.5, "width": 1024, "height": 1024,
-                    "negative_prompt": "blurry, low quality" } }
+                    "negative_prompt": "blurry, low quality" },
+      "memory": { "vae_tile_size": 32, "vae_tile_overlap": 8 } }
   ]
 }
 ```
@@ -259,12 +260,18 @@ modèles depuis un `config.json`, pour ne plus câbler les chemins dans les bina
 - `defaults` : bloc **optionnel** de valeurs de génération par modèle (`ModelDefaults` : `steps`,
   `guidance`, `width`, `height`, `negative_prompt`, tous optionnels). Purement présentationnel côté
   moteur ; une UI l'applique à la bascule de modèle.
+- `memory` : bloc **optionnel** de knobs VRAM (`ModelMemory`) mappés sur `PipelineMemoryConfig`
+  (`vae_tiling`, `vae_tile_size`, `vae_tile_overlap`, `cpu_offload`, `low_vram_load`, `fp8_weights` ;
+  chaque champ absent garde le défaut pipeline). Appliqué au chargement SDXL. **`vae_tile_size` est le
+  levier clé** : un grand tuilage fait gonfler le buffer im2col de la VAE décodée (pic transitoire) ;
+  `32×32`/overlap `8` supprime le paging à 1024 sur 12 Go. `low_vram_load` et `fp8_weights` sont
+  **réservés** (déclarés mais pas encore consommés par le pipeline).
 - `ModelDescriptorFile::load(path)` → `.descriptors()` → `Vec<(label, ModelDescriptor)>`, ou
   `.resolve()` → `Vec<ResolvedModel>` (garde l'`id`, le `label`, le descripteur **et** les `defaults`).
 
 `aurora_studio` s'en sert via `aurora_studio.json` (surchargeable par l'env `STUDIO_CONFIG`), ne
 pré-charge plus qu'un seul modèle, dérive le dropdown du config et applique les `defaults` à la
 bascule (handler grio `on_change`). Tests : `parse_model_list_config`, `unknown_family_slug_is_error`,
-`parse_model_defaults`, `defaults_are_optional`.
+`parse_model_defaults`, `defaults_are_optional`, `parse_model_memory`.
 
 

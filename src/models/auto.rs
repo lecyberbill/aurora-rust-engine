@@ -191,7 +191,16 @@ impl AutoModel {
                 Arc::new(Mutex::new(DiffusionModel::flux(desc.id.clone(), arch.slug(), pipeline)))
             }
             Architecture::Sdxl => {
-                let pipeline = crate::pipelines::StableDiffusionXLPipeline::from_single_file(&desc.checkpoint, device.clone())?;
+                let mem = desc
+                    .memory
+                    .as_ref()
+                    .map(|m| m.to_pipeline_config())
+                    .unwrap_or_default();
+                let pipeline = crate::pipelines::StableDiffusionXLPipeline::from_single_file_with_config(
+                    &desc.checkpoint,
+                    device.clone(),
+                    mem,
+                )?;
                 Arc::new(Mutex::new(DiffusionModel::sdxl(desc.id.clone(), pipeline)))
             }
             Architecture::Sd35Large | Architecture::Sd35Medium => {
