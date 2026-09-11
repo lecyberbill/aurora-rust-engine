@@ -211,10 +211,23 @@ grise.** Diagnostic (via FLUX_TRACE) :
 3. **Unpatchify SD3 = `[ph,pw,c]`** (patch-major, `einsum nhwpqc->nchpwq`), pas `[c,ph,pw]` (Flux) →
    c'était le damier vert. **Fix : `sd3_unpatchify`**. + `latents/scaling_factor + shift_factor` avant decode.
 
-**État : plus de NaN ni damier, mais l'image est du bruit** → il reste le **sampler ou le VAE decode**.
-Prochaines étapes : (a) dumper le latent final après sampling et le comparer à une référence diffusers
-(latent attendu ≈ N(0,1)*1.53) ; (b) décoder un latent de référence connu avec `FluxVaeDecoder` pour
-confirmer le VAE ; (c) vérifier le scheduler/sigma (SD3 shift=3.0) et le signe du scale/shift.
+**État : plus de NaN ni damier, mais l'image est du bruit.**
+- **VAE SD3 CONFIRMÉ BON** : roundtrip encode→decode d'une vraie image (renard) reproduit l'image
+  parfaitement (`outputs/sd3_vae_rt_raw.png`). Donc ce n'est ni le VAE ni le packing.
+- Le pipeline est fidèle à diffusers (init bruit `randn`, decode `latents/1.5305 + 0.0609`).
+- **Donc le latent produit par le transformer/sampler est du bruit** → le transformer ne dénoise pas
+  correctement malgré des entrées/modulation vérifiées.
+
+Prochaines étapes (ciblées) :
+1. **Dumper le latent final** (avant VAE) et vérifier sa structure spatiale / le comparer à un latent
+   de référence diffusers pour le même prompt (le sampler doit produire un latent structuré).
+2. Comparer la **vitesse prédite par le transformer à t=~0.7** (step intermédiaire) à la référence
+   PyTorch (étendre `sd35_block.py` au modèle complet ou au moins à la sortie `proj_out`).
+3. Vérifier le **signe/échelle du pas Euler** et que `timesteps`/`sigmas` SD3 (shift=3.0) sont corrects.
+4. Vérifier le `swap_scale_shift` du `final_layer` (SD3 BFL [shift,scale]) et le `norm_out`
+   (AdaLayerNormContinuous).
+5. SD3.5 Large **Turbo** → 4 steps, guidance basse ; tester aussi CLIP-L/G **penultimate vs last**
+   hidden layer (notre `encode_prompt` utilise la pénultième ; SD3 utilise peut-être la dernière).
 
 ---
 
