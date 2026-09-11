@@ -82,6 +82,9 @@ Adjust the Visual Studio path / CUDA version to your install. On Linux/macOS no 
 
 Aurora ships a native web studio (**Aurora Studio**) powered by [Grio](https://github.com/lecyberbill/grio):
 
+> 📘 **End users**: see the dedicated **[Aurora Studio User Guide](docs/AURORA_STUDIO_GUIDE.md)** for a
+> step-by-step, no-Rust walkthrough (install, launch, `aurora_studio.json`, VRAM tuning, FAQ).
+
 ```bash
 cargo run --release --bin aurora_studio --features cuda,flash-attn,ui
 ```

@@ -49,9 +49,14 @@ cargo build --release --features cuda,flash-attn
 
 ### 3. Launch the Pure Rust Interactive Studio ([Grio](https://github.com/lecyberbill/grio) Web UI)
 ```bash
-cargo run --release --bin grio_showcase --features cuda,flash-attn,ui
+cargo run --release --bin aurora_studio --features cuda,flash-attn,ui
 ```
-Open **`http://127.0.0.1:7860`** to access the complete pure Rust SDXL Diffusion Studio with real-time progressive latent preview streaming, session history gallery, and GPU telemetry powered by [Grio](https://github.com/lecyberbill/grio).
+Open **`http://127.0.0.1:7860`** to access the complete pure Rust Diffusion Studio with a multi-model
+dropdown, per-model generation defaults, real-time progressive latent preview streaming, session
+history gallery, and GPU telemetry powered by [Grio](https://github.com/lecyberbill/grio).
+
+Models are declared in **`aurora_studio.json`** (no hard-coded paths) — see the end-user guide:
+👉 **[docs/AURORA_STUDIO_GUIDE.md](docs/AURORA_STUDIO_GUIDE.md)**.
 
 ### 4. Run SOTA Grand Benchmark (All Optimizations Active)
 ```bash
