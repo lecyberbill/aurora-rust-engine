@@ -366,7 +366,6 @@ impl FluxPipeline {
     /// Load Flux.1 pipeline with Sequential Block Streaming (< 6.5 GB VRAM peak)
     pub fn from_single_file_streaming<P: AsRef<Path>>(checkpoint_path: P, device: Device) -> crate::error::Result<Self> {
         let is_cuda = device.is_cuda();
-        let dtype = if is_cuda { DType::F16 } else { DType::F32 };
         let checkpoint_buf = checkpoint_path.as_ref().to_path_buf();
 
         // Accept either a single .safetensors file or a directory of multi-file shards.
@@ -375,6 +374,11 @@ impl FluxPipeline {
         } else {
             SafeTensorsArchive::open(&checkpoint_buf)?
         });
+        // SD3.5 produces very large activations at high sigma (V ~226, gates ~30, trained values).
+        // F16 (max 65504) overflows -> NaN. Run SD3.5 in F32 for numerical stability (as diffusers
+        // requires bf16/fp32 for SD3.5). Flux/Klein stay F16.
+        let is_sd35_ck = archive.keys().any(|k| k.contains("joint_blocks."));
+        let dtype = if is_sd35_ck || !is_cuda { DType::F32 } else { DType::F16 };
         let router = WeightRouter::new(&archive, device.clone(), dtype);
 
         println!("📦 Constructing Pure Rust Flux Streaming Transformer (Ultra-Low VRAM)...");
