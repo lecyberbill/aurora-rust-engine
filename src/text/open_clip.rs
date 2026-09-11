@@ -188,7 +188,7 @@ impl OpenClipTextEncoder {
             tokens.truncate(max_len);
             if let Some(last) = tokens.last_mut() { *last = 49407; }
         } else {
-            tokens.resize(max_len, 0); // OpenCLIP zero-padding
+            tokens.resize(max_len, 49407); // CLIP pads with <|endoftext|> (matches the official tokenizer)
         }
 
         let input_ids = Tensor::from_slice(&tokens, (1, max_len), &self.device)?;

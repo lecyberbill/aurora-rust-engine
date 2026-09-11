@@ -189,6 +189,8 @@ SD3.5 : Flow Match Euler avec **`shift = 3.0`** statique (pas l'empirique Flux.2
 
 - [x] Chargement du checkpoint SD3.5 FP8 sans erreur, architecture détectée `Sd35Large`.
 - [x] T2I 512×512, 20 steps : **loup blanc net** (`outputs/sd35_test.png`), orienté.
+- [x] T2I 1024×1024 (résolution native), checkpoint **non-turbo officiel** `sd3.5_large.safetensors`,
+      28 steps, **CFG réel** guidance 3.5 → loup net (`outputs/sd35_test.png`).
 - [ ] `AutoModel::from_descriptor` charge SD3.5 (avec ses TEK) comme les autres familles.
 - [ ] Ajout à la vitrine `aurora_studio` (dropdown) une fois validé.
 - [x] `cargo test --lib` 25/25 ; build sans warning.
@@ -287,6 +289,32 @@ transformer était en fait **exact**, vérifié bloc-à-bloc) :
 
 **Validation :** `test_sd35` (512×512, 20 steps) → loup blanc photoréaliste. Non-régression : `cargo test
 --lib` 25/25, SDXL (Juggernaut-XL v9) toujours net.
+
+## 9quater. CFG réel + alignement repo HF (2026-09-11)
+
+**CFG (classifier-free guidance) SD3.5.** `generate` fait désormais **deux passes** (cond + prompt
+négatif, défaut `""`) et combine `v = v_uncond + g·(v_cond − v_uncond)` quand `guidance ≠ 1.0`. Les
+checkpoints **Turbo** (guidance 1.0) restent en une seule passe. Le prompt négatif est encodé par le
+même `encode_sd35` (CLIP-L+G+T5). `test_sd35` prend maintenant les défauts du repo officiel : **28
+steps, guidance 3.5**.
+
+**Alignement sur le repo `stabilityai/stable-diffusion-3.5-large` :**
+- **3 tokenizers** vérifiés : `clip_tokenizer.json` et `openclip_tokenizer.json` = vocab CLIP 49408
+  (`bos=49406 <|startoftext|>`, `eos=49407 <|endoftext|>`), `t5xxl_tokenizer.json` = SP 32100.
+- **`special_tokens_map`** : `pad_token = <|endoftext|>` (49407). `open_clip.rs` padait avec `0` →
+  **corrigé à `49407`** (sans effet fonctionnel : attention causale + EOS extrait à l'index fixe, mais
+  fidèle au repo ; validé SD3.5 **et** SDXL sans changement visuel).
+- **`scheduler_config.json`** : `FlowMatchEulerDiscreteScheduler`, `num_train_timesteps=1000`,
+  `shift=3.0` → identique à notre `double_shift_linspace`.
+
+**Piège documenté — CLIP-L pooled.** `clip_l.safetensors` ne contient **pas** `text_projection`
+(contrairement à CLIP-G). Notre CLIP-L pooled = EOT brut. Mesuré : sa contribution à la vitesse est
+quasi nulle (`only_L` → ρ≈1.31 vs zéro 1.31), donc négligeable. Le pooled qui compte est CLIP-G
+(projeté).
+
+**Validation finale :** `test_sd35` Turbo (512×512, 20 steps, guidance 1) **et** non-turbo officiel
+(1024×1024, 28 steps, CFG 3.5) → loup net. Non-régression : `cargo test --lib` 25/25, SDXL Juggernaut-XL
+v9 net.
 
 ## 10. Hors-scope (plus tard)
 
