@@ -11,7 +11,7 @@ fn main() -> Result<()> {
     let checkpoint = std::env::var("CKPT").unwrap_or_else(|_| "G:\\models\\flux\\flux2DevFp8Scaled_fp8Scaled.safetensors".into());
     let vae_path = std::env::var("VAE").unwrap_or_else(|_| "G:\\models\\vae\\flux2-vae.safetensors".into());
     let mistral_dir = std::env::var("MISTRAL").unwrap_or_else(|_| "G:\\models\\clip\\FLUX.2-dev_text_encoder".into());
-    let input_img_path = std::env::var("IN").unwrap_or_else(|_| "outputs/flux_showcase/flux_dev_1024_s20_g3.5.png".into());
+    let input_img_path = std::env::var("IN").unwrap_or_else(|_| "outputs/flux_showcase/flux_klein_9b_1024_seed42.png".into());
     let strength: f64 = std::env::var("STRENGTH").ok().and_then(|s| s.parse().ok()).unwrap_or(0.55);
     let steps: usize = std::env::var("STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(12);
     let guidance: f64 = std::env::var("GUIDANCE").ok().and_then(|s| s.parse().ok()).unwrap_or(3.5);

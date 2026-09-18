@@ -934,11 +934,11 @@ impl FluxPipeline {
         };
 
         // 3. Exact Flux 2 _patchify_latents + _pack_latents + BatchNorm:
-        // a. [1, 32, H_p*2, W_p*2] -> [1, 32, H_p, 2, W_p, 2] -> permute(0, 1, 3, 5, 2, 4) -> [1, 128, H_p, W_p]
+        // a. [1, 32, H_p*2, W_p*2] -> [1, 32, H_p, 2, W_p, 2] -> permute(0, 2, 4, 1, 3, 5) -> [1, H_p, W_p, 32, 2, 2] -> [1, 128, H_p, W_p]
         let x_0 = if in_channels == 128 {
             let lat_reshaped = init_latents.reshape((1, 32, h_patches, 2, w_patches, 2))?;
-            let lat_permuted = lat_reshaped.permute((0, 1, 3, 5, 2, 4))?.contiguous()?;
-            let patchified_4d = lat_permuted.reshape((1, 128, h_patches, w_patches))?;
+            let lat_spatial = lat_reshaped.permute((0, 2, 4, 1, 3, 5))?.contiguous()?;
+            let patchified_4d = lat_spatial.reshape((1, h_patches, w_patches, 128))?.permute((0, 3, 1, 2))?.contiguous()?;
 
             // b. BatchNorm standardization in [1, 128, H_p, W_p]: (x - mean) / std
             let standardized_4d = if let Some(ref vae) = self.vae {
@@ -1183,10 +1183,11 @@ impl FluxPipeline {
         };
 
         // 2. Exact Flux 2 patchify + pack + BatchNorm
+        // a. [1, 32, H_p*2, W_p*2] -> [1, 32, H_p, 2, W_p, 2] -> permute(0, 2, 4, 1, 3, 5) -> [1, H_p, W_p, 32, 2, 2] -> [1, 128, H_p, W_p]
         let x_0 = if in_channels == 128 {
             let lat_reshaped = init_latents.reshape((1, 32, h_patches, 2, w_patches, 2))?;
-            let lat_permuted = lat_reshaped.permute((0, 1, 3, 5, 2, 4))?.contiguous()?;
-            let patchified_4d = lat_permuted.reshape((1, 128, h_patches, w_patches))?;
+            let lat_spatial = lat_reshaped.permute((0, 2, 4, 1, 3, 5))?.contiguous()?;
+            let patchified_4d = lat_spatial.reshape((1, h_patches, w_patches, 128))?.permute((0, 3, 1, 2))?.contiguous()?;
 
             let standardized_4d = if let Some(ref vae) = self.vae {
                 if let (Some(mean), Some(var)) = (vae.bn_mean(), vae.bn_var()) {
@@ -1221,13 +1222,10 @@ impl FluxPipeline {
         let mask_tensor = Tensor::from_vec(mask_floats, (1, h_patches * w_patches, 1), &self.device)?.to_dtype(self.dtype)?;
         let inv_mask_tensor = Tensor::from_slice(&[1.0f32], (1,), &self.device)?.to_dtype(self.dtype)?.broadcast_sub(&mask_tensor)?;
 
-        // 4. Initial Gaussian noise for inpainting area. Same channel layout as x_0 (pack [c,py,px]).
+        // 4. Initial Gaussian noise for inpainting area. Keep in same layout as T2I and x_0.
         let noise_tokens = if in_channels == 128 {
-            let raw_noise = Tensor::randn(0f32, 1f32, (1, 32, h_patches * 2, w_patches * 2), &self.device)?.to_dtype(self.dtype)?;
-            let reshaped = raw_noise.reshape((1, 32, h_patches, 2, w_patches, 2))?;
-            let permuted = reshaped.permute((0, 1, 3, 5, 2, 4))?.contiguous()?;
-            let p4 = permuted.reshape((1, 128, h_patches, w_patches))?;
-            p4.reshape((1, 128, h_patches * w_patches))?.permute((0, 2, 1))?.contiguous()?
+            let raw_diff_noise = Tensor::randn(0f32, 1f32, (1, 128, h_patches, w_patches), &self.device)?.to_dtype(self.dtype)?;
+            raw_diff_noise.reshape((1, 128, h_patches * w_patches))?.permute((0, 2, 1))?.contiguous()?
         } else {
             let raw_noise = Tensor::randn(0f32, 1f32, (1, c, h_patches * ph, w_patches * pw), &self.device)?.to_dtype(self.dtype)?;
             let reshaped = raw_noise.reshape((1, c, h_patches, ph, w_patches, pw))?;
