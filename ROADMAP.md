@@ -504,3 +504,55 @@ brick — no new model ecosystem, and it directly improves the image UX for ever
 Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alongside `FluxPipeline`.
 
 ---
+
+## 🚀 Milestone 17: SOTA Image Generative Expansion (Krea, Z-Image Turbo, PixArt, IP-Adapter)
+
+**Goal.** Expand the engine's image generation coverage to support the newest distilled and high-speed generation architectures:
+
+- [ ] **Krea / Flash-Diffusion / Z-Image Turbo Realtime DiT Models**:
+  - Distilled 1-step to 4-step real-time generation pipelines for sub-second interactive canvas rendering in Grio (`D:\Projet\UI`).
+  - Architecture sniffing and scheduler adaptation for inverted flow trajectories and rectified shortcuts.
+- [ ] **PixArt-α / PixArt-Σ (Sigma) & Lumina-Next**:
+  - T5-driven DiT with cross-attention and KV-compression for high-res native $2K/4K$ rendering.
+- [ ] **IP-Adapter (Image Prompt Adapter) for SDXL & FLUX**:
+  - Decoupled cross-attention layers allowing image-based conditioning (style, character, composition reference) alongside text prompts.
+- [ ] **Universal ControlNet / T2I-Adapter for MMDiT (FLUX & SD3.5)**:
+  - Canny, Depth, OpenPose residual injection across Double/SingleStream blocks.
+
+---
+
+## 🚀 Milestone 18: Vision-Language & Multimodal Models (VLM)
+
+**Goal.** Close the loop between image understanding and text generation with native Pure Rust VLM pipelines:
+
+- [ ] **Gemma-3 Multimodal / PaliGemma 2 (`src/models/vision/`)**:
+  - Pure Rust SigLIP vision transformer encoder + multimodal projection bridge into Gemma autoregressive decoder.
+  - Image captioning, visual question answering (VQA), and automated prompt extraction from images.
+- [ ] **Qwen2.5-VL / MiniCPM-V 2.6 Dynamic Resolution Support**:
+  - Dynamic 2D spatial-patchification and 3D RoPE handling variable aspect-ratio images and video frame sequences.
+- [ ] **SmolVLM & Moondream 2 (< 2B Fast On-Device Inspection)**:
+  - Sub-100ms visual inference for interactive real-time inspection in UI backends.
+
+---
+
+## 🚀 Milestone 19: Spatio-Temporal Video Diffusion (Text-to-Video & Image-to-Video)
+
+**Goal.** Bring high-end video generation to consumer hardware by applying our pure Rust `SequentialBlockStreamer` to 3D DiT blocks:
+
+- [ ] **LTX-Video / CogVideoX / HunyuanVideo Support (`src/pipelines/video.rs`)**:
+  - 3D Rotary Position Embeddings (RoPE $T \times H \times W$) for spatio-temporal video tokens.
+  - Sequential streaming of multi-gigabyte video MMDiT blocks bounded to **< 12 GB VRAM** (bypassing PyTorch video OOM limitations).
+- [ ] **Causal 3D VAE Video Decoder**:
+  - Spatial-temporal latent decompression ($8\times 8\times 4$) with temporal cosine windowing.
+
+---
+
+## 🚀 Milestone 20: Neural Audio & Speech (STT / TTS)
+
+**Goal.** Complete the multimodal stack with low-latency Speech-to-Text and Text-to-Speech in pure Rust:
+
+- [ ] **Whisper Turbo / Moonshine (Speech-to-Text)**:
+  - Audio spectrogram mel-filterbank preprocessing in pure Rust + Encoder-Decoder transformer for live voice transcription.
+- [ ] **Kokoro-82M / ChatTTS (Text-to-Speech & Voice Cloning)**:
+  - High-fidelity voice synthesis with emotion and prosody control, operating at > 50x realtime on CPU/GPU.
+
