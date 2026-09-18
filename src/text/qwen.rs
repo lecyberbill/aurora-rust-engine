@@ -30,22 +30,27 @@ impl QwenTextConfig {
         let err = |m: &str| candle_core::Error::Msg(format!("QwenTextConfig::detect: {}", m));
 
         // embed_tokens.weight -> [vocab_size, hidden_dim]
-        let (_, emb_shape) = archive.raw_info("model.embed_tokens.weight")
+        let (_, emb_shape) = archive.raw_info("text_encoders.qwen3_4b.transformer.model.embed_tokens.weight")
+            .or_else(|| archive.raw_info("model.embed_tokens.weight"))
             .or_else(|| archive.raw_info("embed_tokens.weight"))
             .ok_or_else(|| err("missing model.embed_tokens.weight"))?;
         let vocab_size = emb_shape[0];
         let hidden_dim = emb_shape[1];
 
         // q_proj.weight -> [num_heads*head_dim, hidden_dim]
-        let (_, q_shape) = archive.raw_info("model.layers.0.self_attn.q_proj.weight")
+        let (_, q_shape) = archive.raw_info("text_encoders.qwen3_4b.transformer.model.layers.0.self_attn.q_proj.weight")
+            .or_else(|| archive.raw_info("model.layers.0.self_attn.q_proj.weight"))
             .ok_or_else(|| err("missing model.layers.0.self_attn.q_proj.weight"))?;
         let q_out = q_shape[0];
-        let (_, k_shape) = archive.raw_info("model.layers.0.self_attn.k_proj.weight")
+        let (_, k_shape) = archive.raw_info("text_encoders.qwen3_4b.transformer.model.layers.0.self_attn.k_proj.weight")
+            .or_else(|| archive.raw_info("model.layers.0.self_attn.k_proj.weight"))
             .ok_or_else(|| err("missing model.layers.0.self_attn.k_proj.weight"))?;
         let kv_out = k_shape[0];
 
-        // head_dim from q_norm.scale shape if present, else derive from a known divisor.
-        let head_dim = if let Some((_, s)) = archive.raw_info("model.layers.0.self_attn.q_norm.scale") {
+        // head_dim from q_norm.scale or q_norm.weight shape if present, else derive from a known divisor.
+        let head_dim = if let Some((_, s)) = archive.raw_info("text_encoders.qwen3_4b.transformer.model.layers.0.self_attn.q_norm.weight")
+            .or_else(|| archive.raw_info("model.layers.0.self_attn.q_norm.scale"))
+            .or_else(|| archive.raw_info("model.layers.0.self_attn.q_norm.weight")) {
             s[0]
         } else {
             // Fallback: q_proj out is hidden*... choose 128 for Qwen3 family; refine via kv ratio.
@@ -55,14 +60,20 @@ impl QwenTextConfig {
         let num_kv_heads = kv_out / head_dim;
 
         // mlp.gate_proj.weight -> [intermediate_dim, hidden_dim]
-        let (_, g_shape) = archive.raw_info("model.layers.0.mlp.gate_proj.weight")
+        let (_, g_shape) = archive.raw_info("text_encoders.qwen3_4b.transformer.model.layers.0.mlp.gate_proj.weight")
+            .or_else(|| archive.raw_info("model.layers.0.mlp.gate_proj.weight"))
             .ok_or_else(|| err("missing model.layers.0.mlp.gate_proj.weight"))?;
         let intermediate_dim = g_shape[0];
 
         // Count layers: iterate model.layers.<i> keys.
         let mut num_layers = 0;
         for key in archive.keys() {
-            if let Some(rest) = key.strip_prefix("model.layers.") {
+            let k = if let Some(r) = key.strip_prefix("text_encoders.qwen3_4b.transformer.") {
+                r
+            } else {
+                key.as_str()
+            };
+            if let Some(rest) = k.strip_prefix("model.layers.") {
                 if let Some(idx) = rest.split('.').next().and_then(|s| s.parse::<usize>().ok()) {
                     if idx + 1 > num_layers { num_layers = idx + 1; }
                 }
@@ -337,8 +348,9 @@ impl Qwen3TextEncoder {
         let config = QwenTextConfig::detect(archive)?;
         let mut tensors = std::collections::HashMap::new();
         for key in archive.keys() {
+            let stripped = key.strip_prefix("text_encoders.qwen3_4b.transformer.").unwrap_or(&key);
             if let Ok(t) = archive.get_tensor(&key, device, dtype) {
-                tensors.insert(key.to_string(), t);
+                tensors.insert(stripped.to_string(), t);
             }
         }
         let vb = VarBuilder::from_tensors(tensors, dtype, device);
@@ -374,6 +386,8 @@ impl Qwen3TextEncoder {
 
         let tokenizer = if let Some(p) = tokenizer_path {
             Tokenizer::from_file(p).ok()
+        } else if Path::new("qwen_tokenizer/tokenizer.json").exists() {
+            Tokenizer::from_file("qwen_tokenizer/tokenizer.json").ok()
         } else if Path::new("qwen_tokenizer.json").exists() {
             Tokenizer::from_file("qwen_tokenizer.json").ok()
         } else {
@@ -453,6 +467,50 @@ impl Qwen3TextEncoder {
 
         // Concat selected layers along channel dimension: [1, seq_len, hidden * n]
         Tensor::cat(&parts, 2)
+    }
+
+    /// Encode prompt for Z-Image / Lumina2:
+    /// ZImageTEModel extracts the penultimate layer (layer_idx = -2, i.e. 34th layer for 36-layer Qwen3-4B)
+    /// without applying final LayerNorm (layer_norm_hidden_state=False).
+    /// Prompt template: `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n`
+    pub fn encode_last_hidden(&self, prompt: &str, max_len: usize) -> Result<Tensor> {
+        let pad_id = self.pad_id;
+        let token_ids = if let Some(ref tok) = self.tokenizer {
+            let formatted_prompt = format!(
+                "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                prompt
+            );
+            let enc = tok.encode(formatted_prompt.as_str(), true)
+                .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+            let mut ids = enc.get_ids().to_vec();
+            ids.truncate(max_len);
+            while ids.len() < max_len {
+                ids.push(pad_id);
+            }
+            ids
+        } else {
+            vec![pad_id; max_len]
+        };
+
+        let ids_tensor = Tensor::from_vec(token_ids, (1, max_len), &self.device)?;
+        let mut h = self.embed_tokens.forward(&ids_tensor)?;
+
+        // Penultimate layer target index (e.g. 34 for 36 layers)
+        let target_layer = if self.layers.len() >= 2 {
+            self.layers.len() - 2
+        } else {
+            self.layers.len() - 1
+        };
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            h = layer.forward(&h)?;
+            if i == target_layer {
+                break;
+            }
+        }
+
+        // Return penultimate hidden state WITHOUT final layer norm
+        Ok(h)
     }
 }
 

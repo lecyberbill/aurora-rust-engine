@@ -12,6 +12,7 @@ use super::common::ModelKind;
 /// backward compatibility; this module is the **shared** table used by `AutoModel`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Architecture {
+    ZImageTurbo,
     Flux2Dev,
     Flux2Klein4B,
     Flux2Klein9B,
@@ -38,7 +39,8 @@ impl Architecture {
             Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma => ModelKind::Text,
             Architecture::Qwen3 | Architecture::Mistral3 => ModelKind::Text,
             Architecture::T5 | Architecture::ClipL | Architecture::OpenClip => ModelKind::TextEncoder,
-            Architecture::Flux2Dev
+            Architecture::ZImageTurbo
+            | Architecture::Flux2Dev
             | Architecture::Flux2Klein4B
             | Architecture::Flux2Klein9B
             | Architecture::Flux1Dev
@@ -53,6 +55,7 @@ impl Architecture {
 
     pub fn slug(&self) -> String {
         match self {
+            Architecture::ZImageTurbo => "z-image-turbo".into(),
             Architecture::Flux2Dev => "flux2-dev".into(),
             Architecture::Flux2Klein4B => "flux2-klein-4b".into(),
             Architecture::Flux2Klein9B => "flux2-klein-9b".into(),
@@ -97,6 +100,12 @@ pub fn detect_architecture(src: &dyn WeightsSource) -> Architecture {
         }
         return Architecture::Flux2Klein4B;
     }
+    // --- Z-Image Turbo (30 layers unified DiT + noise_refiner + context_refiner) ---
+    if has("context_refiner") || has("noise_refiner") || (has("cap_embedder") && has("adaLN_modulation")) {
+        return Architecture::ZImageTurbo;
+    }
+
+    // --- Flux / MMDiT Family (BFL native: double_blocks + single_blocks) ------
     if has("guidance_in") || has("time_guidance_embed") {
         let max_single = count_blocks(&keys, &["single_blocks.", "single_transformer_blocks."]);
         return if max_single > 40 { Architecture::Flux2Dev } else { Architecture::Flux1Dev };
@@ -168,6 +177,7 @@ pub fn detect_from_model_type(model_type: Option<&str>) -> Result<Architecture> 
         return Ok(Architecture::Unknown("unset".into()));
     }
     let arch = match t.as_str() {
+        "z-image-turbo" | "zit" | "zimage" | "z-image" => Architecture::ZImageTurbo,
         "flux2-dev" | "flux2dev" => Architecture::Flux2Dev,
         "flux2-klein-4b" | "flux2klein4b" => Architecture::Flux2Klein4B,
         "flux2-klein-9b" | "flux2klein9b" => Architecture::Flux2Klein9B,

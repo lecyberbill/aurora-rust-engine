@@ -263,7 +263,8 @@ impl AutoModel {
     fn build(arch: Architecture, weights: PathBuf, device: Device, dtype: DType) -> Result<BoxedModel> {
         let boxed: BoxedModel = match arch {
             // ---- Diffusion ------------------------------------------------------
-            Architecture::Flux2Dev | Architecture::Flux2Klein4B | Architecture::Flux2Klein9B
+            Architecture::ZImageTurbo
+            | Architecture::Flux2Dev | Architecture::Flux2Klein4B | Architecture::Flux2Klein9B
             | Architecture::Flux1Dev | Architecture::Flux1Schnell
             | Architecture::Sd35Large | Architecture::Sd35Medium
             | Architecture::Sdxl | Architecture::Sd15 => {
