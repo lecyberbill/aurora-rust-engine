@@ -682,6 +682,43 @@ let output = pipeline.generate_with_controlnet(params, &multi_controlnet, &input
 
 ---
 
+### Text-to-Text & CausalLM Generation (Llama, DeepSeek, Qwen, Gemma, Mistral)
+
+Aurora provides a unified `AutoModel` facade supporting autoregressive text generation for both **GGUF** (`.gguf`) and **SafeTensors** (`.safetensors`) models with GPU KV-Cache:
+
+```rust
+use aurora_rust_engine::models::{AutoModel, GenerationModel, downcast_model};
+use aurora_rust_engine::models::text::TextModel;
+use candle_core::{Device, DType};
+
+fn main() -> anyhow::Result<()> {
+    let device = Device::new_cuda(0)?;
+
+    // Automatically detects Llama 3, DeepSeek, Qwen 2.5/3.5, Gemma 2/3, Mistral
+    let model = AutoModel::from_local(
+        "E:/LMSTUDIO_MODELES/lmstudio-community/DeepSeek-R1-Distill-Llama-8B-GGUF/DeepSeek-R1-Distill-Llama-8B-Q8_0.gguf",
+        device,
+        DType::F16,
+    )?;
+
+    let mut lock = model.lock().unwrap();
+    let text_model = downcast_model::<TextModel>(&mut *lock)
+        .ok_or_else(|| anyhow::anyhow!("Failed to downcast model to TextModel"))?;
+
+    // Generate response (prompt, max_tokens, temperature)
+    let response = text_model.generate(
+        "Explain what makes Rust a modern language in 2 sentences.",
+        64,
+        0.7,
+    )?;
+
+    println!("Response:\n{}", response);
+    Ok(())
+}
+```
+
+---
+
 ## 5. REST API & WebSocket Server Reference
 
 Aurora embeds a high-performance [Axum](https://github.com/tokio-rs/axum) web server providing REST endpoints and streaming WebSockets:
@@ -757,6 +794,7 @@ Aurora comes with pre-built test and benchmark executables in `src/bin/`:
 | **`test_img2img`** | `cargo run --release --bin test_img2img --features cuda,flash-attn` | Image-to-Image pipeline verification |
 | **`test_inpaint`** | `cargo run --release --bin test_inpaint --features cuda,flash-attn` | Mask-guided inpainting verification |
 | **`test_controlnet`** | `cargo run --release --bin test_controlnet --features cuda,flash-attn` | Canny edge Multi-ControlNet integration test |
+| **`test_text_gen`** | `cargo run --release --bin test_text_gen --features cuda "<model.gguf>" "<prompt>"` | **CausalLM Text Generation** (Llama/DeepSeek/Qwen/Gemma/Mistral) |
 
 ---
 

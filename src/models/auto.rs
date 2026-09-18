@@ -270,8 +270,9 @@ impl AutoModel {
                 let diff = super::auto::build_diffusion(&arch, &weights, &device, dtype)?;
                 Arc::new(Mutex::new(diff))
             }
-            // ---- Text encoders --------------------------------------------------
+            // ---- Text / CausalLM models -----------------------------------------
             Architecture::Qwen3 | Architecture::Mistral3 | Architecture::T5
+            | Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma
             | Architecture::ClipL | Architecture::OpenClip => {
                 let text = super::auto::build_text(&arch, &weights, &device, dtype)?;
                 Arc::new(Mutex::new(text))
@@ -332,31 +333,28 @@ fn build_text(
     dtype: DType,
 ) -> Result<TextModel> {
     let id = arch.slug();
+    let archive: Arc<dyn crate::weights::WeightsSource> = if weights.is_dir() {
+        Arc::new(SafeTensorsArchive::open_shards_dir(weights)?)
+    } else if weights.to_string_lossy().to_lowercase().ends_with(".gguf") {
+        Arc::new(crate::gguf::GgufWeights::open(weights)?)
+    } else {
+        Arc::new(SafeTensorsArchive::open(weights)?)
+    };
+
     match arch {
-        Architecture::Qwen3 => {
-            // Open shards if a dir, else a single file.
-            let archive: Arc<dyn crate::weights::WeightsSource> = if weights.is_dir() {
-                Arc::new(SafeTensorsArchive::open_shards_dir(weights)?)
-            } else {
-                Arc::new(SafeTensorsArchive::open(weights)?)
-            };
-            let enc = crate::text::Qwen3TextEncoder::from_archive(&*archive, None, &Device::Cpu, dtype)?;
-            Ok(TextModel::qwen(id, enc))
-        }
-        Architecture::Mistral3 => {
-            let enc = if weights.is_dir() {
-                crate::text::Mistral3TextEncoder::from_dir(weights, None, Device::Cpu, dtype)?
-            } else {
-                crate::text::Mistral3TextEncoder::from_safetensors(weights, None, Device::Cpu, dtype)?
-            };
-            Ok(TextModel::mistral(id, enc))
+        Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma | Architecture::Qwen3 | Architecture::Mistral3 => {
+            let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
+            let tokenizer = resolve_tokenizer(weights, arch);
+            let pipeline = crate::models::text::CausalLMPipeline::new(
+                archive,
+                config,
+                tokenizer,
+                device.clone(),
+                dtype,
+            );
+            Ok(TextModel::causal_lm(id, arch.slug(), pipeline))
         }
         Architecture::T5 => {
-            let archive = if weights.is_dir() {
-                SafeTensorsArchive::open_shards_dir(weights)?
-            } else {
-                SafeTensorsArchive::open(weights)?
-            };
             let mut tensors = std::collections::HashMap::new();
             for key in archive.keys() {
                 if let Ok(t) = archive.get_tensor(&key, device, dtype) {
@@ -369,6 +367,62 @@ fn build_text(
         }
         _ => Err(LuminaError::UnsupportedOp(format!("text build for {}", arch.slug()))),
     }
+}
+
+fn resolve_tokenizer(weights: &Path, arch: &Architecture) -> Option<tokenizers::Tokenizer> {
+    // 1. Try local tokenizer.json in model dir or alongside file
+    let local_dir = if weights.is_dir() {
+        weights.to_path_buf()
+    } else {
+        weights.parent().unwrap_or(Path::new(".")).to_path_buf()
+    };
+    let local_tok = local_dir.join("tokenizer.json");
+    if local_tok.exists() {
+        if let Ok(t) = tokenizers::Tokenizer::from_file(&local_tok) {
+            return Some(t);
+        }
+    }
+
+    // 2. Try standard root cache tokenizers
+    let candidates = match arch {
+        Architecture::Qwen3 => vec!["qwen_tokenizer.json", "tokenizer.json"],
+        Architecture::Llama | Architecture::DeepSeek => vec!["llama_tokenizer.json", "tokenizer.json"],
+        Architecture::Gemma => vec!["gemma_tokenizer.json", "tokenizer.json"],
+        Architecture::Mistral3 => vec!["mistral_tokenizer.json", "tokenizer.json"],
+        _ => vec!["tokenizer.json"],
+    };
+    for c in candidates {
+        if Path::new(c).exists() {
+            if let Ok(t) = tokenizers::Tokenizer::from_file(c) {
+                return Some(t);
+            }
+        }
+    }
+
+    // 3. Fallback to download from HuggingFace Hub (public un-gated repos)
+    let repo_fallbacks: Vec<&str> = match arch {
+        Architecture::Qwen3 => vec!["Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen2.5-0.5B"],
+        Architecture::Llama | Architecture::DeepSeek => vec![
+            "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+            "NousResearch/Meta-Llama-3-8B-Instruct",
+            "meta-llama/Meta-Llama-3-8B-Instruct",
+        ],
+        Architecture::Gemma => vec!["google/gemma-2-2b-it", "google/gemma-2-9b"],
+        Architecture::Mistral3 => vec!["mistralai/Mistral-7B-Instruct-v0.3"],
+        _ => return None,
+    };
+
+    if let Ok(api) = hf_hub::api::sync::Api::new() {
+        for repo_name in repo_fallbacks {
+            let repo = api.model(repo_name.to_string());
+            if let Ok(tok_file) = repo.get("tokenizer.json") {
+                if let Ok(tok) = tokenizers::Tokenizer::from_file(tok_file) {
+                    return Some(tok);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Build a `VarBuilder` exposing a standalone safetensors file's keys verbatim (no remapping).

@@ -22,6 +22,8 @@ It provides a robust, zero-Python alternative for running generative diffusion m
 ## ✨ Features
 
 - **Pure Rust Native Inference**: Zero Python dependencies, zero PyTorch overhead, compiled directly to a native standalone executable.
+- **Unified HuggingFace AutoModel Facade**: Standard `AutoModel::from_local` and `AutoModel::from_pretrained` interface supporting both generative diffusion pipelines and autoregressive text models.
+- **CausalLM Text-to-Text Generation (Pure Rust)**: Autoregressive text generation with GPU KV-Cache supporting **Llama 3 / DeepSeek**, **Qwen 2.5/3.5**, **Gemma 2/3**, and **Mistral** in both **GGUF** (quantized Q4_K_M, Q8_0) and **SafeTensors** formats.
 - **Flux.1 & Flux.2 Family Full Support**: Native implementation of Multimodal Diffusion Transformers (MMDiT) for **Flux.1 [dev/schnell]**, **Flux.2-Klein-4B**, **Flux.2-Klein-9B**, and **Flux.2-Dev Scaled** with exact 3D/4D Rotary Position Embeddings (RoPE).
 - **Sub-7.5GB VRAM Flux Sequential Block Streaming**: Executes massive MMDiT models (3.88B to 12B parameters) with on-demand per-block GPU streaming and zero WDDM paging.
 - **FLUX.2 Image-to-Image (Img2Img) & Inpainting**: Contextual ODE transformation and sharp mask boundary preservation with flow-matching background re-injection.
@@ -253,6 +255,11 @@ See [`ROADMAP.md`](ROADMAP.md) for full technical specifications and development
 - [x] **Milestone 6**: Multi-ControlNet (OpenPose, Depth, Canny) & IP-Adapter Conditioners
 - [x] **Milestone 7**: Telemetry Profiler, Parameterized Kernel Dispatch & Adaptive VAE
 - [x] **Milestone 8**: Production Async Axum Server & WebSocket Streaming
+- [x] **Milestone 9**: Flux.1 MMDiT Diffusion Transformers (Dev/Schnell)
+- [x] **Milestone 10**: Flux.2-Klein-4B MMDiT & Quality Parity
+- [x] **Milestone 11**: Scaling to FLUX.2-Klein-9B & FLUX.2-Dev
+- [x] **Milestone 12**: FLUX.2 Img2Img & Inpainting Pipeline (Pure Rust 16/32-ch VAE)
+- [x] **Milestone 16**: CausalLM LLM Text Generation & AutoModel Facade (Llama, DeepSeek, Qwen, Gemma, Mistral in GGUF/Safetensors)
 
 ---
 

@@ -20,6 +20,9 @@ pub enum Architecture {
     Sd35Large,
     Sd35Medium,
     Qwen3,
+    Llama,
+    DeepSeek,
+    Gemma,
     Mistral3,
     T5,
     ClipL,
@@ -32,7 +35,8 @@ pub enum Architecture {
 impl Architecture {
     pub fn model_kind(&self) -> ModelKind {
         match self {
-            Architecture::Qwen3 | Architecture::Mistral3 => ModelKind::TextEncoder,
+            Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma => ModelKind::Text,
+            Architecture::Qwen3 | Architecture::Mistral3 => ModelKind::Text,
             Architecture::T5 | Architecture::ClipL | Architecture::OpenClip => ModelKind::TextEncoder,
             Architecture::Flux2Dev
             | Architecture::Flux2Klein4B
@@ -57,6 +61,9 @@ impl Architecture {
             Architecture::Sd35Large => "sd35-large".into(),
             Architecture::Sd35Medium => "sd35-medium".into(),
             Architecture::Qwen3 => "qwen3".into(),
+            Architecture::Llama => "llama".into(),
+            Architecture::DeepSeek => "deepseek".into(),
+            Architecture::Gemma => "gemma".into(),
             Architecture::Mistral3 => "mistral3".into(),
             Architecture::T5 => "t5".into(),
             Architecture::ClipL => "clip-l".into(),
@@ -106,16 +113,30 @@ pub fn detect_architecture(src: &dyn WeightsSource) -> Architecture {
         return if max_joint > 30 { Architecture::Sd35Large } else { Architecture::Sd35Medium };
     }
 
-    // --- Text encoders -------------------------------------------------------
-    if has("model.embed_tokens.weight") || has("embed_tokens.weight") {
+    // --- CausalLM / Text Models -----------------------------------------------
+    if has("model.embed_tokens.weight") || has("embed_tokens.weight") || has("token_embd.weight") {
+        if has("gemma") || has("pre_feedforward_layernorm") {
+            return Architecture::Gemma;
+        }
+        if has("deepseek") || has("mla") {
+            return Architecture::DeepSeek;
+        }
         if has("self_attn.q_proj.weight") && (has("layers.0.") || has("model.layers.0.")) {
-            // Qwen3 family
-            return Architecture::Qwen3;
+            if has("q_norm") || has("attn_q_norm") {
+                return Architecture::Qwen3;
+            }
+            return Architecture::Llama;
+        }
+        if has("blk.0.attn_q.weight") {
+            if has("attn_q_norm") || has("ssm_a") {
+                return Architecture::Qwen3;
+            }
+            return Architecture::Llama;
         }
         if has("language_model.model.layers.0.") || has("model.layers.0.") {
             return Architecture::Mistral3;
         }
-        return Architecture::Qwen3;
+        return Architecture::Llama;
     }
     if has("encoder.layers.") && has("decoder.layers.") {
         return Architecture::T5;
@@ -141,13 +162,9 @@ pub fn detect_architecture(src: &dyn WeightsSource) -> Architecture {
 }
 
 /// Detect from an optional `config.json` `model_type` string (HF convention), if present.
-///
-/// `model_type` values in HF configs: `"qwen3"`, `"mistral"`, `"t5"`, `"flux"`, `"sdxl"`, `"sd15"`,
-/// `"flux2"`... This is the authoritative source when a config file ships with the weights.
 pub fn detect_from_model_type(model_type: Option<&str>) -> Result<Architecture> {
     let t = model_type.unwrap_or_default().to_ascii_lowercase();
     if t.is_empty() {
-        // No `model_type` hint: caller falls back to shape sniffing.
         return Ok(Architecture::Unknown("unset".into()));
     }
     let arch = match t.as_str() {
@@ -158,6 +175,9 @@ pub fn detect_from_model_type(model_type: Option<&str>) -> Result<Architecture> 
         "flux1" | "flux" => Architecture::Flux1Dev,
         "sd3" | "sd35" | "sd3.5" | "stable-diffusion-3" | "stable-diffusion-3.5" => Architecture::Sd35Large,
         "qwen3" | "qwen2" | "qwen" => Architecture::Qwen3,
+        "llama" | "llama3" | "llama2" => Architecture::Llama,
+        "deepseek" | "deepseek_v2" | "deepseek_v3" => Architecture::DeepSeek,
+        "gemma" | "gemma2" | "gemma3" => Architecture::Gemma,
         "mistral" | "mistral3" => Architecture::Mistral3,
         "t5" | "t5xxl" => Architecture::T5,
         "clip" | "clip_l" | "clip-l" => Architecture::ClipL,
