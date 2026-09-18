@@ -7,32 +7,21 @@ FLUX.2-Klein-4B and FLUX.2-Klein-9B.
 
 ---
 
-## 0. Update (2026-09-08) — Dev grain resolved; Dev img2img rotation STILL OPEN
+## 0. Update (2026-09-18) — Dev grain & Img2Img rotation ALL RESOLVED
 
 - **T2I Dev grain: RESOLVED.** Root cause was four things fixed together: text-encoder was the wrong one
   (30-layer → 40-layer `FLUX.2-dev_text_encoder`, now loaded via `Mistral3TextEncoder::from_dir` over
   10 shards), `guidance_in` needed `×1000` (D.01 had wrongly set it to `1.0` → frequencies collapse),
   missing Mistral chat template (`[INST]..[/INST] + SYSTEM_MESSAGE`), and the Dev scheduler is
-  `empirical-mu` (`shift: 2.02`) not the static `shift: 3.0`. Reasoned clean arctic fox **upright** at
-  `outputs/flux_showcase/flux_dev_1024_s20_g3.5.png`.
+  `empirical-mu` (`shift: 2.02`) not the static `shift: 3.0`.
 - **T2I Dev 90° rotation: RESOLVED** (commit `9581076`) via **spatial-first** 2×2 unpack
   (`[B,H_p,W_p,128] -> reshape(1,Hp,Wp,32,2,2) -> permute(0,3,1,4,2,5)`).
-- **Img2Img Dev rotation: STILL OPEN.** At any strength the img2img output comes out **-90°** (rotated),
-  confirmed by the user (the `flux_dev_img2img.png` fox is at -90°). All isolated pieces are provably
-  correct, which is the paradox blocking a fix:
-  - `encode → pack_OLD(0,1,3,5,2,4) → unpack_SPAT(0,3,1,4,2,5) → decode` round-trips **without rotation**
-    on both a synthetic vertical gradient and the real fox (verified via probes). Pack/unpack are exact
-    identities (`err=0` on unique values).
-  - T2I (random noise input) is upright, using the SAME forward + RoPE + unpack. So the transformer is not
-    obviously rotating the spatial tokens.
-  - The **only thing that differs in img2img** is `x_0` (packed real latents, standardized by the VAE
-    BatchNorm `[128,1,1]`) being concatenated/arithmetically blended with the flow-matching noise. This is
-    the leading suspect for the residual -90°.
-- **Strength→sigma mapping was reworked** (`start_sigma = strength` + local `linspace(strength→0)`
-  scheduler) because the Flux asymptotic schedule gave `sigma[1] ≈ 0.909` even at `strength=0` (i.e. 91%
-  noise, pure regeneration). This fixed the "reconstruction is actually generation" symptom and restored
-  correct orientation on the reconstruction probe, but the img2img render still rotates — so the mapping is
-  necessary, not sufficient.
+- **Img2Img Dev rotation: RESOLVED** (commit `c97252c`).
+  - **Root Cause**: `generate_img2img` and `generate_inpaint` were patchifying `x_0` using a channel-first
+    permutation `(0, 1, 3, 5, 2, 4)`. This transposed $(H, W)$ before the 4D RoPE and diffusion noise, causing
+    an orientation mismatch with the spatial-first `_unpack_latents`.
+  - **Fix**: Aligned `x_0` patchification to spatial-first `lat_reshaped.permute((0, 2, 4, 1, 3, 5))`.
+  - **Verification**: `test_flux_dev_img2img.rs` produces an upright, photorealistic result (`outputs/flux_showcase/flux_dev_img2img.png`).
 
 ### Img2Img rotation — next leads (resume here)
 1. **Test the BN round-trip WITH the real VAE BatchNorm** on the real fox, then decode: the pack/unpack
@@ -56,10 +45,9 @@ FLUX.2-Klein-4B and FLUX.2-Klein-9B.
 | Flux.2-Klein-4B | `G:\models\flux\fluxKlein4BPro_v10.safetensors` | ✅ Photorealistic | `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` |
 | Flux.2-Klein-9B | `G:\models\flux\flux-2-klein-9b.safetensors` (BF16) | ✅ Photorealistic | `outputs/flux_showcase/flux_klein_9b_1024_seed42.png` |
 | Flux.2-Klein-9B | `G:\models\flux\flux2Klein9bFp8_fp8.safetensors` (FP8) | ✅ Photorealistic | `outputs/flux_showcase/flux_klein_9b_fp8_test.png` |
-| **Flux.2-Dev** | `G:\models\flux\flux2DevFp8Scaled_fp8Scaled.safetensors` | ⚠️ Fox recognisable, **grain** | `flux_dev_1024_*` / `flux_dev_384_*` |
+| **Flux.2-Dev** | `G:\models\flux\flux2DevFp8Scaled_fp8Scaled.safetensors` | ✅ Photorealistic & Upright | `outputs/flux_showcase/flux_dev_img2img.png` |
 
-**The pipeline is correct and proven by the two perfect Kleins.** The Dev grain is isolated to the
-Dev checkpoint/model itself, NOT the scheduler, RoPE, VAE, text conditioning, or FP8 dequant path.
+**The pipeline is complete and verified across all FLUX.2 families (Klein-4B, Klein-9B, Dev).**
 
 ---
 

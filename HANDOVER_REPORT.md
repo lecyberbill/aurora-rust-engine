@@ -156,5 +156,8 @@ Validated on **Juggernaut-XL v9 Photo** across 3 distinct aspect ratios with DPM
    - Dedicated VRAM strictly under 6.8 GB with 0 GB shared RAM paging.
 4. ✅ **HuggingFace Hub Direct Integration**:
    - 100% Pure Rust automatic downloading and caching via `hf-hub`.
-5. ⏳ **DiT (Diffusion Transformers - Flux & SD3) & FP8 Compute Extensions**:
-   - Joint MMDiT blocks and T5-XXL integration.
+5. ✅ **DiT (Diffusion Transformers - Flux.1, Flux.2 & SD 3.5 Large) & FP8 Streaming**:
+   - Joint MMDiT blocks, FlashAttention-2 integration, T5-XXL / Mistral-3.2 / Qwen3 encoders, and zero-paging sequential block streamer.
+   - Text-to-Image, Image-to-Image and Inpainting verified photorealistic across SDXL, SD 3.5, and FLUX.2 (Klein-4B, Klein-9B, Dev).
+6. ✅ **Unified CausalLM / Text Generation Engine**:
+   - Pure Rust text generation supporting Llama 3, DeepSeek-R1 Distill, Qwen, Gemma, Mistral in GGUF and Safetensors.

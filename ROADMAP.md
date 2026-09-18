@@ -276,7 +276,7 @@ Enabling execution of large-scale MMDiT models on modest VRAM (< 8GB) using the 
 
 ---
 
-### 🔬 Milestone 12: FLUX.2 Img2Img & Inpainting / Outpainting Pipeline (IN PROGRESS / ARCHITECTURE READY)
+### ✅ Milestone 12: FLUX.2 Img2Img & Inpainting / Outpainting Pipeline (COMPLETED & VERIFIED)
 Extending MMDiT image generation with full contextual image manipulation:
 - [x] **Pure Rust 32-Channel & 16-Channel `FluxVaeEncoder`** (`src/diffusion/vae_flux.rs`):
   - Complete 4-stage DownEncoder (`128->128->256->512->512`), asymmetric zero-padding `[0, 1, 0, 1]` downsampling convs, mid-block self-attention, and `quant_conv` projection.
@@ -284,7 +284,8 @@ Extending MMDiT image generation with full contextual image manipulation:
 - [x] **FLUX.2 VAE Decoder Layer Alignment**:
   - Fixed forward order for `decoder.up_blocks.0..3` and `conv_shortcut` layer resolution.
   - Roundtrip decode verified with crystal-clear photorealism (`rust_vae_roundtrip_lion.png`).
-- [x] **FLUX.2 Img2Img ODE Transformation** (`src/pipelines/flux.rs` : `generate_img2img`):
+- [x] **FLUX.2 Img2Img ODE Transformation & Orientation Fix** (`src/pipelines/flux.rs` : `generate_img2img`):
+  - Fixed 2×2 patch packing asymmetry: replaced channel-first permutation `(0, 1, 3, 5, 2, 4)` with strict spatial-first `(0, 2, 4, 1, 3, 5)` to align with `_unpack_latents`.
   - Exact Diffusers-compatible 2D patchification, BatchNorm latent standardization:
     $$x_0 = \frac{\text{patchify}(\text{encode}(x)) - \mu_{\text{bn}}}{\sqrt{\sigma^2_{\text{bn}} + 10^{-4}}}$$
   - Flow Matching Euler noise interpolation at $t_{\text{start}} = \lfloor N \cdot (1 - \text{strength}) \rfloor$:
@@ -293,10 +294,9 @@ Extending MMDiT image generation with full contextual image manipulation:
   - Area-averaged latent mask downsampling with in-step background latent re-injection:
     $$z_t = (1 - M) \odot z_{\text{orig}, t} + M \odot z_{\text{denoised}, t}$$
 - [x] **End-to-End Visual Quality on Flux.2 Models**:
-  - Klein-9B img2img **verified photorealistic** (`test_flux_img2img_9b.rs` → crowned lion from a fox).
-  - Klein-9B inpainting **verified photorealistic** (`test_flux_inpaint_9b.rs` → emerald crown in a circular mask,
-    rest of image preserved).
-  - Dev conditioning converged (see Milestone 11) — Dev T2I now photorealistic & upright.
+  - Klein-9B img2img **verified photorealistic & upright** (`test_flux_img2img_9b.rs` → crowned lion).
+  - Klein-9B inpainting **verified photorealistic** (`test_flux_inpaint_9b.rs` → emerald crown in a circular mask).
+  - Dev img2img **verified photorealistic & upright** (`test_flux_dev_img2img.rs` → `outputs/flux_showcase/flux_dev_img2img.png`).
 
 ---
 
