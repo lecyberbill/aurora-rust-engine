@@ -112,12 +112,15 @@ impl ImageGenerationModel for DiffusionModel {
         }
     }
 
-    fn generate_inpaint(&mut self, params: InpaintParams, _on_step: Option<ProgressFn>) -> Result<RgbImage> {
+    fn generate_inpaint(&mut self, params: InpaintParams, on_step: Option<ProgressFn>) -> Result<RgbImage> {
         match &mut self.inner {
             DiffBackend::Flux(p) => {
                 p.generate_inpaint(params, None::<fn(usize, usize, &Tensor)>).map(|(img, _)| img)
             }
-            DiffBackend::Sdxl(_) => Err(LuminaError::UnsupportedOp("SDXL inpaint".into())),
+            DiffBackend::Sdxl(p) => {
+                let cb = on_step;
+                p.generate_inpaint(params, cb)
+            }
             DiffBackend::Sd15(_) => Err(LuminaError::UnsupportedOp("SD1.5 inpaint".into())),
         }
     }
