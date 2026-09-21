@@ -30,6 +30,7 @@ fn main() -> anyhow::Result<()> {
         dtype,
     )?;
     println!("✅ Pipeline loaded in {:.2} s", load_start.elapsed().as_secs_f64());
+    pipeline.enable_flash_attn();
 
     let prompt = "A cinematic futuristic sports car driving through a neon cyber city at night, 8k octane render, hyperdetailed";
     let params = DiffusionParams {

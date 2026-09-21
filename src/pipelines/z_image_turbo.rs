@@ -124,6 +124,16 @@ impl ZImageTurboPipeline {
         self.vae = Some(vae);
     }
 
+    /// Enable FlashAttention-2 fast path (CUDA F16/BF16)
+    pub fn enable_flash_attn(&mut self) {
+        unsafe { std::env::set_var("ZIMAGE_FLASH_ATTN", "1") };
+    }
+
+    /// Disable FlashAttention-2 and use standard SDPA
+    pub fn disable_flash_attn(&mut self) {
+        unsafe { std::env::set_var("ZIMAGE_FLASH_ATTN", "0") };
+    }
+
     /// Generate image from prompt
     pub fn generate(&mut self, params: &DiffusionParams) -> Result<(RgbImage, GenerationMetrics)> {
         let total_start = Instant::now();
@@ -188,12 +198,14 @@ impl ZImageTurboPipeline {
                 step_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            // Decode intermediate step
-            if let Some(ref vae) = self.vae {
-                if let Ok(cpu_lat) = latents.to_device(&Device::Cpu)?.to_dtype(DType::F32) {
-                    if let Ok(dec) = vae.decode(&cpu_lat) {
-                        if let Ok(step_img) = crate::diffusion::vae::tensor_to_rgb_image(&dec) {
-                            let _ = step_img.save(format!("output/step_{}.png", step_idx + 1));
+            // Decode intermediate step (only if explicitly enabled for diagnostics)
+            if std::env::var("ZIMAGE_DEBUG_STEPS").ok().map(|s| s == "1").unwrap_or(false) {
+                if let Some(ref vae) = self.vae {
+                    if let Ok(cpu_lat) = latents.to_device(&Device::Cpu)?.to_dtype(DType::F32) {
+                        if let Ok(dec) = vae.decode(&cpu_lat) {
+                            if let Ok(step_img) = crate::diffusion::vae::tensor_to_rgb_image(&dec) {
+                                let _ = step_img.save(format!("output/step_{}.png", step_idx + 1));
+                            }
                         }
                     }
                 }

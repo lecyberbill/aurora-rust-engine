@@ -134,7 +134,29 @@ impl ZImageAttention {
             k = apply_rope(&k)?;
         }
 
-        // Scaled dot product attention
+        // Fast-path: FlashAttention-2 if feature enabled and activated (F16/BF16 on CUDA)
+        #[cfg(feature = "flash-attn")]
+        {
+            let use_flash = std::env::var("AURORA_FLASH_ATTN")
+                .or_else(|_| std::env::var("FLUX_FLASH_ATTN"))
+                .or_else(|_| std::env::var("ZIMAGE_FLASH_ATTN"))
+                .ok()
+                .map(|s| s == "1")
+                .unwrap_or(false);
+            if use_flash && q.device().is_cuda() && (q.dtype() == DType::F16 || q.dtype() == DType::BF16) {
+                let q_c = q.contiguous()?;
+                let k_c = k.contiguous()?;
+                let v_c = v.contiguous()?;
+                if let Ok(attn_out) = candle_flash_attn::flash_attn(&q_c, &k_c, &v_c, self.scale as f32, false) {
+                    let out = attn_out
+                        .reshape((b, seq_len, self.num_heads * self.head_dim))?
+                        .to_dtype(orig_dtype)?;
+                    return self.out.forward(&out);
+                }
+            }
+        }
+
+        // Standard scaled dot product attention fallback (F32)
         let q_t = (q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)? * self.scale)?;
         let k_t = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
         let v_t = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
