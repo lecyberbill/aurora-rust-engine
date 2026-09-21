@@ -185,7 +185,7 @@ pub struct ZImageBlock {
     ffn_norm1: RMSNorm,
     feed_forward: ZImageFeedForward,
     ffn_norm2: RMSNorm,
-    hidden_size: usize,
+    _hidden_size: usize,
 }
 
 impl ZImageBlock {
@@ -207,7 +207,7 @@ impl ZImageBlock {
             ffn_norm1,
             feed_forward,
             ffn_norm2,
-            hidden_size: cfg.hidden_size,
+            _hidden_size: cfg.hidden_size,
         })
     }
 
@@ -257,7 +257,7 @@ pub struct ZImageRefinerBlock {
     ffn_norm1: RMSNorm,
     feed_forward: ZImageFeedForward,
     ffn_norm2: RMSNorm,
-    hidden_size: usize,
+    _hidden_size: usize,
 }
 
 impl ZImageRefinerBlock {
@@ -282,7 +282,7 @@ impl ZImageRefinerBlock {
             ffn_norm1,
             feed_forward,
             ffn_norm2,
-            hidden_size: cfg.hidden_size,
+            _hidden_size: cfg.hidden_size,
         })
     }
 

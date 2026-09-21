@@ -12,7 +12,29 @@ pub fn create_flux_rope_embeddings(
     theta: f64,
     device: &Device,
 ) -> Result<(Tensor, Tensor)> {
+    create_flux_rope_embeddings_with_refs(
+        txt_len,
+        h_patches,
+        w_patches,
+        &[],
+        axes_dim,
+        theta,
+        device,
+    )
+}
+
+/// Generate 3D/4D RoPE coordinates with optional reference image latents (Flux.2 multi-image reference)
+pub fn create_flux_rope_embeddings_with_refs(
+    txt_len: usize,
+    h_patches: usize,
+    w_patches: usize,
+    ref_patches: &[(usize, usize)],
+    axes_dim: &[usize],
+    theta: f64,
+    device: &Device,
+) -> Result<(Tensor, Tensor)> {
     let img_len = h_patches * w_patches;
+    let ref_len: usize = ref_patches.iter().map(|(h, w)| h * w).sum();
     let num_axes = axes_dim.len();
 
     // 1. Text IDs: [txt_len, num_axes]
@@ -29,8 +51,8 @@ pub fn create_flux_rope_embeddings(
         }
     }
     
-    // 2. Image IDs: [img_len, num_axes]
-    let mut img_ids_vec = Vec::with_capacity(img_len * num_axes);
+    // 2. Image IDs: [img_len + ref_len, num_axes]
+    let mut img_ids_vec = Vec::with_capacity((img_len + ref_len) * num_axes);
     if num_axes == 4 {
         // Flux.2 4D axes: [time (T), height (Y), width (X), canvas/ref (Ref)]
         for row in 0..h_patches {
@@ -38,7 +60,18 @@ pub fn create_flux_rope_embeddings(
                 img_ids_vec.push(0f32);       // Axis 1: Time (T)
                 img_ids_vec.push(row as f32); // Axis 2: Height (Y)
                 img_ids_vec.push(col as f32); // Axis 3: Width (X)
-                img_ids_vec.push(0f32);       // Axis 4: Canvas / Ref ID
+                img_ids_vec.push(0f32);       // Axis 4: Canvas / Ref ID (0 for main canvas)
+            }
+        }
+        for (ref_idx, &(rh, rw)) in ref_patches.iter().enumerate() {
+            let ref_id = (ref_idx + 1) as f32;
+            for row in 0..rh {
+                for col in 0..rw {
+                    img_ids_vec.push(0f32);
+                    img_ids_vec.push(row as f32);
+                    img_ids_vec.push(col as f32);
+                    img_ids_vec.push(ref_id);
+                }
             }
         }
     } else {
@@ -50,11 +83,20 @@ pub fn create_flux_rope_embeddings(
                 img_ids_vec.push(col as f32);
             }
         }
+        for &(rh, rw) in ref_patches {
+            for row in 0..rh {
+                for col in 0..rw {
+                    img_ids_vec.push(0f32);
+                    img_ids_vec.push(row as f32);
+                    img_ids_vec.push(col as f32);
+                }
+            }
+        }
     }
 
     let mut combined_ids_vec = txt_ids_vec;
     combined_ids_vec.extend(img_ids_vec);
-    let total_seq = txt_len + img_len;
+    let total_seq = txt_len + img_len + ref_len;
 
     let mut cos_parts = Vec::new();
     let mut sin_parts = Vec::new();

@@ -211,14 +211,12 @@ The MMDiT module now covers **Flux.1** (Schnell/Dev) and **Flux.2-Klein-4B**. Th
 - [ ] **SD3.5 (Stable Diffusion 3.5 Large)** — MMDiT *already* exercised via `FluxConfig::sd35_large()` (24 DoubleStreamBlocks, 1536 hidden), but full pipeline integration (3-TEK T5-XXL + OpenCLIP, pooled text conditioning, 16-ch VAE, re-captioning, negative-prompt guidance) still pending.
 - [ ] **FP8 (Ada Lovelace) weight support** for DiT blocks.
 - [ ] **Full HF-Hub integration** (`from_pretrained`) for MMDiT checkpoints.
-- [ ] **LoRA on FLUX.2-Dev (T2I + Img2Img)** — the LoRA engine (Milestone 3b/3c) is verified end-to-end
-  on **Flux.1** only. FLUX.2-Dev uses a different profile (128-ch patched latents `[c,py,px]`,
-  `guidance_embed` timestep+guidance, FP8 `fp8Scaled` weights, Mistral 40-layer text encoder), so a Dev
-  LoRA must be validated through the `fp8Scaled` dequant + 128-ch streamer splice and checked on both the
-  T2I and Img2Img paths (`test_flux_dev.rs` / `test_flux_dev_img2img.rs` with an undocumented-mapping
-  Dev-origin LoRA, e.g. `lora_unet_single_blocks.{i}.*`).
+- [x] **LoRA on FLUX.2-Dev (T2I + Img2Img)** — the LoRA engine (Milestones 3b/3c & 11) is verified end-to-end
+  on **Flux.1** and **FLUX.2-Dev** (128-ch patched latents, guidance_embed, FP8 `fp8Scaled` weights, Mistral-3.2 40-layer VLM)
+  with direct on-the-fly dequantization and block streamer splicing (`test_flux_dev_lora_turbo.rs`, `test_flux_dev_img2img.rs`
+  producing `outputs/flux_showcase/flux_dev_img2img_lora.png`).
 - [ ] **Guidance embed / negative-prompt CFG** paths vs. guidance-distilled models (Klein uses `guidance_distilled=True`).
-- [ ] **Reference-image / KV-cache edit** path (Flux.2 `encode_image_refs`, `denoise_cached`).
+- [x] **Reference-image / KV-cache edit** path (Flux.2 `encode_image_refs`, `generate_with_refs` with 4D RoPE canvas/ref coordinates `[time, row, col, ref_id]` in `src/diffusion/dit/embeddings.rs` and `src/pipelines/flux.rs`, verified with `test_flux_reference_edit.rs`).
 - [ ] **CUDA-Graph & batched multi-image** throughput tuning for MMDiT.
 - [ ] **[PROPOSED] Block-Level GPU Kernel Compiler in pure Rust** — see Milestone 14: a Rust DSL → PTX
   → JIT compiler to emit our own fused kernels and drop the C++-bound FlashAttention/cuBLAS dependency.

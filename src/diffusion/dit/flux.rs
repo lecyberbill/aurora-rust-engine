@@ -304,6 +304,21 @@ impl FluxTransformer {
         guidance: Option<&Tensor>,
         streamer: Option<&crate::diffusion::dit::streamer::SequentialBlockStreamer>,
     ) -> Result<Tensor> {
+        self.forward_with_streamer_and_refs(img, txt, timesteps, y, guidance, None, streamer)
+    }
+
+    /// Forward pass through the Multimodal Diffusion Transformer with support for sequential streaming
+    /// and optional multi-image reference latents (Flux.2 4D RoPE conditioning).
+    pub fn forward_with_streamer_and_refs(
+        &self,
+        img: &Tensor,
+        txt: &Tensor,
+        timesteps: &Tensor,
+        y: Option<&Tensor>,
+        guidance: Option<&Tensor>,
+        ref_latents: Option<&[(Tensor, usize, usize)]>, // (tokens [1, rh*rw, 128], rh, rw)
+        streamer: Option<&crate::diffusion::dit::streamer::SequentialBlockStreamer>,
+    ) -> Result<Tensor> {
         if let Ok(dir) = std::env::var("FLUX_MODEL_DUMP") {
             let f = |t: &Tensor| -> String { let v=t.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap(); format!("{:?}", v) };
             let _ = std::fs::write(format!("{dir}/m_img.txt"), f(img));
@@ -354,20 +369,32 @@ impl FluxTransformer {
             }
         }
 
+        // Project reference latents and collect patch coordinates for 4D RoPE
+        let mut ref_patches = Vec::new();
+        if let Some(refs) = ref_latents {
+            for (ref_tok, rh, rw) in refs {
+                let ref_h = self.img_in.forward(ref_tok)?;
+                img_h = Tensor::cat(&[&img_h, &ref_h], 1)?;
+                ref_patches.push((*rh, *rw));
+            }
+        }
+
         let axes_dim = self.config.axes_dim.clone();
-        let (freqs_cos, freqs_sin) = crate::diffusion::dit::embeddings::create_flux_rope_embeddings(
+        let (freqs_cos, freqs_sin) = crate::diffusion::dit::embeddings::create_flux_rope_embeddings_with_refs(
             txt_len,
             patch_side,
             patch_side,
+            &ref_patches,
             &axes_dim,
             self.config.theta,
             img.device(),
         )?;
 
+        let total_img_seq = img_h.dim(1)?;
         let txt_cos = freqs_cos.narrow(0, 0, txt_len)?;
         let txt_sin = freqs_sin.narrow(0, 0, txt_len)?;
-        let img_cos = freqs_cos.narrow(0, txt_len, img_seq)?;
-        let img_sin = freqs_sin.narrow(0, txt_len, img_seq)?;
+        let img_cos = freqs_cos.narrow(0, txt_len, total_img_seq)?;
+        let img_sin = freqs_sin.narrow(0, txt_len, total_img_seq)?;
 
         // 3. Double Stream (Joint Attention) Blocks
         if std::env::var("FLUX_TRACE").is_ok() {
@@ -486,7 +513,11 @@ impl FluxTransformer {
         let shift = shift.unsqueeze(1)?;
         let img_modulated = img_normed.broadcast_mul(&scale)?.broadcast_add(&shift)?;
 
-        let out = self.final_linear.forward(&img_modulated)?;
+        let mut out = self.final_linear.forward(&img_modulated)?;
+        // If reference latents were attached, only extract the velocity tokens corresponding to the main canvas
+        if ref_latents.is_some() {
+            out = out.narrow(1, 0, img_seq)?;
+        }
         // SD3/SD3.5 `proj_out` yields the fused 2x2 patch channels as `(ph, pw, c)` (diffusers
         // `einsum "nhwpqc->nchpwq"`), whereas the packed input consumed by `img_in` (from the patch
         // Conv2d) is `(c, ph, pw)`. Reorder the velocity so the output packing matches the input,

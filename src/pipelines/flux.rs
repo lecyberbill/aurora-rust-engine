@@ -1389,6 +1389,230 @@ impl FluxPipeline {
         Ok((image, metrics))
     }
 
+    /// Encode a slice of reference images into packed and standardized latent tokens `[1, H_p*W_p, 128]`
+    /// along with their patch dimensions `(H_p, W_p)` for multi-image reference conditioning.
+    pub fn encode_image_refs(&self, images: &[image::DynamicImage]) -> Result<Vec<(Tensor, usize, usize)>> {
+        let mut encoded = Vec::new();
+        let enc = self.vae_encoder.as_ref().ok_or_else(|| {
+            candle_core::Error::Msg("FluxVaeEncoder required for reference image encoding".into())
+        })?;
+
+        let in_channels = self.transformer.config.in_channels;
+
+        for img in images {
+            let (w, h) = (img.width() as usize, img.height() as usize);
+            let adj_w = (w / 16) * 16;
+            let adj_h = (h / 16) * 16;
+            let img_rgb = if adj_w != w || adj_h != h {
+                img.resize_exact(adj_w as u32, adj_h as u32, image::imageops::FilterType::CatmullRom).to_rgb8()
+            } else {
+                img.to_rgb8()
+            };
+
+            let (h_patches, w_patches) = (adj_h / 16, adj_w / 16);
+            let raw_bytes = img_rgb.into_raw();
+            let img_f32: Vec<f32> = raw_bytes.iter().map(|&b| (b as f32 / 127.5) - 1.0).collect();
+            let img_tensor = Tensor::from_vec(img_f32, (1, adj_h, adj_w, 3), &self.device)?
+                .permute((0, 3, 1, 2))?
+                .contiguous()?
+                .to_dtype(self.dtype)?;
+
+            let init_latents = enc.encode(&img_tensor)?;
+
+            let tokens = if in_channels == 128 {
+                let lat_reshaped = init_latents.reshape((1, 32, h_patches, 2, w_patches, 2))?;
+                let lat_spatial = lat_reshaped.permute((0, 2, 4, 1, 3, 5))?.contiguous()?;
+                let patchified_4d = lat_spatial.reshape((1, h_patches, w_patches, 128))?.permute((0, 3, 1, 2))?.contiguous()?;
+
+                let standardized_4d = if let Some(ref vae) = self.vae {
+                    if let (Some(mean), Some(var)) = (vae.bn_mean(), vae.bn_var()) {
+                        let mean_f32 = mean.to_dtype(DType::F32)?.reshape((1, 128, 1, 1))?;
+                        let var_f32 = var.to_dtype(DType::F32)?.reshape((1, 128, 1, 1))?;
+                        let std_f32 = (var_f32 + 1e-4)?.sqrt()?;
+                        let grid_f32 = patchified_4d.to_dtype(DType::F32)?;
+                        let normed = grid_f32.broadcast_sub(&mean_f32)?.broadcast_div(&std_f32)?;
+                        normed.to_dtype(self.dtype)?
+                    } else {
+                        patchified_4d
+                    }
+                } else {
+                    patchified_4d
+                };
+
+                standardized_4d.reshape((1, 128, h_patches * w_patches))?.permute((0, 2, 1))?.contiguous()?
+            } else {
+                let ph = 2;
+                let pw = 2;
+                let c = 16;
+                let init_reshaped = init_latents.reshape((1, c, h_patches, ph, w_patches, pw))?;
+                let init_permuted = init_reshaped.permute((0, 2, 4, 1, 3, 5))?.contiguous()?;
+                init_permuted.reshape((1, h_patches * w_patches, in_channels))?
+            };
+
+            encoded.push((tokens, h_patches, w_patches));
+        }
+
+        Ok(encoded)
+    }
+
+    /// Generate an image conditioned on a prompt and one or more Reference Images using FLUX.2 4D RoPE joint attention.
+    pub fn generate_with_refs(
+        &mut self,
+        params: DiffusionParams,
+        reference_images: &[image::DynamicImage],
+        progress_cb: Option<impl Fn(usize, usize, &Tensor)>,
+    ) -> Result<(image::RgbImage, GenerationMetrics)> {
+        let t_total = Instant::now();
+        let num_steps = params.num_steps;
+        let in_channels = self.transformer.config.in_channels;
+        let c = in_channels;
+        let ph = 2;
+        let pw = 2;
+        let h_patches = params.height / 16;
+        let w_patches = params.width / 16;
+
+        println!("📷 Encoding {} reference image(s)...", reference_images.len());
+        let ref_latents = self.encode_image_refs(reference_images)?;
+
+        self.scheduler.set_timesteps(num_steps)?;
+
+        // 1. Initial Gaussian noise for main generation
+        let mut latents = if in_channels == 128 {
+            let raw_noise = Tensor::randn(0f32, 1f32, (1, 128, h_patches, w_patches), &self.device)?.to_dtype(self.dtype)?;
+            raw_noise.reshape((1, 128, h_patches * w_patches))?.permute((0, 2, 1))?.contiguous()?
+        } else {
+            let raw_noise = Tensor::randn(0f32, 1f32, (1, c, h_patches * ph, w_patches * pw), &self.device)?.to_dtype(self.dtype)?;
+            let reshaped = raw_noise.reshape((1, c, h_patches, ph, w_patches, pw))?;
+            let permuted = reshaped.permute((0, 2, 4, 1, 3, 5))?.contiguous()?;
+            permuted.reshape((1, h_patches * w_patches, in_channels))?
+        };
+
+        // 2. Text Conditioning
+        let txt_tokens = if let Some(ref mut mistral) = self.mistral {
+            let raw = if in_channels == 128 && self.transformer.config.hidden_size > 1024 {
+                mistral.encode_dim(params.prompt, 512, if self.transformer.config.hidden_size == 4096 { 4096 } else { 5120 })?
+            } else {
+                mistral.encode(params.prompt, 512)?
+            };
+            let expected = if self.transformer.config.hidden_size == 4096 { 4096 } else if self.transformer.config.hidden_size == 6144 { 15360 } else { 4096 };
+            let d = raw.dim(2)?;
+            if d < expected {
+                let pad = Tensor::zeros((raw.dim(0)?, raw.dim(1)?, expected - d), self.dtype, &self.device)?;
+                Tensor::cat(&[&raw, &pad], 2)?.contiguous()?.to_device(&self.device)?.to_dtype(self.dtype)?
+            } else if d > expected {
+                raw.narrow(2, 0, expected)?.contiguous()?.to_device(&self.device)?.to_dtype(self.dtype)?
+            } else {
+                raw.to_device(&self.device)?.to_dtype(self.dtype)?
+            }
+        } else if let Some(ref mut qwen) = self.qwen3 {
+            qwen.encode(params.prompt, 512)?.to_device(&self.device)?.to_dtype(self.dtype)?
+        } else if let Some(ref mut t5) = self.t5xxl {
+            let t5_emb = t5.encode(params.prompt, 256)?;
+            t5_emb.to_device(&self.device)?.to_dtype(self.dtype)?
+        } else {
+            (Tensor::randn(0f32, 1.0f32, (1, 256, 4096), &self.device)? * 0.1)?.to_dtype(self.dtype)?
+        };
+
+        let y_vec = if let Some(ref mut clip) = self.clip_l {
+            match clip.encode_pooled(params.prompt) {
+                Ok(vec) => Some(vec.to_device(&self.device)?.to_dtype(self.dtype)?),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        let guidance_tensor = if self.transformer.config.guidance_embed {
+            let g = params.guidance_scale as f32;
+            Some(Tensor::from_slice(&[g], (1,), &self.device)?.to_dtype(self.dtype)?)
+        } else {
+            None
+        };
+
+        // 3. Flow Match Euler Loop with Multi-Image Reference conditioning
+        println!("⚡ Executing Reference-Conditioned Flow Match ({} steps)...", num_steps);
+        let t_unet_start = Instant::now();
+        let timesteps: Vec<usize> = self.scheduler.timesteps().to_vec();
+        let sigmas: Vec<f64> = self.scheduler.sigmas().to_vec();
+
+        for (step_idx, &t) in timesteps.iter().enumerate() {
+            let sigma = if step_idx < sigmas.len() { sigmas[step_idx] } else { 0.0 };
+            let t_tensor = Tensor::from_slice(&[sigma as f32], (1,), &self.device)?.to_dtype(self.dtype)?;
+
+            let velocity = self.transformer.forward_with_streamer_and_refs(
+                &latents,
+                &txt_tokens,
+                &t_tensor,
+                y_vec.as_ref(),
+                guidance_tensor.as_ref(),
+                Some(&ref_latents),
+                self.streamer.as_ref(),
+            )?;
+
+            latents = self.scheduler.step(&velocity, t, &latents)?;
+
+            if let Some(ref cb) = progress_cb {
+                cb(step_idx + 1, num_steps, &latents);
+            }
+        }
+
+        let unet_duration = t_unet_start.elapsed();
+        let unet_total_ms = unet_duration.as_secs_f64() * 1000.0;
+        let unet_it_per_sec = num_steps as f64 / unet_duration.as_secs_f64();
+        let unet_step_avg_ms = unet_total_ms / num_steps as f64;
+
+        // 4. Unpack latents & VAE decode
+        let t_vae_start = Instant::now();
+        let unpatchified_latents = if in_channels == 128 {
+            let grid_4d = latents.reshape((1, h_patches, w_patches, 128))?.permute((0, 3, 1, 2))?.contiguous()?;
+            let destandardized = if let Some(ref vae) = self.vae {
+                if let (Some(mean), Some(var)) = (vae.bn_mean(), vae.bn_var()) {
+                    let mean_f32 = mean.to_dtype(DType::F32)?.reshape((1, 128, 1, 1))?;
+                    let var_f32 = var.to_dtype(DType::F32)?.reshape((1, 128, 1, 1))?;
+                    let std_f32 = (var_f32 + 1e-4)?.sqrt()?;
+                    let grid_f32 = grid_4d.to_dtype(DType::F32)?;
+                    let normed = grid_f32.broadcast_mul(&std_f32)?.broadcast_add(&mean_f32)?;
+                    normed.to_dtype(self.dtype)?
+                } else {
+                    grid_4d
+                }
+            } else {
+                grid_4d
+            };
+
+            let spatial_first = destandardized.permute((0, 2, 3, 1))?.contiguous()?;
+            let reshaped = spatial_first.reshape((1, h_patches, w_patches, 32, 2, 2))?;
+            let permuted = reshaped.permute((0, 3, 1, 4, 2, 5))?.contiguous()?;
+            permuted.reshape((1, 32, h_patches * 2, w_patches * 2))?
+        } else if self.is_sd35() {
+            sd3_unpatchify(&latents, params.height, params.width)?
+        } else {
+            unpatchify(&latents, params.height, params.width)?
+        };
+
+        let image = if let Some(ref vae) = self.vae {
+            vae.decode_to_image(&unpatchified_latents)?
+        } else {
+            let rgb_latent = unpatchified_latents.narrow(1, 0, 3)?;
+            crate::diffusion::vae::tensor_to_rgb_image(&rgb_latent)?
+        };
+
+        let vae_decode_ms = t_vae_start.elapsed().as_secs_f64() * 1000.0;
+        let total_wallclock_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+        let metrics = GenerationMetrics {
+            prompt_encode_ms: 0.0,
+            unet_steps: num_steps,
+            unet_total_ms,
+            unet_it_per_sec,
+            unet_step_avg_ms,
+            vae_decode_ms,
+            total_wallclock_ms,
+        };
+
+        Ok((image, metrics))
+    }
+
     pub fn checkpoint_path(&self) -> &Path {
         &self.checkpoint_path
     }

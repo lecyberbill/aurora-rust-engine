@@ -59,6 +59,18 @@ fn main() -> Result<()> {
     pipeline.set_vae(decoder);
     pipeline.set_vae_encoder(encoder);
 
+    let lora_path = std::env::var("LORA").ok();
+    let lora_mult: f64 = std::env::var("MULT").ok().and_then(|s| s.parse().ok()).unwrap_or(0.85);
+    if let Some(ref lp) = lora_path {
+        if std::path::Path::new(lp).exists() {
+            println!("📥 Loading LoRA into Dev Img2Img pipeline (mult: {}): {}", lora_mult, lp);
+            pipeline.load_lora(lp, lora_mult).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+            println!("✅ LoRA successfully merged into sequential streamer deltas.");
+        } else {
+            println!("⚠️ Specified LoRA path does not exist: {}", lp);
+        }
+    }
+
     println!("\n🎨 Executing Dev Img2Img (Strength: {}, {} Steps, Guidance: {})...", strength, steps, guidance);
     println!("📝 Prompt: \"{}\"", prompt);
 
@@ -80,7 +92,12 @@ fn main() -> Result<()> {
 
     let out_dir = "outputs/flux_showcase";
     std::fs::create_dir_all(out_dir).ok();
-    let out_path = format!("{}/flux_dev_img2img.png", out_dir);
+    let out_filename = if lora_path.is_some() {
+        "flux_dev_img2img_lora.png"
+    } else {
+        "flux_dev_img2img.png"
+    };
+    let out_path = format!("{}/{}", out_dir, out_filename);
     result_img.save(&out_path)
         .map_err(|e| candle_core::Error::Msg(format!("Failed to save output image: {}", e)))?;
 

@@ -13,13 +13,13 @@ fn main() -> Result<()> {
     let checkpoint = std::env::var("CKPT").unwrap_or_else(|_| "G:\\models\\flux\\flux2DevFp8Scaled_fp8Scaled.safetensors".into());
     let mistral_path = std::env::var("MISTRAL").unwrap_or_else(|_| "G:\\models\\clip\\FLUX.2-dev_text_encoder".into());
     let vae_path = std::env::var("VAE").unwrap_or_else(|_| "G:\\models\\vae\\flux2-vae.safetensors".into());
-    let lora_path = std::env::var("LORA").unwrap_or_else(|_| "G:\\models\\loras\\flux.2-turbo-lora.safetensors".into());
-    let multiplier: f64 = std::env::var("MULT").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
-    let prompt = std::env::var("PROMPT").unwrap_or_else(|_| "a gorgeous portrait of an arctic fox with sapphire blue eyes in a mystical snowy forest at twilight, cinematic lighting, 8k".into());
+    let lora_path = std::env::var("LORA").unwrap_or_else(|_| "G:\\models\\loras\\flux2tatooR32.safetensors".into());
+    let multiplier: f64 = std::env::var("MULT").ok().and_then(|s| s.parse().ok()).unwrap_or(0.85);
+    let prompt = std::env::var("PROMPT").unwrap_or_else(|_| "a muscular man with intricate dragon tattoo on his chest and arm, studio portrait, photorealistic, 8k".into());
     let steps: usize = std::env::var("STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
     let guidance: f64 = std::env::var("GUIDANCE").ok().and_then(|s| s.parse().ok()).unwrap_or(3.5);
-    let width: usize = std::env::var("WIDTH").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
-    let height: usize = std::env::var("HEIGHT").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+    let width: usize = std::env::var("WIDTH").ok().and_then(|s| s.parse().ok()).unwrap_or(512);
+    let height: usize = std::env::var("HEIGHT").ok().and_then(|s| s.parse().ok()).unwrap_or(512);
 
     if !Path::new(&checkpoint).exists() {
         eprintln!("[-] Checkpoint not found: {}", checkpoint);
