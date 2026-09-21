@@ -54,20 +54,30 @@ impl ZImageTurboPipeline {
 
         // 2. Build Qwen3 Text Encoder from same AIO checkpoint
         println!("🧠 Loading Qwen3 Text Encoder from AIO checkpoint");
-        let text_encoder = Qwen3TextEncoder::from_archive(archive.as_ref(), None, device, dtype).ok();
+        let text_encoder = match Qwen3TextEncoder::from_archive(archive.as_ref(), None, device, dtype) {
+            Ok(te) => {
+                println!("✅ Qwen3 Text Encoder successfully instantiated (has tokenizer: {})", te.has_tokenizer());
+                Some(te)
+            }
+            Err(e) => {
+                println!("⚠️ Qwen3 Text Encoder failed to load: {:?}", e);
+                None
+            }
+        };
 
-        // 3. Flow Match Euler Scheduler (Turbo 1 to 4 steps, Lumina2/ZImage shift = 3.0)
+        // 3. Flow Match Euler Scheduler (Official Z-Image Turbo dynamic shift: 0.5 to 1.15)
         let scheduler_cfg = FlowMatchEulerConfig {
-            shift: 3.0,
+            shift: 1.0,
             base_shift: 0.5,
             max_shift: 1.15,
             min_shift: 0.5,
-            use_dynamic_shifting: false,
+            use_dynamic_shifting: true,
             double_shift_linspace: false,
         };
         let scheduler = FlowMatchEulerScheduler::new(scheduler_cfg);
 
-        // 4. Load VAE Decoder if provided
+        // 4. Load VAE Decoder on CPU to prevent GPU VRAM spike during full DiT inference
+        let vae_device = Device::Cpu;
         let vae = if let Some(vp) = vae_path {
             let vae_archive = Arc::new(
                 SafeTensorsArchive::open(vp.as_ref())
@@ -75,24 +85,24 @@ impl ZImageTurboPipeline {
             );
             let mut vae_tensors = std::collections::HashMap::new();
             for key in vae_archive.keys() {
-                if let Ok(t) = vae_archive.get_tensor(&key, device, dtype) {
+                if let Ok(t) = vae_archive.get_tensor(&key, &vae_device, DType::F32) {
                     vae_tensors.insert(key.to_string(), t);
                 }
             }
-            let vae_vb = candle_nn::VarBuilder::from_tensors(vae_tensors, dtype, device);
+            let vae_vb = candle_nn::VarBuilder::from_tensors(vae_tensors, DType::F32, &vae_device);
             FluxVaeDecoder::new(vae_vb).ok()
         } else {
             // Check if VAE is embedded in the AIO archive
             let mut vae_tensors = std::collections::HashMap::new();
             for key in archive.keys() {
                 if let Some(rest) = key.strip_prefix("vae.") {
-                    if let Ok(t) = archive.get_tensor(&key, device, dtype) {
+                    if let Ok(t) = archive.get_tensor(&key, &vae_device, DType::F32) {
                         vae_tensors.insert(rest.to_string(), t);
                     }
                 }
             }
             if !vae_tensors.is_empty() {
-                let vae_vb = candle_nn::VarBuilder::from_tensors(vae_tensors, dtype, device);
+                let vae_vb = candle_nn::VarBuilder::from_tensors(vae_tensors, DType::F32, &vae_device);
                 FluxVaeDecoder::new(vae_vb).ok()
             } else {
                 None
@@ -129,11 +139,11 @@ impl ZImageTurboPipeline {
 
         // 1. Text Encoding (Qwen3 -> context [1, seq_len, 2560])
         let t_encode_start = Instant::now();
-        let max_seq_len = 256;
+        let max_seq_len = 0; // 0 = dynamic exact prompt length (no noise padding)
         let context = if let Some(ref enc) = self.text_encoder {
             enc.encode_last_hidden(params.prompt, max_seq_len)?
         } else {
-            Tensor::zeros((1, max_seq_len, 2560), self.dtype, &self.device)?
+            Tensor::zeros((1, 1, 2560), self.dtype, &self.device)?
         };
         let text_encoding_time_ms = t_encode_start.elapsed().as_millis() as f64;
 
@@ -143,40 +153,62 @@ impl ZImageTurboPipeline {
         let mut latents = Tensor::randn(0.0f32, 1.0f32, (b, 16, latent_h, latent_w), &self.device)?
             .to_dtype(self.dtype)?;
 
-        // 3. Scheduler Timesteps Setup
-        self.scheduler.set_timesteps(num_steps)?;
+        // 3. Scheduler Timesteps Setup with image sequence length
+        let image_seq_len = (latent_h / 2) * (latent_w / 2);
+        self.scheduler.set_timesteps_with_seq_len(num_steps, image_seq_len)?;
         let timesteps = self.scheduler.timesteps().to_vec();
 
         // 4. Denoising Loop
         let t_denoise_start = Instant::now();
         for (step_idx, &t) in timesteps.iter().enumerate() {
             let step_start = Instant::now();
-            let sigma = t as f32 / 1000.0f32;
-            let t_tensor = Tensor::from_vec(vec![sigma], (1,), &self.device)?.to_dtype(self.dtype)?;
+            let sigma = self.scheduler.sigmas()[step_idx] as f32;
+            let lumina_t = (1.0f32 - sigma) * 1000.0f32;
+            let t_tensor = Tensor::from_vec(vec![lumina_t], (1,), &self.device)?.to_dtype(self.dtype)?;
 
             // Model Forward: predicts velocity
             let pred_v = self.transformer.forward(&latents, &t_tensor, &context)?;
+            let v_std = pred_v.to_dtype(DType::F32)?.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
+
+            // Negate velocity for Flow Matching Euler ODE step:
+            // Official diffusers pipeline_z_image: noise_pred = -noise_pred; scheduler.step(noise_pred, ...)
+            let noise_pred = pred_v.neg()?;
 
             // Step scheduler
-            latents = self.scheduler.step(&pred_v, t, &latents)?;
+            latents = self.scheduler.step(&noise_pred, t, &latents)?;
+            let lat_std = latents.to_dtype(DType::F32)?.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
 
             println!(
-                "   [Step {}/{}] sigma={:.4} ({:.1} ms)",
+                "   [Step {}/{}] sigma={:.4} | pred_v std={:.4} | latents std={:.4} ({:.1} ms)",
                 step_idx + 1,
                 num_steps,
                 sigma,
+                v_std,
+                lat_std,
                 step_start.elapsed().as_secs_f64() * 1000.0
             );
+
+            // Decode intermediate step
+            if let Some(ref vae) = self.vae {
+                if let Ok(cpu_lat) = latents.to_device(&Device::Cpu)?.to_dtype(DType::F32) {
+                    if let Ok(dec) = vae.decode(&cpu_lat) {
+                        if let Ok(step_img) = crate::diffusion::vae::tensor_to_rgb_image(&dec) {
+                            let _ = step_img.save(format!("output/step_{}.png", step_idx + 1));
+                        }
+                    }
+                }
+            }
         }
         let total_denoising_time_ms = t_denoise_start.elapsed().as_millis() as f64;
 
-        // 5. Decode Latents through VAE
+        // 5. Decode Latents through VAE (on CPU to prevent VRAM spikes)
         let t_vae_start = Instant::now();
         let vae = self.vae.as_ref().ok_or_else(|| {
             candle_core::Error::Msg("VAE Decoder missing for Z-Image Turbo pipeline".into())
         })?;
 
-        let decoded = vae.decode(&latents)?;
+        let cpu_latents = latents.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+        let decoded = vae.decode(&cpu_latents)?;
         let vae_decode_time_ms = t_vae_start.elapsed().as_millis() as f64;
 
         // 6. Convert decoded tensor to RGB Image

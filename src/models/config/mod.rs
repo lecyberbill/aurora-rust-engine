@@ -241,7 +241,7 @@ mod tests {
     fn slug_and_kind_are_consistent() {
         assert_eq!(Architecture::Flux2Dev.slug(), "flux2-dev");
         assert_eq!(Architecture::Flux2Dev.model_kind(), ModelKind::Diffusion);
-        assert_eq!(Architecture::Qwen3.model_kind(), ModelKind::TextEncoder);
+        assert_eq!(Architecture::Qwen3.model_kind(), ModelKind::Text);
     }
 
     #[test]
@@ -292,6 +292,7 @@ mod tests {
         let keys: Vec<String> = vec![
             "model.embed_tokens.weight".to_string(),
             "model.layers.0.self_attn.q_proj.weight".to_string(),
+            "model.layers.0.self_attn.q_norm.weight".to_string(),
             "model.layers.0.mlp.gate_proj.weight".to_string(),
         ];
         let src = FakeSource { keys };

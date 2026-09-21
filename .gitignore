@@ -4,6 +4,7 @@
 Cargo.lock
 
 # Generated outputs & heavy images
+output/
 outputs/**/*.png
 outputs/*.png
 outputs/*.part
@@ -16,6 +17,7 @@ outputs/*.part
 
 # Local text-tokenizer JSON shards (large; downloaded/bundled at runtime)
 qwen_tokenizer.json
+qwen_tokenizer/
 
 # One-off differential dump scripts
 dump_single_block_diff.py

@@ -24,19 +24,13 @@ fn main() -> anyhow::Result<()> {
         println!("  {}", p);
     }
 
-    println!("\n=== DIT LAYER 0 & EMBEDDERS ===");
+    println!("\n=== QWEN TEXT ENCODER TENSORS ===");
     for k in &keys {
-        if k.starts_with("model.diffusion_model.layers.0.")
-            || k.starts_with("model.diffusion_model.t_embedder.")
-            || k.starts_with("model.diffusion_model.x_embedder.")
-            || k.starts_with("model.diffusion_model.cap_")
-            || k.starts_with("model.diffusion_model.context_")
-            || k.starts_with("model.diffusion_model.final_layer.")
-            || k.starts_with("model.diffusion_model.norm_final")
-            || k.starts_with("text_encoders.qwen3_4b.transformer.model.embed_tokens")
-        {
+        if k.contains("text_encoders.qwen3_4b") {
             if let Ok(t) = archive.get_tensor(k, &cpu, candle_core::DType::F32) {
-                println!("  {:<65} dims={:?} dtype={:?}", k, t.dims(), t.dtype());
+                if k.contains("layers.0.") || k.contains("embed_tokens") || k.contains("norm") {
+                    println!("  {:<65} dims={:?}", k, t.dims());
+                }
             }
         }
     }

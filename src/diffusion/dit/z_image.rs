@@ -1,6 +1,6 @@
 // [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Pure Rust Z-Image Turbo DiT Architecture (30 Layers + Refiners)
 
-use candle_core::{DType, Device, Module, Result, Tensor};
+use candle_core::{DType, Module, Result, Tensor};
 use candle_nn::{linear, Linear, VarBuilder};
 use crate::diffusion::dit::blocks::RMSNorm;
 
@@ -106,11 +106,10 @@ impl ZImageAttention {
         let orig_dtype = x.dtype();
 
         let qkv = self.qkv.forward(x)?;
-        let qkv = qkv.reshape((b, seq_len, 3, self.num_heads, self.head_dim))?;
-
-        let mut q = qkv.narrow(2, 0, 1)?.squeeze(2)?;
-        let mut k = qkv.narrow(2, 1, 1)?.squeeze(2)?;
-        let v = qkv.narrow(2, 2, 1)?.squeeze(2)?;
+        let chunks = qkv.chunk(3, 2)?;
+        let mut q = chunks[0].reshape((b, seq_len, self.num_heads, self.head_dim))?;
+        let mut k = chunks[1].reshape((b, seq_len, self.num_heads, self.head_dim))?;
+        let v = chunks[2].reshape((b, seq_len, self.num_heads, self.head_dim))?;
 
         q = self.q_norm.forward(&q)?;
         k = self.k_norm.forward(&k)?;
@@ -118,6 +117,8 @@ impl ZImageAttention {
         // Apply RoPE if provided
         if let Some((cos, sin)) = rotary_cos_sin {
             let half = self.head_dim / 2;
+            let cos_f32 = cos.to_dtype(DType::F32)?;
+            let sin_f32 = sin.to_dtype(DType::F32)?;
             let apply_rope = |t: &Tensor| -> Result<Tensor> {
                 let t_f32 = t.to_dtype(DType::F32)?;
                 let t_pairs = t_f32.reshape((b, seq_len, self.num_heads, half, 2))?;
@@ -126,7 +127,7 @@ impl ZImageAttention {
                 let neg_t1 = (t1 * -1.0)?.unsqueeze(4)?;
                 let pos_t0 = t0.unsqueeze(4)?;
                 let rotated = Tensor::cat(&[&neg_t1, &pos_t0], 4)?.reshape((b, seq_len, self.num_heads, self.head_dim))?;
-                let out = (t_f32.broadcast_mul(cos)? + rotated.broadcast_mul(sin)?)?;
+                let out = (t_f32.broadcast_mul(&cos_f32)? + rotated.broadcast_mul(&sin_f32)?)?;
                 out.to_dtype(orig_dtype)
             };
             q = apply_rope(&q)?;
@@ -155,7 +156,7 @@ impl ZImageAttention {
 /// Z-Image DiT Transformer Layer (AdaLN-4 Modulation + Attention + SwiGLU FFN)
 #[derive(Debug, Clone)]
 pub struct ZImageBlock {
-    ada_ln: Linear,
+    pub ada_ln: Linear,
     attention_norm1: RMSNorm,
     attention: ZImageAttention,
     attention_norm2: RMSNorm,
@@ -195,8 +196,7 @@ impl ZImageBlock {
         rotary_cos_sin: Option<(&Tensor, &Tensor)>,
     ) -> Result<Tensor> {
         let orig_dtype = x.dtype();
-        let act_temb = candle_nn::ops::silu(temb)?;
-        let mod_params = self.ada_ln.forward(&act_temb)?; // [B, 15360]
+        let mod_params = self.ada_ln.forward(temb)?; // [B, 15360] (z_image_modulation = True: no SiLU before adaLN)
         let chunks = mod_params.chunk(4, 1)?;
         // Lumina2 / ZImage exact modulation order: (scale_msa, gate_msa, scale_mlp, gate_mlp)
         let scale_msa = chunks[0].unsqueeze(1)?;
@@ -273,8 +273,7 @@ impl ZImageRefinerBlock {
         let orig_dtype = x.dtype();
 
         if let (Some(ref aln), Some(t)) = (&self.ada_ln, temb) {
-            let act_t = candle_nn::ops::silu(t)?;
-            let mod_params = aln.forward(&act_t)?;
+            let mod_params = aln.forward(t)?; // (z_image_modulation = True: no SiLU before adaLN)
             let chunks = mod_params.chunk(4, 1)?;
             let scale_msa = chunks[0].unsqueeze(1)?;
             let gate_msa = chunks[1].unsqueeze(1)?.tanh()?;
@@ -314,9 +313,9 @@ impl ZImageRefinerBlock {
 /// Timestep Embedder for Z-Image
 #[derive(Debug, Clone)]
 pub struct ZImageTimestepEmbedder {
-    mlp_0: Linear,
-    mlp_2: Linear,
-    frequency_embedding_size: usize,
+    pub mlp_0: Linear,
+    pub mlp_2: Linear,
+    pub frequency_embedding_size: usize,
 }
 
 impl ZImageTimestepEmbedder {
@@ -333,8 +332,9 @@ impl ZImageTimestepEmbedder {
     pub fn forward(&self, t: &Tensor) -> Result<Tensor> {
         let orig_dtype = t.dtype();
         let half = self.frequency_embedding_size / 2;
+        let max_period = 10000.0f32;
         let freqs: Vec<f32> = (0..half)
-            .map(|i| (-(i as f32) * (10000.0f32.ln() / (half as f32 - 1.0))).exp())
+            .map(|i| (-max_period.ln() * (i as f32) / (half as f32)).exp())
             .collect();
         let freqs_t = Tensor::from_vec(freqs, (1, half), t.device())?;
         let t_2d = t.to_dtype(DType::F32)?.reshape((t.dims()[0], 1))?;
@@ -348,35 +348,44 @@ impl ZImageTimestepEmbedder {
     }
 }
 
+/// LayerNorm without learned affine weights (elementwise_affine=False, eps=1e-6)
+fn layer_norm_no_affine(x: &Tensor, eps: f64) -> Result<Tensor> {
+    let orig_dtype = x.dtype();
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let mean = x_f32.mean_keepdim(candle_core::D::Minus1)?;
+    let x_sub_mean = x_f32.broadcast_sub(&mean)?;
+    let var = x_sub_mean.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let std = (var + eps)?.sqrt()?;
+    let norm = x_sub_mean.broadcast_div(&std)?;
+    norm.to_dtype(orig_dtype)
+}
+
 /// Caption Embedder (Qwen3 -> DiT Hidden Dim Projection)
 #[derive(Debug, Clone)]
 pub struct ZImageCaptionEmbedder {
     norm: RMSNorm,
     proj: Linear,
-    pad_token: Tensor,
 }
 
 impl ZImageCaptionEmbedder {
     pub fn new(cfg: &ZImageConfig, vb: VarBuilder) -> Result<Self> {
         let norm = RMSNorm::new(cfg.cap_dim, vb.pp("cap_embedder.0"))?;
         let proj = linear(cfg.cap_dim, cfg.hidden_size, vb.pp("cap_embedder.1"))?;
-        let pad_token = vb.get((1, cfg.hidden_size), "cap_pad_token")?;
-        Ok(Self { norm, proj, pad_token })
+        Ok(Self { norm, proj })
     }
 
     pub fn forward(&self, context: &Tensor) -> Result<Tensor> {
         let norm_ctx = self.norm.forward(context)?;
-        let proj = self.proj.forward(&norm_ctx)?;
-        let pad = self.pad_token.to_dtype(proj.dtype())?.to_device(proj.device())?.unsqueeze(0)?;
-        Tensor::cat(&[&pad, &proj], 1)
+        self.proj.forward(&norm_ctx)
     }
 }
 
-/// Final Layer (AdaLN-2 Modulation + Output Linear Projection)
+/// Final Layer of NextDiT / Z-Image:
+/// LayerNorm(elementwise_affine=False, eps=1e-6) -> AdaLN modulation (1 + scale) -> Linear(hidden_size, 64)
 #[derive(Debug, Clone)]
 pub struct ZImageFinalLayer {
-    ada_ln: Linear,
-    linear: Linear,
+    pub ada_ln: Linear,
+    pub linear: Linear,
 }
 
 impl ZImageFinalLayer {
@@ -387,12 +396,15 @@ impl ZImageFinalLayer {
     }
 
     pub fn forward(&self, x: &Tensor, temb: &Tensor) -> Result<Tensor> {
+        let orig_dtype = x.dtype();
+        let norm_x = layer_norm_no_affine(x, 1e-6)?;
         let act_t = candle_nn::ops::silu(temb)?;
-        let mod_scale = self.ada_ln.forward(&act_t)?.unsqueeze(1)?;
-        let ones = Tensor::ones((1, 1, 1), x.dtype(), x.device())?;
-        let scale_p1 = mod_scale.broadcast_add(&ones)?;
-        let modulated = x.broadcast_mul(&scale_p1)?;
-        self.linear.forward(&modulated)
+        let scale = self.ada_ln.forward(&act_t)?.unsqueeze(1)?;
+        let ones = Tensor::ones((1, 1, 1), scale.dtype(), scale.device())?;
+        let scale_p1 = scale.broadcast_add(&ones)?;
+        let modulated = norm_x.broadcast_mul(&scale_p1)?;
+        let out = self.linear.forward(&modulated)?;
+        out.to_dtype(orig_dtype)
     }
 }
 
@@ -402,12 +414,12 @@ pub struct ZImageTransformer {
     pub config: ZImageConfig,
     pub x_embedder: Linear,
     pub x_pad_token: Tensor,
+    pub cap_pad_token: Tensor,
     pub t_embedder: ZImageTimestepEmbedder,
     pub cap_embedder: ZImageCaptionEmbedder,
     pub context_refiner: Vec<ZImageRefinerBlock>,
     pub layers: Vec<ZImageBlock>,
     pub noise_refiner: Vec<ZImageRefinerBlock>,
-    pub norm_final: RMSNorm,
     pub final_layer: ZImageFinalLayer,
 }
 
@@ -415,6 +427,7 @@ impl ZImageTransformer {
     pub fn new(cfg: ZImageConfig, vb: VarBuilder) -> Result<Self> {
         let x_embedder = linear(cfg.in_channels, cfg.hidden_size, vb.pp("x_embedder"))?;
         let x_pad_token = vb.get((1, cfg.hidden_size), "x_pad_token")?;
+        let cap_pad_token = vb.get((1, cfg.hidden_size), "cap_pad_token")?;
         let t_embedder = ZImageTimestepEmbedder::new(vb.pp("t_embedder"))?;
         let cap_embedder = ZImageCaptionEmbedder::new(&cfg, vb.clone())?;
 
@@ -436,19 +449,18 @@ impl ZImageTransformer {
             noise_refiner.push(refiner);
         }
 
-        let norm_final = RMSNorm::new(cfg.hidden_size, vb.pp("norm_final"))?;
         let final_layer = ZImageFinalLayer::new(&cfg, vb.pp("final_layer"))?;
 
         Ok(Self {
             config: cfg,
             x_embedder,
             x_pad_token,
+            cap_pad_token,
             t_embedder,
             cap_embedder,
             context_refiner,
             layers,
             noise_refiner,
-            norm_final,
             final_layer,
         })
     }
@@ -464,8 +476,9 @@ impl ZImageTransformer {
         let p_h = h / 2;
         let p_w = w / 2;
         let n_img = p_h * p_w;
+        let pad_multiple = 32usize;
 
-        // 1. Exact Lumina2 Patchify:
+        // 1. Exact Lumina2 / ComfyUI Patchify:
         // x.view(B, C, H // 2, 2, W // 2, 2).permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2)
         let x_patch = latents
             .reshape((b, c, p_h, 2, p_w, 2))?
@@ -473,28 +486,48 @@ impl ZImageTransformer {
             .contiguous()?
             .reshape((b, n_img, c * 4))?;
 
-        let x_proj = self.x_embedder.forward(&x_patch)?;
-        let x_pad = self.x_pad_token.to_dtype(x_proj.dtype())?.to_device(x_proj.device())?.unsqueeze(0)?;
-        let mut x_img = Tensor::cat(&[&x_pad, &x_proj], 1)?; // [B, 1 + N_img, Hidden]
-        let img_tokens = x_img.dim(1)?;
+        let mut x_proj = self.x_embedder.forward(&x_patch)?;
+        let img_pad_extra = (pad_multiple - (n_img % pad_multiple)) % pad_multiple;
+        if img_pad_extra > 0 {
+            let x_pad = self.x_pad_token
+                .to_dtype(x_proj.dtype())?
+                .to_device(x_proj.device())?
+                .unsqueeze(0)?
+                .repeat((b, img_pad_extra, 1))?;
+            x_proj = Tensor::cat(&[&x_proj, &x_pad], 1)?;
+        }
+        let total_img_tokens = x_proj.dim(1)?;
 
-        // 2. Timestep embedding (Lumina: t = 1.0 - timesteps, scaled by 1000.0 in t_embedder)
+        // 2. Timestep embedding (Lumina: t = (1.0 - sigma) * 1000.0)
         let temb = self.t_embedder.forward(timestep)?;
 
-        // 3. Caption context embedding & refinement
-        let mut text_feat = self.cap_embedder.forward(context)?;
-        let l_text = text_feat.dim(1)?;
+        // 3. Caption context embedding & padding to multiple of 32
+        let raw_text_feat = self.cap_embedder.forward(context)?;
+        let cap_feats_len = raw_text_feat.dim(1)?;
+        let cap_pad_extra = (pad_multiple - (cap_feats_len % pad_multiple)) % pad_multiple;
+        let mut text_feat = if cap_pad_extra > 0 {
+            let cap_pad = self.cap_pad_token
+                .to_dtype(raw_text_feat.dtype())?
+                .to_device(raw_text_feat.device())?
+                .unsqueeze(0)?
+                .repeat((b, cap_pad_extra, 1))?;
+            Tensor::cat(&[&raw_text_feat, &cap_pad], 1)?
+        } else {
+            raw_text_feat
+        };
+        let total_text_tokens = text_feat.dim(1)?;
 
-        let theta = 10000.0f64;
-        let axes_dim = [16, 56, 56];
+        let theta = 256.0f64;
+        let axes_dim = [32, 48, 48];
 
-        // 3a. Context RoPE for context_refiner: [idx + 1, 0, 0]
-        let mut txt_t = Vec::with_capacity(l_text);
-        let mut txt_zero = Vec::with_capacity(l_text);
-        for i in 0..l_text {
-            txt_t.push((i + 1) as f32);
+        // 3a. Context RoPE for context_refiner: pos_ids = [1.0 + i, 0, 0]
+        let mut txt_t = Vec::with_capacity(total_text_tokens);
+        let mut txt_zero = Vec::with_capacity(total_text_tokens);
+        for i in 0..total_text_tokens {
+            txt_t.push((i as f32) + 1.0);
             txt_zero.push(0f32);
         }
+
         let compute_rope = |t_coords: &[f32], r_coords: &[f32], c_coords: &[f32], seq_len: usize| -> Result<(Tensor, Tensor)> {
             let compute_axis = |coords: &[f32], dim: usize| -> Result<Tensor> {
                 let half = dim / 2;
@@ -508,9 +541,10 @@ impl ZImageTransformer {
             let f0 = compute_axis(t_coords, axes_dim[0])?;
             let f1 = compute_axis(r_coords, axes_dim[1])?;
             let f2 = compute_axis(c_coords, axes_dim[2])?;
-            let full = Tensor::cat(&[&f0, &f1, &f2], 1)?;
+            let full = Tensor::cat(&[&f0, &f1, &f2], 1)?; // [seq_len, 64]
             let cos_half = full.cos()?;
             let sin_half = full.sin()?;
+            // Interleaved complex representation for pairs (x0, x1) -> cos_half on both x0 and x1
             let cos = Tensor::cat(&[&cos_half.unsqueeze(2)?, &cos_half.unsqueeze(2)?], 2)?
                 .reshape((1, seq_len, 1, 128))?
                 .to_dtype(latents.dtype())?;
@@ -520,44 +554,50 @@ impl ZImageTransformer {
             Ok((cos, sin))
         };
 
-        let (txt_cos, txt_sin) = compute_rope(&txt_t, &txt_zero, &txt_zero, l_text)?;
+        let (txt_cos, txt_sin) = compute_rope(&txt_t, &txt_zero, &txt_zero, total_text_tokens)?;
         let txt_rope = (&txt_cos, &txt_sin);
         for refiner in &self.context_refiner {
             text_feat = refiner.forward(&text_feat, None, Some(txt_rope))?;
         }
 
         // 4. Noise Refiner on image tokens BEFORE backbone
-        let mut img_t = Vec::with_capacity(img_tokens);
-        let mut img_r = Vec::with_capacity(img_tokens);
-        let mut img_c = Vec::with_capacity(img_tokens);
-        // x_pad_token: [l_text + 1, 0, 0]
-        img_t.push((l_text + 1) as f32);
-        img_r.push(0f32);
-        img_c.push(0f32);
+        // Image pos_ids: t = total_text_tokens + 1, r = 0..p_h, c = 0..p_w, padded tokens = 0
+        let start_t = (total_text_tokens as f32) + 1.0;
+        let mut img_t = Vec::with_capacity(total_img_tokens);
+        let mut img_r = Vec::with_capacity(total_img_tokens);
+        let mut img_c = Vec::with_capacity(total_img_tokens);
         for r in 0..p_h {
             for c in 0..p_w {
-                img_t.push((l_text + 1) as f32);
+                img_t.push(start_t);
                 img_r.push(r as f32);
                 img_c.push(c as f32);
             }
         }
-        let (img_cos, img_sin) = compute_rope(&img_t, &img_r, &img_c, img_tokens)?;
+        for _ in 0..img_pad_extra {
+            img_t.push(0f32);
+            img_r.push(0f32);
+            img_c.push(0f32);
+        }
+
+        let (img_cos, img_sin) = compute_rope(&img_t, &img_r, &img_c, total_img_tokens)?;
         let img_rope = (&img_cos, &img_sin);
+        let mut x_img = x_proj;
         for refiner in &self.noise_refiner {
             x_img = refiner.forward(&x_img, Some(&temb), Some(img_rope))?;
         }
 
-        // 5. Concatenate refined text + refined image tokens: [B, L_text + (1 + N_img), Hidden]
-        let mut x_seq = Tensor::cat(&[&text_feat, &x_img], 1)?;
-        let total_tokens = l_text + img_tokens;
+        // 5. Concatenate refined image + refined text tokens: [B, total_img + total_text, Hidden]
+        // In official diffusers & Lumina2: unified = torch.cat([x[i][:x_len], cap_feats[i][:cap_len]])
+        // Image tokens are FIRST, caption tokens are SECOND
+        let mut x_seq = Tensor::cat(&[&x_img, &text_feat], 1)?;
+        let total_tokens = total_img_tokens + total_text_tokens;
 
-        let mut all_t = txt_t;
-        all_t.extend(img_t);
-        let mut all_r = txt_zero;
-        all_r.extend(img_r);
-        let mut all_c = Vec::with_capacity(total_tokens);
-        for _ in 0..l_text { all_c.push(0f32); }
-        all_c.extend(img_c);
+        let mut all_t = img_t;
+        all_t.extend(txt_t);
+        let mut all_r = img_r;
+        all_r.extend(txt_zero);
+        let mut all_c = img_c;
+        for _ in 0..total_text_tokens { all_c.push(0f32); }
 
         let (all_cos, all_sin) = compute_rope(&all_t, &all_r, &all_c, total_tokens)?;
         let all_rope = (&all_cos, &all_sin);
@@ -567,15 +607,15 @@ impl ZImageTransformer {
             x_seq = layer.forward(&x_seq, &temb, Some(all_rope))?;
         }
 
-        // 7. Final norm & extract image token slice (skipping text_feat and x_pad_token)
-        let x_img_out = x_seq.narrow(1, l_text + 1, n_img)?;
-        let x_norm = self.norm_final.forward(&x_img_out)?;
+        // 7. Extract unpadded image token slice (first n_img tokens)
+        let x_img_out = x_seq.narrow(1, 0, n_img)?;
 
-        // 8. Output projection: [B, N_img, 64]
-        let out_patch = self.final_layer.forward(&x_norm, &temb)?;
+        // 8. Output projection: final_layer (LayerNorm unweighted + AdaLN(1+scale) + Linear)
+        let out_patch = self.final_layer.forward(&x_img_out, &temb)?;
 
-        // 9. Exact Lumina2 Unpatchify:
-        // out_patch.view(B, H // 2, W // 2, 2, 2, C).permute(0, 5, 1, 3, 2, 4).contiguous().reshape(B, C, H, W)
+        // 9. Exact Lumina2 / ComfyUI Unpatchify:
+        // out_patch.view(H // 2, W // 2, 2, 2, C).permute(4, 0, 2, 1, 3).flatten(3, 4).flatten(1, 2)
+        // In Candle tensor layout: (B, p_h, p_w, 2, 2, C) -> permute(0, 5, 1, 3, 2, 4) -> reshape(B, C, H, W)
         let out_latents = out_patch
             .reshape((b, p_h, p_w, 2, 2, c))?
             .permute((0, 5, 1, 3, 2, 4))?

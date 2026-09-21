@@ -257,7 +257,7 @@ impl QwenAttention {
             v
         };
 
-        // Standard Scaled Dot-Product Attention in F32 with Causal + Padding Mask
+        // Scaled Dot-Product Attention in F32 with Causal Mask
         let q_t = (q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)? * self.scale)?;
         let k_t = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
         let v_t = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
@@ -348,9 +348,14 @@ impl Qwen3TextEncoder {
         let config = QwenTextConfig::detect(archive)?;
         let mut tensors = std::collections::HashMap::new();
         for key in archive.keys() {
-            let stripped = key.strip_prefix("text_encoders.qwen3_4b.transformer.").unwrap_or(&key);
-            if let Ok(t) = archive.get_tensor(&key, device, dtype) {
-                tensors.insert(stripped.to_string(), t);
+            if let Some(stripped) = key.strip_prefix("text_encoders.qwen3_4b.transformer.") {
+                if let Ok(t) = archive.get_tensor(&key, device, dtype) {
+                    tensors.insert(stripped.to_string(), t);
+                }
+            } else if key.starts_with("model.layers.") || key.starts_with("model.embed_tokens.") || key.starts_with("model.norm.") {
+                if let Ok(t) = archive.get_tensor(&key, device, dtype) {
+                    tensors.insert(key.clone(), t);
+                }
             }
         }
         let vb = VarBuilder::from_tensors(tensors, dtype, device);
@@ -386,6 +391,8 @@ impl Qwen3TextEncoder {
 
         let tokenizer = if let Some(p) = tokenizer_path {
             Tokenizer::from_file(p).ok()
+        } else if Path::new(r"G:\models\zit\tokenizer.json").exists() {
+            Tokenizer::from_file(r"G:\models\zit\tokenizer.json").ok()
         } else if Path::new("qwen_tokenizer/tokenizer.json").exists() {
             Tokenizer::from_file("qwen_tokenizer/tokenizer.json").ok()
         } else if Path::new("qwen_tokenizer.json").exists() {
@@ -416,6 +423,10 @@ impl Qwen3TextEncoder {
             selected_layers,
             pad_id,
         })
+    }
+
+    pub fn has_tokenizer(&self) -> bool {
+        self.tokenizer.is_some()
     }
 
     /// Encode prompt into concatenated hidden states of `selected_layers` -> [1, seq_len, hidden*n]
@@ -472,7 +483,7 @@ impl Qwen3TextEncoder {
     /// Encode prompt for Z-Image / Lumina2:
     /// ZImageTEModel extracts the penultimate layer (layer_idx = -2, i.e. 34th layer for 36-layer Qwen3-4B)
     /// without applying final LayerNorm (layer_norm_hidden_state=False).
-    /// Prompt template: `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n`
+    /// Prompt template: `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`
     pub fn encode_last_hidden(&self, prompt: &str, max_len: usize) -> Result<Tensor> {
         let pad_id = self.pad_id;
         let token_ids = if let Some(ref tok) = self.tokenizer {
@@ -483,16 +494,20 @@ impl Qwen3TextEncoder {
             let enc = tok.encode(formatted_prompt.as_str(), true)
                 .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
             let mut ids = enc.get_ids().to_vec();
-            ids.truncate(max_len);
-            while ids.len() < max_len {
-                ids.push(pad_id);
+            if max_len > 0 {
+                ids.truncate(max_len);
+                while ids.len() < max_len {
+                    ids.push(pad_id);
+                }
             }
             ids
         } else {
-            vec![pad_id; max_len]
+            let len = if max_len > 0 { max_len } else { 1 };
+            vec![pad_id; len]
         };
 
-        let ids_tensor = Tensor::from_vec(token_ids, (1, max_len), &self.device)?;
+        let seq_len = token_ids.len();
+        let ids_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
         let mut h = self.embed_tokens.forward(&ids_tensor)?;
 
         // Penultimate layer target index (e.g. 34 for 36 layers)

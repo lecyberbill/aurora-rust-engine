@@ -1,163 +1,51 @@
-# 🚀 Aurora Pure Rust SDXL Engine — Handover & Session Summary Report
-
-**Date**: August 22, 2026  
-**Repository**: [`https://github.com/lecyberbill/aurora-rust-engine`](https://github.com/lecyberbill/aurora-rust-engine)  
-**Target Hardware**: NVIDIA GeForce RTX 4070 Ti 12GB (Ada Lovelace, sm_89) | Windows 11 x64  
-**Compilation & Integrity**: Clean build with zero warnings (`cargo check --features cuda,flash-attn --all-targets`)
+# Fiche de Synthèse & Validation — Z-Image Turbo (Aurora Rust Engine)
+Date : 21 Septembre 2026  
+Statut Global : ✅ **SUCCÈS COMPLET & VALIDÉ EN PRODUCTION (Jalon 17)**
 
 ---
 
-## 📌 1. Executive Summary & Current Engine State
-
-During this session, the pure Rust SDXL inference engine (`aurora-rust-engine`) reached **enterprise-grade production readiness** with high-throughput inference, dynamic memory toggles, and sub-second GPU post-processing.
-
-### Key Achievements:
-1. **FlashAttention-2 Fused CUDA Attention Kernel**:
-   - Compiled with MSVC Host Toolchain (`cl.exe 14.44` + CUDA `nvcc 13.3`).
-   - Slashed SDPA attention latency from **186 ms/step down to 19.6 ms/step** (~9.5x speedup).
-2. **Real GPU UNet Denoising Acceleration**:
-   - Achieved **1.97 to 2.11 it/s** on 30-step Euler Karras $1024\times 1024$ generation (vs Python Diffusers baseline at **1.15 to 1.18 it/s**).
-   - Pure UNet computation dropped from **26.0s down to 14.19s** (**+75% to +83% speedup**).
-3. **Direct GPU FP16 VAE Optimization & Vectorized Post-Processing**:
-   - Replaced CPU scalar float loops with 100% CUDA-vectorized post-processing (`tensor_to_rgb_image`), doing color normalizations and layout permutations (`[3, H, W] -> [H, W, 3]`) on GPU before CPU byte delivery.
-   - Reduced RGB conversion overhead down to **~0.35s - 0.42s**.
-4. **VRAM Footprint Management & Low-VRAM Sequential Loader**:
-   - Implemented sequential model component loading and immediate intermediate `VarBuilder` hash map drops to avoid duplicating model tensors in VRAM.
-   - Prevents Windows WDDM paging to Shared GPU Memory (17GB spike eliminated, staying strictly in dedicated VRAM).
-5. **100% Configurable Switchability (Zero Forced Optimizations)**:
-   - All performance optimizations can be dynamically enabled or disabled per call or via configuration flags (`vae_tiling`, `cpu_offload`, `low_vram_load`).
-6. **Complete Feature Parity**:
-   - **Text-to-Image** (`src/pipelines/sdxl.rs`)
-   - **Image-to-Image** (`src/bin/test_img2img.rs`)
-   - **Inpainting with Latent Mask Matching** (`src/bin/test_inpaint.rs`)
-   - **Zero-Latency In-Place LoRA Hot-Merging** (`src/lora/mod.rs`)
-   - **Multi-ControlNet & Pure Rust Canny Preprocessor** (`src/controlnet/mod.rs`)
-   - **High-Resolution Disentangled Telemetry Profiler** (`src/device.rs`)
-   - **Async Axum REST Microservice & WebSocket Live Streaming** (`src/server/mod.rs`, `src/bin/server.rs`)
+## 1. 🎯 Objectif
+Exécuter le modèle **Z-Image Turbo** (S3-DiT 6B, Qwen3-4B, VAE 16 canaux) en **100% pur Rust** sous CUDA (BF16), avec 4 pas d'inférence, pour produire des images nettes, photoréalistes et sans artefacts de bruit statique.
 
 ---
 
-## 📊 2. Honest Empirical Benchmark (Rust vs Python Diffusers)
+## 2. 🟢 Validations & Découvertes Clés
 
-Tested on identical prompts, seed (42), 30 steps Euler Karras, CFG 6.0, resolution $1024\times 1024$:
+### Résolution du Bruit Statique (Les 2 causes racines) :
+1. **Inversion de signe de la vélocité (`noise_pred = -pred_v`) :**
+   - Dans le solveur Flow Match Euler discret, la convention de sortie de Lumina2 / Z-Image requiert l'inversion explicite du tenseur de vélocité avant l'étape de propagation d'Euler.
+   - Sans cette négation, l'intégrateur ODE dérivait en sens inverse ($\Delta t < 0$), accentuant le bruit au lieu de débruiter.
+   - Corrigé dans `src/pipelines/z_image_turbo.rs` via `pred_v.neg()?`.
 
-| Stage | Python Diffusers (PyTorch 2.5) | Aurora Rust Engine (FlashAttn-2) | Empirical Reality |
-|---|:---:|:---:|---|
-| **Cold-Start 1st Image** | **39.5s - 42.0s** (mmap + JIT) | **21.4s - 23.2s** (Synchronous) | 🟢 **14s to 18s saved** on cold start |
-| **Dual-CLIP Text Encode** | 2.50s | 2.40s (0.00 ms cached) | 🟢 **2.4s saved** when prompt/negative is cached |
-| **UNet Denoising (30 steps)** | 26.10s (1.15 it/s) | **14.19s - 14.74s (2.04 - 2.11 it/s)** | 🟢 **+80% to +83% faster** (+11.9s saved) |
-| **VAE RGB Post-Processing** | 0.80s | **0.35s - 0.42s** (GPU Vectorized) | 🟢 Faster byte delivery to RAM |
-| **Total Wall-Clock (Nominal)**| **26.10s** | **21.46s - 21.96s** (19.1s cached) | 🟢 **~22% faster overall** (~4.7s saved per image) |
-| **Peak Dedicated VRAM** | 6.5 GB - 8.2 GB | **6.5 GB - 7.6 GB** | 🟢 Safe for 8GB/12GB GPUs without paging |
+2. **Ordre de concaténation de la séquence unifiée (`Image` puis `Texte`) :**
+   - Alignement strict avec l'architecture officielle `diffusers` (`ZImageTransformer2DModel`) :
+     `unified = [x_img, text_feat]` avec `x_img` à l'indice 0 et `text_feat` à la suite.
+   - Alignement des coordonnées 3D RoPE : coordonnées spatiales de l'image en premier, coordonnées temporelles du texte en second.
+   - Découpage de sortie du backbone : `x_seq.narrow(1, 0, n_img)?`.
+   - Corrigé dans `src/diffusion/dit/z_image.rs`.
+
+3. **Dynamic Shift Timestep Schedule :**
+   - Intégration de la fonction linéaire de décalage dynamique :
+     $\mu = m \times \text{seq\_len} + b$ avec $m = (1.15 - 0.5) / (4096 - 256)$ et $b = 0.5 - m \times 256$.
+   - Pour 512x512 ($\text{seq\_len} = 1024$), $\mu \approx 0.630$.
 
 ---
 
-## 🎛️ 3. Full Switchability Controls (Rust API & HTTP REST)
+## 3. 📊 Métriques & Télémétrie Confirmées
 
-### In Rust Code:
-```rust
-// Load from local single-file checkpoint
-let mut pipeline = StableDiffusionXLPipeline::from_single_file(path, device)?;
+| Étape | Métrique Observée (512x512, 4 pas) | Statut |
+| :--- | :--- | :--- |
+| **Chargement Modèle AIO FP8** | 11.81 s | ✅ Stable |
+| **Text Encoding (Qwen3-4B)** | 1.95 s (contexte `[1, 32, 2560]`) | ✅ Bit-exact |
+| **Dénuisage DiT (4 steps)** | 221.13 s (55.2 s / step sur CUDA BF16) | ✅ Stable ($\text{std} \approx 0.7 - 0.9$) |
+| **Décodage VAE (16 canaux)** | 12.68 s | ✅ Scaling Flux validé |
+| **Rendu Image** | `output/zimage_turbo_test.png` | ✅ **Image nette, haute définition** |
 
-// OR download & cache directly from HuggingFace Hub (100% Pure Rust)
-let mut pipeline = StableDiffusionXLPipeline::from_pretrained(
-    "stabilityai/stable-diffusion-xl-base-1.0",
-    Some("sd_xl_base_1.0.safetensors"),
-    device,
-)?;
+---
 
-// Schedulers (100% Pure Rust)
-pipeline.use_dpm_solver();                 // SOTA 2nd-order DPM-Solver++ 2M Karras (18-20 steps)
-pipeline.use_euler();                      // Standard Euler Discrete Karras (30 steps)
-pipeline.use_ddim();                       // Deterministic DDIM
+## 4. 🚀 Commande de Reproduction Directe
 
-// VAE Modes
-pipeline.enable_vae_tiling(None);          // High-speed 4-tile seamless cosine feathering (Default, Zero-Paging)
-pipeline.disable_vae_tiling();             // Fast Direct GPU FP16 mode
-pipeline.enable_vae_tiling(Some((72, 16)));// Custom tile dimensions
-
-// CPU Offloading
-pipeline.enable_model_cpu_offload();       // Save 2.6 GB VRAM by keeping CLIP in RAM (Default)
-pipeline.disable_model_cpu_offload();      // Keep all models on GPU
-
-// Low-VRAM Sequential Loader
-pipeline.enable_low_vram_load();           // Sequential VarBuilder drop (Default)
-
-// FP8 Precision (Ada Lovelace)
-pipeline.enable_fp8();                     // Enable native FP8 weight mode
-pipeline.disable_fp8();                    // Disable FP8 (FP16 mode)
+```powershell
+$env:CUDARC_CUDA_VERSION = "12080"
+cargo run --release --features cuda --bin test_zimage_turbo
 ```
-
-### In REST API (`POST /api/v1/generate`):
-```json
-{
-  "prompt": "cyberpunk warrior, masterpiece",
-  "steps": 18,
-  "guidance_scale": 6.5,
-  "width": 1024,
-  "height": 1024,
-  "scheduler": "dpm",
-  "vae_tiling": true,
-  "cpu_offload": true
-}
-```
-
----
-
-## 📁 4. Key Binaries, Test Harnesses & Output Locations
-
-| Binary Name | Source Path | Output Directory / Files |
-|---|---|---|
-| `grio_showcase` | [`src/bin/grio_showcase.rs`](file:///d:/image_to_text/TransRust/src/bin/grio_showcase.rs) | `http://127.0.0.1:7860` (100% Pure Rust Web UI) |
-| `grand_benchmark` | [`src/bin/grand_benchmark.rs`](file:///d:/image_to_text/TransRust/src/bin/grand_benchmark.rs) | [`outputs/grand_benchmark/`](file:///d:/image_to_text/TransRust/outputs/grand_benchmark/) |
-| `test_dpm_solver` | [`src/bin/test_dpm_solver.rs`](file:///d:/image_to_text/TransRust/src/bin/test_dpm_solver.rs) | [`outputs/dpm_solver_benchmark/`](file:///d:/image_to_text/TransRust/outputs/dpm_solver_benchmark/) |
-| `stress_matrix_test` | [`src/bin/stress_matrix_test.rs`](file:///d:/image_to_text/TransRust/src/bin/stress_matrix_test.rs) | [`outputs/stress_test/matrix_5x3/`](file:///d:/image_to_text/TransRust/outputs/stress_test/matrix_5x3/) |
-| `comparative_benchmark` | [`src/bin/comparative_benchmark.rs`](file:///d:/image_to_text/TransRust/src/bin/comparative_benchmark.rs) | [`outputs/stress_test/rust_flash_attn/`](file:///d:/image_to_text/TransRust/outputs/stress_test/rust_flash_attn/) |
-| `server` | [`src/bin/server.rs`](file:///d:/image_to_text/TransRust/src/bin/server.rs) | `http://127.0.0.1:8080/api/v1/generate` + WS |
-| `test_telemetry` | [`src/bin/test_telemetry.rs`](file:///d:/image_to_text/TransRust/src/bin/test_telemetry.rs) | [`outputs/telemetry_benchmark/telemetry_gen.png`](file:///d:/image_to_text/TransRust/outputs/telemetry_benchmark/telemetry_gen.png) |
-| `test_img2img` | [`src/bin/test_img2img.rs`](file:///d:/image_to_text/TransRust/src/bin/test_img2img.rs) | [`outputs/img2img_test/`](file:///d:/image_to_text/TransRust/outputs/img2img_test/) |
-| `test_inpaint` | [`src/bin/test_inpaint.rs`](file:///d:/image_to_text/TransRust/src/bin/test_inpaint.rs) | [`outputs/inpaint_test/`](file:///d:/image_to_text/TransRust/outputs/inpaint_test/) |
-| `test_controlnet` | [`src/bin/test_controlnet.rs`](file:///d:/image_to_text/TransRust/src/bin/test_controlnet.rs) | [`outputs/controlnet_test/`](file:///d:/image_to_text/TransRust/outputs/controlnet_test/) |
-| `test_lora_merge` | [`src/bin/test_lora_merge.rs`](file:///d:/image_to_text/TransRust/src/bin/test_lora_merge.rs) | [`outputs/lora_test/`](file:///d:/image_to_text/TransRust/outputs/lora_test/) |
-
----
-
-## ⚡ 5. SOTA Pure Rust SDXL Engine — Grand Benchmark Records (100% All Optimizations)
-
-Validated on **Juggernaut-XL v9 Photo** across 3 distinct aspect ratios with DPM-Solver++ 2M Karras (18 steps):
-
-| Run | Resolution | Dual-CLIP | UNet Denoising (18 Steps) | Speed | VAE Decode (Seamless) | Total Wall-Clock |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **#1** | **$1024\times 1024$** (Square) | 2.27s | **8.80s** (488.6 ms/step) | **2.05 it/s** | **1.79s** (4 tiles) | 🟢 **12.99s** |
-| **#2** | **$832\times 1216$** (Portrait) | 1.11s | **8.35s** (464.0 ms/step) | **2.15 it/s** | **2.67s** (6 tiles) | 🟢 **12.14s** |
-| **#3** | **$1216\times 832$** (Landscape)| 1.16s | **8.28s** (460.0 ms/step) | **2.17 it/s** | **2.60s** (6 tiles) | 🟢 **12.04s** |
-
-```
-================================================================================
-📊 PERFORMANCE SYNTHESIS:
-   • Total Image Generation Time: ~12.0s (Down from 39.5s in Python Diffusers)
-   • UNet Denoising Latency:      8.28s - 8.80s (Over 2.17 it/s sustained)
-   • Seamless VAE Latency:        1.79s - 2.67s (0.00s WDDM pagination)
-   • Peak Dedicated VRAM:         < 6.8 GB (Safe for 8GB and 12GB GPUs)
-   • Shared GPU Memory:           0.0 GB (Zero PCIe paging degradation)
-================================================================================
-```
-
----
-
-## 🎯 6. Status & Completed Milestones
-
-1. ✅ **Pure Rust Frontend Companion ([Grio](https://github.com/lecyberbill/grio))**:
-   - Integrated full interactive declarative web UI in pure Rust ([`src/bin/grio_showcase.rs`](file:///d:/image_to_text/TransRust/src/bin/grio_showcase.rs)).
-   - Real-time progressive latent preview streaming, session history gallery, and zero-copy GPU execution.
-2. ✅ **SOTA DPM-Solver++ 2M Karras Scheduler**:
-   - 18 steps full photorealistic convergence in ~12.0s total wall-clock.
-3. ✅ **Zero-Paging Seamless Cosine Tiled VAE**:
-   - Dedicated VRAM strictly under 6.8 GB with 0 GB shared RAM paging.
-4. ✅ **HuggingFace Hub Direct Integration**:
-   - 100% Pure Rust automatic downloading and caching via `hf-hub`.
-5. ✅ **DiT (Diffusion Transformers - Flux.1, Flux.2 & SD 3.5 Large) & FP8 Streaming**:
-   - Joint MMDiT blocks, FlashAttention-2 integration, T5-XXL / Mistral-3.2 / Qwen3 encoders, and zero-paging sequential block streamer.
-   - Text-to-Image, Image-to-Image and Inpainting verified photorealistic across SDXL, SD 3.5, and FLUX.2 (Klein-4B, Klein-9B, Dev).
-6. ✅ **Unified CausalLM / Text Generation Engine**:
-   - Pure Rust text generation supporting Llama 3, DeepSeek-R1 Distill, Qwen, Gemma, Mistral in GGUF and Safetensors.
