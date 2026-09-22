@@ -16,7 +16,7 @@ pub mod image;
 pub mod registry;
 pub mod text;
 
-pub use acestep::AceStepTransformer1D;
+pub use acestep::{AceStepConditionEncoder, AceStepTransformer1D};
 pub use auto::{AutoModel, BoxedModel, ModelLoadConfig};
 pub use common::{downcast_model, AnyModel, EncodeModel, GenerationModel, ImageGenerationModel, ModelKind};
 pub use config::{detect_architecture, Architecture};

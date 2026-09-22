@@ -6,7 +6,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::audio::{AutoencoderOobleck, OobleckConfig, WavAudio};
-use crate::models::AceStepTransformer1D;
+use crate::models::{AceStepConditionEncoder, AceStepTransformer1D};
+use crate::text::Qwen3TextEncoder;
 
 /// Telemetry metrics for Audio Diffusion synthesis
 #[derive(Debug, Clone)]
@@ -22,6 +23,8 @@ pub struct AudioGenerationMetrics {
 pub struct AudioDiffusionPipeline {
     pub transformer: AceStepTransformer1D,
     pub vae: AutoencoderOobleck,
+    pub condition_encoder: Option<AceStepConditionEncoder>,
+    pub text_encoder: Option<Qwen3TextEncoder>,
     pub device: Device,
     pub dtype: DType,
 }
@@ -30,12 +33,16 @@ impl AudioDiffusionPipeline {
     pub fn new(
         transformer: AceStepTransformer1D,
         vae: AutoencoderOobleck,
+        condition_encoder: Option<AceStepConditionEncoder>,
+        text_encoder: Option<Qwen3TextEncoder>,
         device: Device,
         dtype: DType,
     ) -> Self {
         Self {
             transformer,
             vae,
+            condition_encoder,
+            text_encoder,
             device,
             dtype,
         }
@@ -51,6 +58,9 @@ impl AudioDiffusionPipeline {
         let vae_path = dir.join("vae").join("diffusion_pytorch_model.safetensors");
         let trans_shard1 = dir.join("transformer").join("diffusion_pytorch_model-00001-of-00002.safetensors");
         let trans_shard2 = dir.join("transformer").join("diffusion_pytorch_model-00002-of-00002.safetensors");
+        let cond_path = dir.join("condition_encoder").join("diffusion_pytorch_model.safetensors");
+        let te_path = dir.join("text_encoder").join("model.safetensors");
+        let tok_path = dir.join("tokenizer").join("tokenizer.json");
 
         let vae_config = OobleckConfig::default();
         let vae = AutoencoderOobleck::from_safetensors(&vae_path, vae_config, &device, dtype)
@@ -62,7 +72,19 @@ impl AudioDiffusionPipeline {
             dtype,
         ).context("Failed to load AceStep 1D Transformer")?;
 
-        Ok(Self::new(transformer, vae, device, dtype))
+        let condition_encoder = if cond_path.exists() {
+            AceStepConditionEncoder::from_safetensors(&cond_path, &device, dtype).ok()
+        } else {
+            None
+        };
+
+        let text_encoder = if te_path.exists() {
+            Qwen3TextEncoder::from_safetensors(&te_path, Some(&tok_path), &device, dtype).ok()
+        } else {
+            None
+        };
+
+        Ok(Self::new(transformer, vae, condition_encoder, text_encoder, device, dtype))
     }
 
     /// Synthesize high-fidelity master stereo audio using Flow-Matching 1D Diffusion
@@ -74,7 +96,7 @@ impl AudioDiffusionPipeline {
     /// * `seed` - Deterministic random seed
     pub fn generate(
         &self,
-        _prompt: &str,
+        prompt: &str,
         duration_seconds: f32,
         num_steps: usize,
         _seed: u64,
@@ -92,8 +114,15 @@ impl AudioDiffusionPipeline {
         let latents_64 = Tensor::randn(0.0f32, 1.0f32, (1, 64, num_frames), &self.device)?
             .to_dtype(self.dtype)?;
 
-        // 3. Prepare conditioning embedding (dummy/null condition of [1, 16, 2048] for unconditional baseline)
-        let condition = Tensor::zeros((1, 16, 2048), self.dtype, &self.device)?;
+        // 3. Prepare conditioning embedding from Prompt via Qwen3 + AceStepConditionEncoder
+        let condition = if let (Some(te), Some(ce)) = (&self.text_encoder, &self.condition_encoder) {
+            let text_embeds = te.encode_last_hidden(prompt, 64)
+                .map_err(|e| anyhow::anyhow!("Text encoding failed: {}", e))?;
+            ce.forward(&text_embeds)
+                .map_err(|e| anyhow::anyhow!("Condition encoding failed: {}", e))?
+        } else {
+            Tensor::zeros((1, 16, 2048), self.dtype, &self.device)?
+        };
 
         // 4. Flow Matching Euler Schedule (from t=1.0 to t=0.0)
         let mut cur_latents = latents_64;
@@ -104,8 +133,9 @@ impl AudioDiffusionPipeline {
             let timestep_tensor = Tensor::new(&[t_val as f32 * 1000.0], &self.device)?
                 .to_dtype(self.dtype)?;
 
-            // In 1D Diffusion Transformer, input is 192 channels (3 x 64: [x_t, v_prev, noise_proj])
-            let in_latents = Tensor::cat(&[&cur_latents, &cur_latents, &cur_latents], 1)?;
+            // In 1D Diffusion Transformer, input is 192 channels: [latents_64 (x_t), ref_audio_64 (0 for T2A), mask_64 (0 for T2A)]
+            let zeros = Tensor::zeros(cur_latents.shape(), self.dtype, &self.device)?;
+            let in_latents = Tensor::cat(&[&cur_latents, &zeros, &zeros], 1)?;
 
             // Predict flow velocity vector v_t
             let v_pred = self.transformer.forward(&in_latents, &timestep_tensor, &condition)?;

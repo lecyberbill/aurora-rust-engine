@@ -337,6 +337,19 @@ impl Qwen3TextEncoder {
         Self::new_with_config(vb, tokenizer_path, config)
     }
 
+    /// Load Qwen3 text encoder from a single safetensors file.
+    pub fn from_safetensors(
+        weights_path: &Path,
+        tokenizer_path: Option<&Path>,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Self> {
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[weights_path], dtype, device)?
+        };
+        Self::new(vb, tokenizer_path)
+    }
+
     /// Build from a checkpoint archive: detect architecture, materialise the VarBuilder, and
     /// construct the encoder. This is the recommended entry point (handles 4B & 8B automatically).
     pub fn from_archive(

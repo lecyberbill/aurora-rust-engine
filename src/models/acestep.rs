@@ -427,3 +427,98 @@ impl AceStepTransformer1D {
         self.proj_out_conv.forward(&out_t)
     }
 }
+
+/// Single Lyric Encoder Transformer Layer (2048 hidden, 6144 intermediate, 16 heads)
+pub struct AceStepLyricLayer {
+    self_attn: AceStepAttention,
+    input_layernorm: RmsNorm,
+    mlp: AceStepMlp,
+    post_attention_layernorm: RmsNorm,
+}
+
+impl AceStepLyricLayer {
+    pub fn load(vb: VarBuilder) -> Result<Self> {
+        let hidden_size = 2048;
+        let intermediate_size = 6144;
+        let num_heads = 16;
+        let num_kv_heads = 8;
+        let head_dim = 128;
+
+        let self_attn = AceStepAttention::load(
+            vb.pp("self_attn"),
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        )?;
+        let input_layernorm = candle_nn::rms_norm(hidden_size, 1e-6, vb.pp("input_layernorm"))?;
+        let mlp = AceStepMlp::load(vb.pp("mlp"), hidden_size, intermediate_size)?;
+        let post_attention_layernorm = candle_nn::rms_norm(hidden_size, 1e-6, vb.pp("post_attention_layernorm"))?;
+
+        Ok(Self {
+            self_attn,
+            input_layernorm,
+            mlp,
+            post_attention_layernorm,
+        })
+    }
+
+    pub fn forward(&self, x: &Tensor, rope: &AudioRotaryEmbedding) -> candle_core::Result<Tensor> {
+        let norm_x = self.input_layernorm.forward(x)?;
+        let attn_out = self.self_attn.forward(&norm_x, None, Some(rope))?;
+        let h = (x + attn_out)?;
+
+        let norm_h = self.post_attention_layernorm.forward(&h)?;
+        let mlp_out = self.mlp.forward(&norm_h)?;
+        &h + mlp_out
+    }
+}
+
+/// AceStepConditionEncoder: Projects Qwen3 1024d embeddings through 8 Lyric Transformer layers into 2048d conditioning
+pub struct AceStepConditionEncoder {
+    embed_tokens: Linear,
+    layers: Vec<AceStepLyricLayer>,
+    rope: AudioRotaryEmbedding,
+}
+
+impl AceStepConditionEncoder {
+    pub fn load(vb: VarBuilder) -> Result<Self> {
+        let vb_lyric = vb.pp("lyric_encoder");
+        let embed_tokens = candle_nn::linear(1024, 2048, vb_lyric.pp("embed_tokens"))?;
+
+        let mut layers = Vec::with_capacity(8);
+        for i in 0..8 {
+            let layer = AceStepLyricLayer::load(vb_lyric.pp(format!("layers.{}", i)))?;
+            layers.push(layer);
+        }
+
+        let rope = AudioRotaryEmbedding::new(128, 1000000.0);
+
+        Ok(Self {
+            embed_tokens,
+            layers,
+            rope,
+        })
+    }
+
+    pub fn from_safetensors<P: AsRef<Path>>(
+        weights_path: P,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Self> {
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[weights_path.as_ref()], dtype, device)
+                .with_context(|| format!("Failed to load condition encoder at {:?}", weights_path.as_ref()))?
+        };
+        Self::load(vb)
+    }
+
+    /// Encode Qwen3 text embeddings [batch, seq_len, 1024] into 2048d condition tokens
+    pub fn forward(&self, text_embeds: &Tensor) -> candle_core::Result<Tensor> {
+        let mut h = self.embed_tokens.forward(text_embeds)?;
+        for layer in &self.layers {
+            h = layer.forward(&h, &self.rope)?;
+        }
+        Ok(h)
+    }
+}
