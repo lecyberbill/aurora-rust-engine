@@ -482,6 +482,42 @@ impl FluxVaeDecoder {
     /// Convert unpatchified latents [1, 16/32, H/8, W/8] to RgbImage with robust dynamic contrast
     pub fn decode_to_image(&self, latents: &Tensor) -> Result<RgbImage> {
         let rgb_tensor = self.decode(latents)?;
+        Self::tensor_to_rgb(&rgb_tensor)
+    }
+
+    /// Single-pass full decode without BFL latent scale/shift (for SD 3.5 or pre-normalized latents)
+    pub fn decode_raw(&self, latents: &Tensor) -> Result<Tensor> {
+        let latents = latents.to_device(&self.device)?.to_dtype(self.dtype)?;
+
+        let mut h = if let Some(ref pqc) = self.post_quant_conv {
+            pqc.forward(&latents)?
+        } else {
+            latents
+        };
+
+        h = self.conv_in.forward(&h)?;
+        h = self.mid_block.0.forward(&h)?;
+        if let Some(ref attn) = self.mid_block.1 {
+            h = attn.forward(&h)?;
+        }
+        h = self.mid_block.2.forward(&h)?;
+
+        for block in &self.up_blocks {
+            h = block.forward(&h)?;
+        }
+
+        let h = self.conv_norm_out.forward(&h)?;
+        let h = candle_nn::ops::silu(&h)?;
+        self.conv_out.forward(&h)
+    }
+
+    /// Convert raw unscaled latents directly to RgbImage
+    pub fn decode_raw_to_image(&self, latents: &Tensor) -> Result<RgbImage> {
+        let rgb_tensor = self.decode_raw(latents)?;
+        Self::tensor_to_rgb(&rgb_tensor)
+    }
+
+    fn tensor_to_rgb(rgb_tensor: &Tensor) -> Result<RgbImage> {
         let (_, _, h, w) = rgb_tensor.dims4()?;
 
         // Scale RGB values from [-1, 1] to [0, 1] in high precision F32

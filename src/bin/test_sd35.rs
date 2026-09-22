@@ -32,14 +32,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vae_path = "G:\\models\\vae\\sd3_vae.safetensors";
     let prompt = std::env::var("PROMPT").unwrap_or_else(|_| "a majestic white wolf on a snowy cliff at golden hour, photorealistic, 8k".into());
     // Official SD3.5 Large defaults: 28 steps, guidance 3.5 (real CFG). Override with STEPS/GUIDANCE.
-    // Turbo checkpoints: STEPS=4..20 GUIDANCE=1.0.
-    let steps: usize = std::env::var("STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(28);
-    let guidance: f64 = std::env::var("GUIDANCE").ok().and_then(|s| s.parse().ok()).unwrap_or(3.5);
+    let is_turbo = ckpt.to_lowercase().contains("turbo");
+    let default_steps = if is_turbo { 8 } else { 28 };
+    let default_guidance = if is_turbo { 1.0 } else { 3.5 };
+    let steps: usize = std::env::var("STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(default_steps);
+    let guidance: f64 = std::env::var("GUIDANCE").ok().and_then(|s| s.parse().ok()).unwrap_or(default_guidance);
     let width: usize = std::env::var("WIDTH").ok().and_then(|s| s.parse().ok()).unwrap_or(512);
     let height: usize = std::env::var("HEIGHT").ok().and_then(|s| s.parse().ok()).unwrap_or(512);
 
     println!("📥 Loading SD3.5 transformer: {ckpt}");
     let mut pipe = FluxPipeline::from_single_file_streaming(&ckpt, device.clone())?;
+    pipe.enable_flash_attn();
 
     // Text encoders (CPU to keep the 9 GB T5 off the already-busy GPU).
     println!("📥 Building CLIP-L / CLIP-G / T5-XXL (CPU)...");

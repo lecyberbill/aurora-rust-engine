@@ -144,6 +144,22 @@ impl FluxPipeline {
         unsafe { std::env::set_var("FLUX_FLASH_ATTN", "0") };
     }
 
+    /// Decode final spatial latents [1, C, H, W] to RgbImage, automatically applying SD 3.5 or Flux VAE scaling.
+    pub fn decode_final_latents(&self, unpatchified_latents: &Tensor) -> candle_core::Result<image::RgbImage> {
+        if let Some(ref vae) = self.vae {
+            if self.is_sd35() {
+                let scaled = unpatchified_latents.to_dtype(DType::F32)?.affine(1.0 / 1.5305, 0.0609)?.to_dtype(self.dtype)?;
+                vae.decode_raw_to_image(&scaled)
+            } else {
+                vae.decode_to_image(unpatchified_latents)
+            }
+        } else {
+            let rgb_latent = unpatchified_latents.narrow(1, 0, 3)?;
+            crate::diffusion::vae::tensor_to_rgb_image(&rgb_latent)
+        }
+    }
+
+
     /// Hot-merge a Flux LoRA (Diffusers-style `transformer.*` or BFL-style `lora_unet_double_blocks.*`
     /// key names) into the transformer weights. For the streaming path the deltas are attached to the
     /// block streamer so each block splices them as it is loaded. For the in-memory path they are
@@ -982,22 +998,7 @@ impl FluxPipeline {
             };
             unpatchify(&normalized, params.height, params.width)?
         };
-        // SD3 / SD3.5 VAE operates in a scaled + shifted latent space (scaling_factor 1.5305,
-        // shift_factor 0.0609). Undo both before decoding.
-        let unpatchified_latents = if self.is_sd35() {
-            unpatchified_latents.to_dtype(DType::F32)?.affine(1.0 / 1.5305, 0.0609)?.to_dtype(self.dtype)?
-        } else {
-            unpatchified_latents
-        };
-
-        // 3. Decode via Flux VAE if attached
-        let image = if let Some(ref vae) = self.vae {
-            vae.decode_to_image(&unpatchified_latents)?
-        } else {
-            // Direct normalized visualization of the first 3 latent channels
-            let rgb_latent = unpatchified_latents.narrow(1, 0, 3)?;
-            crate::diffusion::vae::tensor_to_rgb_image(&rgb_latent)?
-        };
+        let image = self.decode_final_latents(&unpatchified_latents)?;
 
         let vae_decode_ms = t_vae_start.elapsed().as_secs_f64() * 1000.0;
         let total_wallclock_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -1243,12 +1244,7 @@ impl FluxPipeline {
             unpatchify(&latents, height, width)?
         };
 
-        let image = if let Some(ref vae) = self.vae {
-            vae.decode_to_image(&unpatchified_latents)?
-        } else {
-            let rgb_latent = unpatchified_latents.narrow(1, 0, 3)?;
-            crate::diffusion::vae::tensor_to_rgb_image(&rgb_latent)?
-        };
+        let image = self.decode_final_latents(&unpatchified_latents)?;
 
         let vae_decode_ms = t_vae_start.elapsed().as_secs_f64() * 1000.0;
         let total_wallclock_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -1493,12 +1489,7 @@ impl FluxPipeline {
             unpatchify(&latents, height, width)?
         };
 
-        let image = if let Some(ref vae) = self.vae {
-            vae.decode_to_image(&unpatchified_latents)?
-        } else {
-            let rgb_latent = unpatchified_latents.narrow(1, 0, 3)?;
-            crate::diffusion::vae::tensor_to_rgb_image(&rgb_latent)?
-        };
+        let image = self.decode_final_latents(&unpatchified_latents)?;
 
         let vae_decode_ms = t_vae_start.elapsed().as_secs_f64() * 1000.0;
         let total_wallclock_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -1717,12 +1708,7 @@ impl FluxPipeline {
             unpatchify(&latents, params.height, params.width)?
         };
 
-        let image = if let Some(ref vae) = self.vae {
-            vae.decode_to_image(&unpatchified_latents)?
-        } else {
-            let rgb_latent = unpatchified_latents.narrow(1, 0, 3)?;
-            crate::diffusion::vae::tensor_to_rgb_image(&rgb_latent)?
-        };
+        let image = self.decode_final_latents(&unpatchified_latents)?;
 
         let vae_decode_ms = t_vae_start.elapsed().as_secs_f64() * 1000.0;
         let total_wallclock_ms = t_total.elapsed().as_secs_f64() * 1000.0;
