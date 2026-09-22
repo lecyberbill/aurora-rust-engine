@@ -23,8 +23,11 @@
    - [FLUX.2 Multi-Image Reference Conditioning (Mode Édition, 4D RoPE)](#flux2-multi-image-reference-conditioning-mode-édition)
    - [SDXL Image-to-Image (Img2Img)](#image-to-image-img2img)
    - [SDXL Inpainting & Mask-Guided Diffusion](#inpainting--mask-guided-diffusion)
-   - [Hot LoRA Merging (SDXL, FLUX.1 & FLUX.2-Dev)](#hot-lora-merging)
+   - [Hot LoRA Merging](#hot-lora-merging)
    - [ControlNet (Canny Edge)](#controlnet-canny-edge)
+   - [Audio-to-Text & Speech Transcription (Whisper Turbo)](#audio-to-text--speech-transcription-whisper)
+   - [Text-to-Audio & Sound Diffusion (Stable Audio Open)](#text-to-audio--sound-diffusion-stable-audio-open)
+   - [Text-to-Speech (TTS / Parler-TTS & Kokoro-82M)](#text-to-speech-tts--parler-tts--kokoro-82m)
 5. [REST API & WebSocket Server Reference](#5-rest-api--websocket-server-reference)
    - [Endpoints & JSON Payload Schema](#endpoints--json-payload-schema)
    - [Live Latent Preview via WebSocket](#live-latent-preview-via-websocket)
@@ -941,6 +944,114 @@ fn main() -> anyhow::Result<()> {
 
 ---
 
+### Audio-to-Text & Speech Transcription (Whisper)
+
+Aurora incorporates pure-Rust audio transcription powered by OpenAI's **Whisper** family (`whisper-large-v3`, `whisper-turbo`):
+
+* **No external Python/FFmpeg required** : Mel-filterbank spectrogram extraction (128 Mel frequency bins at 16 kHz) is calculated in pure Rust.
+* **Multilingual & Automatic Language ID** : Transcribes 99+ languages with automatic language detection and word-level timestamps.
+
+```rust
+use aurora_rust_engine::models::AutoModel;
+use candle_core::Device;
+
+let device = Device::new_cuda(0)?;
+
+// Load Whisper Turbo from Safetensors or GGUF
+let mut whisper = AutoModel::from_local(
+    "<MODELS_DIR>/whisper/whisper-large-v3-turbo.safetensors",
+    device,
+    candle_core::DType::F16,
+)?;
+
+// Transcribe audio WAV file (16kHz mono PCM)
+let transcript = whisper.transcribe("voice_note.wav")?;
+println!("Transcription: \"{}\"", transcript.text);
+for segment in transcript.segments {
+    println!("[{:.2}s -> {:.2}s] {}", segment.start, segment.end, segment.text);
+}
+```
+
+---
+
+### Text-to-Audio & Sound Diffusion (Stable Audio Open)
+
+Aurora supports high-fidelity audio generation from text prompts using 1D continuous diffusion models like **Stable Audio Open 1.0**:
+
+* **Continuous 1D DiT** : Generates music, ambient soundscapes, and foley sound effects at **44.1 kHz stereo** (up to 47 seconds).
+* **Timing Conditioners** : Precision duration control through `seconds_start` and `seconds_total` timing embeddings.
+* **1D Audio VAE** : AutoencoderOobleck / DAC 64-channel 1D VAE decoding directly into uncompressed 44.1 kHz audio waveforms.
+
+```rust
+use aurora_rust_engine::pipelines::audio::StableAudioPipeline;
+use candle_core::Device;
+
+let device = Device::new_cuda(0)?;
+
+let mut pipeline = StableAudioPipeline::from_single_file(
+    "<MODELS_DIR>/audio/stable-audio-open-1.0.safetensors",
+    device,
+)?;
+
+// Generate a 15-second cinematic ambient track
+let sound = pipeline.generate_sound(
+    "Cinematic drum crescendo with deep sub-bass impact and rain ambience, 44.1kHz stereo",
+    15.0, // Duration in seconds
+    50,   // Denoising steps
+)?;
+
+sound.save_wav("output_ambience.wav")?;
+```
+
+---
+
+### Text-to-Speech (TTS / Parler-TTS & Kokoro-82M)
+
+Aurora provides neural speech synthesis pipelines in 100% pure Rust:
+
+#### 1. Parler-TTS (Controllable Natural Voice Synthesis)
+* **Controllable Voice Acoustics** : Guide pitch, speaking rate, timbre, and acoustic environment through natural language voice descriptions.
+* **Architecture** : T5 text conditioner + multi-codebook autoregressive transformer + Descript Audio Codec (DAC) 44.1 kHz neural vocoder.
+* **Native Pure Rust Audio I/O** : Standard 16-bit PCM RIFF WAV saving via [`WavAudio`](file:///d:/image_to_text/TransRust/src/audio/wav.rs) with zero external C/FFmpeg dependencies.
+
+```rust
+use aurora_rust_engine::audio::WavAudio;
+use aurora_rust_engine::pipelines::TtsPipeline;
+use candle_core::{DType, Device};
+
+let device = Device::new_cuda(0)?;
+
+// Load Parler-TTS & DAC acoustic vocoder
+let mut pipeline = TtsPipeline::from_files(
+    "models/tts/parler_config.json",
+    "models/tts/parler_model.safetensors",
+    "models/tts/dac_model.safetensors",
+    "models/tts/tokenizer.json",
+    "models/tts/description_tokenizer.json",
+    device,
+    DType::F32,
+)?;
+
+// Synthesize high-fidelity 44.1 kHz speech
+let audio: WavAudio = pipeline.synthesize(
+    "Welcome to the Aurora inference engine, running entirely in pure Rust on CUDA.",
+    "A female speaker delivers a clear and articulate speech with moderate pacing and natural warmth.",
+    600, // max tokens
+    0.8, // temperature
+    42,  // seed
+)?;
+
+// Save directly to standard 16-bit PCM WAV
+audio.save_wav("output_speech.wav")?;
+println!("Synthesized {:.2}s of speech at {} Hz", audio.duration_seconds(), audio.sample_rate);
+```
+
+#### 2. Kokoro-82M (Ultra-Compact Non-Autoregressive Voice)
+* **Ultra-Lightweight** : 82M parameters running at **> 50x realtime** on CPU and GPU.
+* **Natural Voice Profiles** : Multiple built-in American & British voices with expressive prosodic inflections (`af_heart`, `am_adam`, `bf_emma`).
+
+---
+
 ## 5. REST API & WebSocket Server Reference
 
 Aurora embeds a high-performance [Axum](https://github.com/tokio-rs/axum) web server providing REST endpoints and streaming WebSockets:
@@ -1017,6 +1128,7 @@ Aurora comes with pre-built test and benchmark executables in `src/bin/`:
 | **`test_inpaint`** | `cargo run --release --bin test_inpaint --features cuda,flash-attn` | Mask-guided inpainting verification |
 | **`test_controlnet`** | `cargo run --release --bin test_controlnet --features cuda,flash-attn` | Canny edge Multi-ControlNet integration test |
 | **`test_text_gen`** | `cargo run --release --bin test_text_gen --features cuda "<model.gguf>" "<prompt>"` | **CausalLM Text Generation** (Llama/DeepSeek/Qwen/Gemma/Mistral) |
+| **`test_tts`** | `cargo run --bin test_tts` | **Audio & Neural Text-to-Speech (TTS)** validation harness (WAV + Parler/DAC) |
 
 ---
 

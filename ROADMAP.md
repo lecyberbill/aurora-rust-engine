@@ -545,12 +545,50 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 
 ---
 
-## 🚀 Milestone 20: Neural Audio & Speech (STT / TTS)
+## 🚀 Milestone 20: Audio-to-Text & Speech Transcription (Whisper Turbo & Moonshine)
 
-**Goal.** Complete the multimodal stack with low-latency Speech-to-Text and Text-to-Speech in pure Rust:
+**Goal.** Provide production-grade, low-latency Speech-to-Text (STT) and audio transcription in 100% pure Rust:
 
-- [ ] **Whisper Turbo / Moonshine (Speech-to-Text)**:
-  - Audio spectrogram mel-filterbank preprocessing in pure Rust + Encoder-Decoder transformer for live voice transcription.
-- [ ] **Kokoro-82M / ChatTTS (Text-to-Speech & Voice Cloning)**:
-  - High-fidelity voice synthesis with emotion and prosody control, operating at > 50x realtime on CPU/GPU.
+- [ ] **Whisper Engine (`src/models/audio/whisper.rs`)**:
+  - Support for **Whisper Large-v3**, **Whisper Turbo**, and quantized variants (GGUF / Safetensors).
+  - Pure Rust Mel-filterbank spectrogram extraction (128 Mel bins, 16kHz audio sampling, dynamic padding).
+  - Encoder-Decoder autoregressive cross-attention loop with Greedy & Beam Search decoding.
+  - Multilingual transcription, automatic language identification, and word-level timestamp alignment.
+- [ ] **Moonshine Real-Time Streaming STT (`src/models/audio/moonshine.rs`)**:
+  - Sub-50ms on-device audio transcription designed for live microphone streams without chunking latency.
+- [ ] **Unified Trait Integration (`AudioTranscriptionModel`)**:
+  - Clean facade: `AutoModel::from_pretrained("openai/whisper-large-v3-turbo")` yielding a `transcribe(audio_bytes) -> Transcript` API.
+
+---
+
+## 🚀 Milestone 21: Text-to-Audio & Sound Diffusion (Stable Audio Open & MusicGen)
+
+**Goal.** Bring high-fidelity generative sound design and music synthesis to the engine using 1D continuous diffusion:
+
+- [ ] **Stable Audio Open 1.0 & AceStep Audio Diffusion (`src/pipelines/audio_diffusion.rs`)**:
+  - Continuous 1D Diffusion Transformer (1D DiT) operating on latent audio representations.
+  - **AceStep 1D DiT**: Qwen3 text conditioning + 1D DiT Transformer + AutoencoderOobleck 44.1kHz stereo VAE with Flow Matching Euler scheduler.
+  - **Stable Audio Open**: T5 text conditioning with timing conditioning embeddings (`seconds_start`, `seconds_total`).
+  - AutoencoderOobleck / DAC 64-channel 1D VAE Decoder in pure Rust for latent-to-waveform reconstruction.
+- [ ] **MusicGen Autoregressive Music Engine**:
+  - Multi-codebook EnCodec generation for melodic and harmonic music generation.
+
+---
+
+## 🚀 Milestone 22: High-Speed Neural Speech Synthesis (Parler-TTS & Kokoro-82M)
+
+**Goal.** Ultra-fast, human-sounding Text-to-Speech (TTS) with expressive prosody:
+
+- [ ] **Parler-TTS Generative Voice Engine (`src/pipelines/tts.rs`)**:
+  - Controllable voice synthesis guided by text descriptions (pitch, speed, gender, room acoustics).
+  - T5 text conditioning + multi-codebook autoregressive transformer decoder.
+  - Neural audio vocoding via Descript Audio Codec (DAC) producing 44.1 kHz broadcast-grade speech.
+  - Native pure Rust WAV encoder (`src/audio/wav.rs`) with zero external C/FFmpeg dependencies.
+- [ ] **Kokoro-82M Ultra-Compact TTS (`src/models/audio/kokoro.rs`)**:
+  - 82M parameter lightweight architecture generating voice at **> 50x realtime** on CPU/GPU.
+  - Style-embedding voice conditioning (multiple predefined American & British male/female voice profiles).
+  - G2P (Grapheme-to-Phoneme) and stress-accent tokenizer in pure Rust.
+- [ ] **ChatTTS Expressive Conversational Engine**:
+  - Conversational speech synthesis with natural pauses, laughter, and emotional inflections.
+
 

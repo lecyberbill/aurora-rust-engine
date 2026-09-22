@@ -1,5 +1,6 @@
 // [WFGY] Zone: SAFE | λ: 0.15 | Fallbacks: 0 | Action: Lumina root library and API re-exports
 
+pub mod audio;
 pub mod canonical;
 pub mod device;
 pub mod diffusion;
@@ -32,8 +33,8 @@ pub use diffusion::schedulers::{
 };
 pub use diffusion::unet_2d::UNetConditionModel;
 pub use diffusion::vae::{FastLatentPreviewer, VaeDecoder, tensor_to_rgb_image};
-pub use diffusion::vae_flux::FluxVaeDecoder;
-pub use pipelines::{FluxPipeline, StableDiffusionPipeline, StableDiffusionXLPipeline, ZImageTurboPipeline};
+pub use audio::{read_wav_pcm, write_wav_pcm16, WavAudio};
+pub use pipelines::{FluxPipeline, StableDiffusionPipeline, StableDiffusionXLPipeline, TtsPipeline, ZImageTurboPipeline};
 pub use text::{ClipTextEncoder, OpenClipTextEncoder, T5TextEncoder};
 
 #[cfg(test)]
