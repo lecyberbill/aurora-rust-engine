@@ -25,6 +25,41 @@ pub struct QwenTextConfig {
 }
 
 impl QwenTextConfig {
+    /// Load configuration from a huggingface/transformers config.json file
+    pub fn from_config_json<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let file = std::fs::File::open(path.as_ref())
+            .map_err(|e| candle_core::Error::Msg(format!("Cannot open config.json: {}", e)))?;
+        let json: serde_json::Value = serde_json::from_reader(file)
+            .map_err(|e| candle_core::Error::Msg(format!("Invalid config.json: {}", e)))?;
+
+        let hidden_dim = json["hidden_size"].as_u64().unwrap_or(2560) as usize;
+        let num_heads = json["num_attention_heads"].as_u64().unwrap_or(32) as usize;
+        let num_kv_heads = json["num_key_value_heads"].as_u64().unwrap_or(8) as usize;
+        let head_dim = json["head_dim"].as_u64().unwrap_or(128) as usize;
+        let intermediate_dim = json["intermediate_size"].as_u64().unwrap_or(9728) as usize;
+        let num_layers = json["num_hidden_layers"].as_u64().unwrap_or(36) as usize;
+        let vocab_size = json["vocab_size"].as_u64().unwrap_or(151936) as usize;
+        let pad_id = json["eos_token_id"].as_u64().unwrap_or(151643) as u32;
+
+        let selected_layers = if num_layers >= 3 {
+            vec![num_layers / 4 - 1, num_layers / 2 - 1, num_layers - 7]
+        } else {
+            vec![0, 1, 2]
+        };
+
+        Ok(Self {
+            hidden_dim,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_dim,
+            num_layers,
+            vocab_size,
+            selected_layers,
+            pad_id,
+        })
+    }
+
     /// Infer the architecture from the checkpoint's actual weight shapes.
     pub fn detect(archive: &dyn WeightsSource) -> Result<Self> {
         let err = |m: &str| candle_core::Error::Msg(format!("QwenTextConfig::detect: {}", m));
@@ -347,7 +382,21 @@ impl Qwen3TextEncoder {
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights_path], dtype, device)?
         };
-        Self::new(vb, tokenizer_path)
+        // Check if config.json exists next to weights_path
+        let config = if let Some(parent) = weights_path.parent() {
+            let conf_path = parent.join("config.json");
+            if conf_path.exists() {
+                QwenTextConfig::from_config_json(&conf_path).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let config = config
+            .or_else(|| qwen_config_from_vb(&vb))
+            .unwrap_or_else(|| qwen3_4b_config());
+        Self::new_with_config(vb, tokenizer_path, config)
     }
 
     /// Build from a checkpoint archive: detect architecture, materialise the VarBuilder, and
@@ -391,9 +440,17 @@ impl Qwen3TextEncoder {
         let embed_tokens = embedding(vocab_size, hidden_dim, vb.pp("model.embed_tokens"))
             .or_else(|_| embedding(vocab_size, hidden_dim, vb.pp("embed_tokens")))?;
 
+        // Probe for layer prefix: "model.layers." vs "layers."
+        let has_model_prefix = vb.pp("model.layers.0.input_layernorm").get(hidden_dim, "weight").is_ok()
+            || vb.pp("model.layers.0.mlp.gate_proj").get((intermediate_dim, hidden_dim), "weight").is_ok();
+
         let mut layers = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
-            let vb_layer = vb.pp(format!("model.layers.{}", i));
+            let vb_layer = if has_model_prefix {
+                vb.pp(format!("model.layers.{}", i))
+            } else {
+                vb.pp(format!("layers.{}", i))
+            };
             let layer = QwenDecoderLayer::new(hidden_dim, num_heads, num_kv_heads, head_dim, intermediate_dim, vb_layer)?;
             layers.push(layer);
         }
@@ -539,6 +596,55 @@ impl Qwen3TextEncoder {
 
         // Return penultimate hidden state WITHOUT final layer norm
         Ok(h)
+    }
+
+    /// Encode prompt and apply final model RMSNorm (standard for text encoders like ACE-Step)
+    pub fn encode_normalized(&self, prompt: &str, max_len: usize) -> Result<Tensor> {
+        let h = self.encode_last_hidden(prompt, max_len)?;
+        if let Some(ref norm) = self.norm {
+            norm.forward(&h)
+        } else {
+            Ok(h)
+        }
+    }
+
+    /// Tokenize raw text (no chat template, no padding) -> `(ids [1, L], mask [1, L])`.
+    /// Matches the ACE-Step `text_tokenizer(text, truncation=True, max_length=max_len)` call.
+    pub fn tokenize_raw(&self, text: &str, max_len: usize) -> Result<(Tensor, Tensor)> {
+        let tok = self
+            .tokenizer
+            .as_ref()
+            .ok_or_else(|| candle_core::Error::Msg("Qwen3TextEncoder has no tokenizer".into()))?;
+        let enc = tok
+            .encode(text, true)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let mut ids = enc.get_ids().to_vec();
+        if max_len > 0 {
+            ids.truncate(max_len);
+        }
+        let len = ids.len().max(1);
+        let ids_t = Tensor::from_vec(ids, (1, len), &self.device)?;
+        let mask = Tensor::ones((1, len), DType::F32, &self.device)?;
+        Ok((ids_t, mask))
+    }
+
+    /// Embedding-table lookup only (ACE-Step uses this for the lyric encoder input).
+    pub fn embed_ids(&self, ids: &Tensor) -> Result<Tensor> {
+        self.embed_tokens.forward(ids)
+    }
+
+    /// Full Qwen3 transformer forward over all layers + final RMSNorm
+    /// (`Qwen3Model(...).last_hidden_state`, used for the ACE-Step caption prompt).
+    pub fn forward_last_hidden(&self, ids: &Tensor) -> Result<Tensor> {
+        let mut h = self.embed_tokens.forward(ids)?;
+        for layer in &self.layers {
+            h = layer.forward(&h)?;
+        }
+        if let Some(ref norm) = self.norm {
+            norm.forward(&h)
+        } else {
+            Ok(h)
+        }
     }
 }
 

@@ -85,6 +85,8 @@ impl CausalLMConfig {
         // Sniff vocab_size and hidden_size from embed_tokens or lm_head
         let (vocab_size, hidden_size) = if let Some((_, dims)) = src.raw_info("model.embed_tokens.weight") {
             (dims.first().copied().unwrap_or(151936), dims.get(1).copied().unwrap_or(4096))
+        } else if let Some((_, dims)) = src.raw_info("embed_tokens.weight") {
+            (dims.first().copied().unwrap_or(151936), dims.get(1).copied().unwrap_or(4096))
         } else if let Some((_, dims)) = src.raw_info("token_embd.weight") {
             (dims.first().copied().unwrap_or(151936), dims.get(1).copied().unwrap_or(4096))
         } else if let Some((_, dims)) = src.raw_info("lm_head.weight") {
@@ -98,6 +100,8 @@ impl CausalLMConfig {
         // Sniff intermediate_size from mlp gate or up projection
         let intermediate_size = if let Some((_, dims)) = src.raw_info("model.layers.0.mlp.gate_proj.weight") {
             dims.first().copied().unwrap_or(hidden_size * 4)
+        } else if let Some((_, dims)) = src.raw_info("layers.0.mlp.gate_proj.weight") {
+            dims.first().copied().unwrap_or(hidden_size * 4)
         } else if let Some((_, dims)) = src.raw_info("blk.0.ffn_gate.weight") {
             dims.first().copied().unwrap_or(hidden_size * 4)
         } else {
@@ -108,6 +112,11 @@ impl CausalLMConfig {
         let (num_heads, num_kv_heads, head_dim) = if let Some((_, dims)) = src.raw_info("model.layers.0.self_attn.q_proj.weight") {
             let q_out = dims.first().copied().unwrap_or(hidden_size);
             let k_out = src.raw_info("model.layers.0.self_attn.k_proj.weight").map(|(_, d)| d[0]).unwrap_or(q_out);
+            let h_dim = 128;
+            (q_out / h_dim, k_out / h_dim, h_dim)
+        } else if let Some((_, dims)) = src.raw_info("layers.0.self_attn.q_proj.weight") {
+            let q_out = dims.first().copied().unwrap_or(hidden_size);
+            let k_out = src.raw_info("layers.0.self_attn.k_proj.weight").map(|(_, d)| d[0]).unwrap_or(q_out);
             let h_dim = 128;
             (q_out / h_dim, k_out / h_dim, h_dim)
         } else if let Some((_, dims)) = src.raw_info("blk.0.attn_q.weight") {
@@ -421,7 +430,7 @@ impl CausalLMPipeline {
         let hidden = norm.forward(&hidden).map_err(LuminaError::Candle)?;
 
         // 4. LM Head projection
-        let lm_head_w = self.get_weight_or_fallback(&["lm_head.weight", "output.weight", "model.embed_tokens.weight", "token_embd.weight"])?;
+        let lm_head_w = self.get_weight_or_fallback(&["lm_head.weight", "output.weight", "model.embed_tokens.weight", "embed_tokens.weight", "token_embd.weight"])?;
         let logits = Self::matmul_linear(&hidden, &lm_head_w)?;
 
         Ok(logits)
@@ -444,9 +453,21 @@ impl CausalLMPipeline {
         let v = Self::matmul_linear(&normed_x, &v_w)?;
 
         let b_sz = x.dim(0).map_err(LuminaError::Candle)?;
-        let q = q.reshape((b_sz, seq_len, self.config.num_attention_heads, self.config.head_dim))?.transpose(1, 2)?;
-        let k = k.reshape((b_sz, seq_len, self.config.num_key_value_heads, self.config.head_dim))?.transpose(1, 2)?;
+        let mut q = q.reshape((b_sz, seq_len, self.config.num_attention_heads, self.config.head_dim))?.transpose(1, 2)?;
+        let mut k = k.reshape((b_sz, seq_len, self.config.num_key_value_heads, self.config.head_dim))?.transpose(1, 2)?;
         let v = v.reshape((b_sz, seq_len, self.config.num_key_value_heads, self.config.head_dim))?.transpose(1, 2)?;
+
+        // Qwen3 applies per-head RMSNorm (over head_dim) to Q and K before RoPE.
+        if self.config.qk_norm {
+            if let Ok(qn_w) = self.get_layer_weight(layer_idx, &["self_attn.q_norm.weight", "attn_q_norm.weight"]) {
+                let qn = RmsNorm::new(qn_w, self.config.rms_norm_eps);
+                q = qn.forward(&q).map_err(LuminaError::Candle)?;
+            }
+            if let Ok(kn_w) = self.get_layer_weight(layer_idx, &["self_attn.k_norm.weight", "attn_k_norm.weight"]) {
+                let kn = RmsNorm::new(kn_w, self.config.rms_norm_eps);
+                k = kn.forward(&k).map_err(LuminaError::Candle)?;
+            }
+        }
 
         // Apply RoPE
         let (q, k) = self.apply_rope(&q, &k, pos, seq_len)?;

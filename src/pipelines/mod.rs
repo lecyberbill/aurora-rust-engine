@@ -6,7 +6,9 @@ pub mod tts;
 pub mod whisper;
 pub mod z_image_turbo;
 
-pub use audio_diffusion::{AudioDiffusionPipeline, AudioGenerationMetrics};
+pub use audio_diffusion::{
+    AceStepVariant, AudioDiffusionPipeline, AudioGenerationMetrics, TextToMusicRequest,
+};
 pub use flux::FluxPipeline;
 pub use sd15::StableDiffusionPipeline;
 pub use sdxl::StableDiffusionXLPipeline;

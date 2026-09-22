@@ -1009,6 +1009,51 @@ sound.save_wav("output_ambience.wav")?;
 
 ---
 
+### Text-to-Music (ACE-Step 1.5 — Turbo / Base / XL)
+
+Full **48 kHz stereo song generation** from a caption **and lyrics**, in 100% pure Rust,
+bit-exact-validated against HuggingFace Diffusers. Supports the **Turbo**, **Base/SFT** and
+**XL (4B)** variants (auto-detected from the checkpoint).
+
+```rust
+use aurora_rust_engine::pipelines::{AudioDiffusionPipeline, TextToMusicRequest};
+use aurora_rust_engine::audio::AudioFormat;
+
+// CUDA bf16 when available, otherwise CPU f32.
+let pipeline = AudioDiffusionPipeline::from_pretrained("G:/models/Audio")?; // or Audio-base / Audio-xl-base
+
+let req = TextToMusicRequest::new(
+        "acoustic pop, warm uplifting, 120 bpm, acoustic guitar, piano, drums",
+        "[verse]\nShining like the morning sun",
+    )
+    .with_language("fr")
+    .with_duration(30.0)   // seconds (10s upward; long songs use tiled VAE)
+    .with_steps(8)         // 8 for Turbo, ~30-50 for Base/XL
+    .with_seed(12345);     // deterministic seeded noise
+
+let (audio, metrics) = pipeline.text_to_music(&req)?;
+println!("{} Hz, {} ch, {:.2}s", metrics.sample_rate, metrics.channels, metrics.duration_seconds);
+
+// Export: WAV (native), OGG Vorbis (BSD), MP3 (optional `--features mp3`, LAME/LGPL).
+pipeline.text_to_music_to_file(&req, "my_song.ogg", Some(AudioFormat::Ogg))?;
+```
+
+* **Deterministic** : the same `seed` yields an identical waveform (xoshiro256** + Box-Muller).
+* **Variants** : `pipeline.variant` is `Turbo` (guidance 1.0) or `Base`/`XL` (CFG via APG, guidance ≈ 7).
+* **Long songs** : query-attention chunking + overlap-discard tiled VAE decode allow 3-minute
+  tracks on a 12 GB GPU.
+* **5Hz LM planner** : `AceStepLm::from_dir(...)` + `plan(caption, lyrics, max_tokens)` expands a
+  caption into CoT metadata/lyrics (`bpm`, `keyscale`, `duration`, …).
+* **Convert a single-file HF checkpoint** (Base/SFT/XL) to the expected layout with
+  `scripts/convert_acestep_base.py` (see [`docs/ACESTEP_AUDIO_SPEC.md`](docs/ACESTEP_AUDIO_SPEC.md)).
+
+```powershell
+# CLI: text2music end-to-end
+cmd /c '"...\vcvarsall.bat" x64 && cargo run --release --features cuda --bin test_audio_diffusion -- --model-dir G:/models/Audio --duration 30 --steps 8 --lyrics-file scripts/lyrics_fr.txt --lang fr --format ogg --out ma_musique'
+```
+
+---
+
 ### Text-to-Speech (TTS / Parler-TTS & Kokoro-82M)
 
 Aurora provides neural speech synthesis pipelines in 100% pure Rust:

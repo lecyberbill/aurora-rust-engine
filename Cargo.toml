@@ -27,11 +27,16 @@ axum = { version = "0.8", default-features = false, features = ["tokio", "http1"
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 base64 = "0.22"
+mp3lame-encoder = { version = "0.2", features = ["std"], optional = true }
+vorbis_rs = "0.5"
 hf-hub = { version = "0.4.3", default-features = false, features = ["tokio", "ureq", "native-tls"] }
 grio = { path = "D:/Projet/UI/crates/grio", optional = true }
 
 [features]
 default = []
+# Embedded MP3 output via LAME (LGPL-3.0). Off by default: either enable this
+# feature or convert the WAV/OGG output externally (e.g. ffmpeg).
+mp3 = ["dep:mp3lame-encoder"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 flash-attn = ["cuda", "dep:candle-flash-attn"]
 ui = ["dep:grio"]

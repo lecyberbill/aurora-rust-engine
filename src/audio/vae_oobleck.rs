@@ -399,6 +399,53 @@ impl AutoencoderOobleck {
             ch as u16,
         ))
     }
+
+    /// Output samples per latent frame (product of the downsampling ratios, e.g. 1920).
+    pub fn samples_per_frame(&self) -> usize {
+        self.config.downsampling_ratios.iter().product()
+    }
+
+    /// Memory-bounded decode: split the latent sequence into `core`-frame windows with
+    /// `overlap` frames of context on each side, decode each window, and stitch the
+    /// valid cores together (overlap-discard). Required for long audio so the monolithic
+    /// decoder activations do not OOM the GPU.
+    pub fn decode_tiled(
+        &self,
+        latents: &Tensor,
+        core: usize,
+        overlap: usize,
+    ) -> candle_core::Result<WavAudio> {
+        let t = latents.dim(2)?;
+        if t <= core + 2 * overlap {
+            return self.decode(latents);
+        }
+        let ratio = self.samples_per_frame();
+        let ch = self.config.audio_channels;
+        let sr = self.config.sampling_rate;
+
+        let mut interleaved: Vec<f32> = Vec::with_capacity(t * ratio * ch);
+        let mut core_start = 0usize;
+        while core_start < t {
+            let core_end = (core_start + core).min(t);
+            let left = core_start.saturating_sub(overlap);
+            let right = (core_end + overlap).min(t);
+            let chunk = latents.narrow(2, left, right - left)?;
+            let wav = self.decode(&chunk)?;
+
+            let skip_frames = core_start - left;
+            let take_frames = core_end - core_start;
+            let samples = &wav.samples;
+            for p in 0..take_frames * ratio {
+                let src = (skip_frames * ratio + p) * ch;
+                for c in 0..ch {
+                    interleaved.push(samples[src + c]);
+                }
+            }
+            core_start = core_end;
+        }
+
+        Ok(WavAudio::new(interleaved, sr, ch as u16))
+    }
 }
 
 #[cfg(test)]

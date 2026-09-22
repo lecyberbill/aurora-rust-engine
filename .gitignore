@@ -8,6 +8,9 @@ output/
 outputs/**/*.png
 outputs/*.png
 outputs/*.part
+# Generated audio (masters + reference dumps)
+outputs/audio_showcase/
+outputs/audio_ref/
 
 # Model weights
 *.safetensors

@@ -99,6 +99,50 @@ impl WavAudio {
         write_wav_pcm16(path, &self.samples, self.sample_rate, self.channels)
     }
 
+    /// Save the buffer using an explicitly selected container/codec.
+    ///
+    /// `Wav` uses the built-in PCM16 writer; `Ogg` and `Mp3` encode via the
+    /// open-source libvorbis / LAME backends in [`crate::audio::encode`].
+    pub fn save_encoded<P: AsRef<Path>>(&self, path: P, format: crate::audio::encode::AudioFormat) -> Result<()> {
+        use crate::audio::encode::AudioFormat;
+        match format {
+            AudioFormat::Wav => self.save_wav(path),
+            AudioFormat::Ogg => {
+                let bytes = crate::audio::encode::encode_ogg(&self.samples, self.sample_rate, self.channels)?;
+                std::fs::write(path.as_ref(), bytes)
+                    .with_context(|| format!("failed to write OGG file {:?}", path.as_ref()))
+            }
+            AudioFormat::Mp3 => {
+                #[cfg(feature = "mp3")]
+                {
+                    let bytes = crate::audio::encode::encode_mp3(&self.samples, self.sample_rate, self.channels)?;
+                    std::fs::write(path.as_ref(), bytes)
+                        .with_context(|| format!("failed to write MP3 file {:?}", path.as_ref()))
+                }
+                #[cfg(not(feature = "mp3"))]
+                {
+                    bail!(
+                        "MP3 output is disabled in this build; enable the `mp3` feature or \
+                         convert {:?} with an external tool (e.g. ffmpeg)",
+                        path.as_ref()
+                    )
+                }
+            }
+        }
+    }
+
+    /// Save the buffer, inferring the codec from the file extension
+    /// (`.ogg` -> OGG Vorbis, `.mp3` -> MP3, anything else -> WAV).
+    pub fn save_auto<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let ext = path
+            .as_ref()
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("wav")
+            .to_owned();
+        self.save_encoded(path, crate::audio::encode::AudioFormat::from_extension(&ext))
+    }
+
     /// Load a WAV file from disk.
     pub fn load_wav<P: AsRef<Path>>(path: P) -> Result<Self> {
         read_wav_pcm(path)

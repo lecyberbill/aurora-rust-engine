@@ -36,6 +36,7 @@ It provides a robust, zero-Python alternative for running generative diffusion m
 - **Exact Penultimate Text Parity**: Custom penultimate hidden state extractors for CLIP-L, OpenCLIP-bigG, and multi-layer concat for Qwen3-4B (Layers 9/18/27).
 - **Seamless $C^\infty$ Cosine Tiled VAE**: 4-quadrant $72\times 72$ latent decoding with 128px smooth cosine cross-fade eliminating all tile seams.
 - **Deterministic Schedulers**: Continuous Euler Discrete, Flow Matching Rectified Euler ODE (`step_at` support for arbitrary start step), and DPM-Solver++ 2M Karras.
+- **ACE-Step 1.5 Text-to-Music (Pure Rust)**: Full 1D DiT + Flow-Matching + Oobleck 48 kHz stereo VAE port with bit-exact validation vs HuggingFace Diffusers. Supports **Turbo / Base / SFT / XL** variants, classifier-free guidance (APG), Qwen3 text+lyric conditioning, a 5Hz Qwen3 LM planner, a deterministic seeded RNG, and WAV / OGG Vorbis / MP3 export. See [`docs/ACESTEP_AUDIO_SPEC.md`](docs/ACESTEP_AUDIO_SPEC.md).
 
 ---
 
@@ -265,6 +266,7 @@ See [`ROADMAP.md`](ROADMAP.md) for full technical specifications and development
 - [x] **Milestone 14**: FLUX.2 Multi-Image Reference Conditioning / Mode Édition (4D RoPE)
 - [x] **Milestone 16**: CausalLM LLM Text Generation & AutoModel Facade (Llama, DeepSeek, Qwen, Gemma, Mistral in GGUF/Safetensors)
 - [x] **Milestone 17**: Z-Image Turbo S3-DiT 6B Pure Rust Realtime Pipeline with FlashAttention-2
+- [x] **Milestone 21 (Audio)**: ACE-Step 1.5 Text-to-Music — Turbo/Base/XL 1D DiT, Oobleck 48 kHz VAE, Flow-Matching + APG guidance, 5Hz Qwen3 LM planner, WAV/OGG/MP3 codecs, bit-exact validation vs Diffusers ([spec](docs/ACESTEP_AUDIO_SPEC.md))
 
 ---
 
