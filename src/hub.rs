@@ -76,6 +76,15 @@ impl ModelHub {
         self.api.repo(repo).get(filename).map_err(hub_err)
     }
 
+    /// Ensure a single file of a HF dataset repo is available locally and return its path.
+    pub fn resolve_hf_dataset(&self, repo: &str, filename: &str, revision: Option<&str>) -> Result<PathBuf> {
+        let repo = match revision {
+            Some(rev) => Repo::with_revision(repo.to_string(), RepoType::Dataset, rev.to_string()),
+            None => Repo::with_revision(repo.to_string(), RepoType::Dataset, "main".to_string()),
+        };
+        self.api.repo(repo).get(filename).map_err(hub_err)
+    }
+
     /// Ensure every file of a HF (or mirror) repo is available, returning the local folder.
     /// Useful for multi-shard checkpoints (`model-00001-of-00005.safetensors`, ...).
     pub fn resolve_hf_repo(&self, repo: &str, files: &[String], revision: Option<&str>) -> Result<PathBuf> {

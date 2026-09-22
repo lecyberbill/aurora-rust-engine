@@ -36,6 +36,64 @@ impl WavAudio {
         }
     }
 
+    /// Convert interleaved multi-channel audio to mono by averaging channels.
+    pub fn to_mono(&self) -> Self {
+        if self.channels == 1 {
+            return self.clone();
+        }
+        let ch = self.channels as usize;
+        let num_frames = self.samples.len() / ch;
+        let mut mono = Vec::with_capacity(num_frames);
+        for i in 0..num_frames {
+            let mut sum = 0.0f32;
+            for c in 0..ch {
+                sum += self.samples[i * ch + c];
+            }
+            mono.push(sum / (ch as f32));
+        }
+        Self {
+            samples: mono,
+            sample_rate: self.sample_rate,
+            channels: 1,
+        }
+    }
+
+    /// Resample audio to a target sample rate using linear band-limited interpolation.
+    pub fn resample(&self, target_sample_rate: u32) -> Self {
+        if self.sample_rate == target_sample_rate {
+            return self.clone();
+        }
+        let ch = self.channels as usize;
+        let src_frames = self.samples.len() / ch;
+        if src_frames == 0 {
+            return Self::new(Vec::new(), target_sample_rate, self.channels);
+        }
+
+        let ratio = target_sample_rate as f64 / self.sample_rate as f64;
+        let dst_frames = ((src_frames as f64) * ratio).round() as usize;
+        let mut dst_samples = Vec::with_capacity(dst_frames * ch);
+
+        for dst_idx in 0..dst_frames {
+            let src_pos = (dst_idx as f64) / ratio;
+            let idx0 = src_pos.floor() as usize;
+            let frac = (src_pos - (idx0 as f64)) as f32;
+            let idx1 = (idx0 + 1).min(src_frames.saturating_sub(1));
+
+            for c in 0..ch {
+                let s0 = self.samples[idx0 * ch + c];
+                let s1 = self.samples[idx1 * ch + c];
+                let val = s0 + frac * (s1 - s0);
+                dst_samples.push(val);
+            }
+        }
+
+        Self {
+            samples: dst_samples,
+            sample_rate: target_sample_rate,
+            channels: self.channels,
+        }
+    }
+
     /// Save the audio buffer to a 16-bit PCM standard RIFF WAV file.
     pub fn save_wav<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         write_wav_pcm16(path, &self.samples, self.sample_rate, self.channels)

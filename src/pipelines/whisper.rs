@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::whisper::{self, audio::pcm_to_mel, model::Whisper, Config};
+use candle_transformers::models::whisper::{audio::pcm_to_mel, model::Whisper, Config};
 use tokenizers::Tokenizer;
 
 use crate::audio::{whisper_mel_filters, WavAudio};
@@ -80,6 +80,11 @@ impl WhisperPipeline {
         Ok(Self::new(model, tokenizer, config, device, dtype))
     }
 
+    /// Override the Mel filterbank coefficients.
+    pub fn set_mel_filters(&mut self, filters: Vec<f32>) {
+        self.mel_filters = filters;
+    }
+
     /// Transcribe an audio buffer into text.
     ///
     /// # Arguments
@@ -95,46 +100,25 @@ impl WhisperPipeline {
         let t_start = Instant::now();
         let lang_str = language.unwrap_or("en");
 
-        // 1. Convert to mono PCM 16kHz f32
-        let mono_samples: Vec<f32> = if audio.channels == 1 {
-            audio.samples.clone()
-        } else {
-            // Average stereo channels to mono
-            let n_frames = audio.samples.len() / (audio.channels as usize);
-            let mut mono = Vec::with_capacity(n_frames);
-            for i in 0..n_frames {
-                let mut sum = 0.0f32;
-                for c in 0..(audio.channels as usize) {
-                    sum += audio.samples[i * (audio.channels as usize) + c];
-                }
-                mono.push(sum / (audio.channels as f32));
-            }
-            mono
-        };
+        // 1. Ensure audio is mono and 16,000 Hz for Whisper
+        let processed_audio = audio.to_mono().resample(16000);
+        let mono_samples = processed_audio.samples;
 
-        // 2. Pad or truncate to 30s chunk (480,000 samples @ 16kHz)
-        let chunk_samples = whisper::N_SAMPLES;
-        let mut padded = mono_samples.clone();
-        if padded.len() < chunk_samples {
-            padded.resize(chunk_samples, 0.0);
-        } else if padded.len() > chunk_samples {
-            padded.truncate(chunk_samples);
-        }
+        // 2. Compute Log-Mel Spectrogram across the full audio sequence
+        let mel = pcm_to_mel(&self.config, &mono_samples, &self.mel_filters);
+        let mel_len = mel.len();
+        let num_mel_bins = self.config.num_mel_bins;
+        let mel_tensor = Tensor::from_vec(
+            mel,
+            (1, num_mel_bins, mel_len / num_mel_bins),
+            &self.device,
+        )?.to_dtype(self.dtype)?;
 
-        // 3. Compute Log-Mel Spectrogram in pure Rust
-        let mel = pcm_to_mel(&self.config, &padded, &self.mel_filters);
-        let n_mel = self.config.num_mel_bins;
-        let n_frames = whisper::N_FRAMES; // 3000
-
-        let mel_tensor = Tensor::from_vec(mel, (1, n_mel, n_frames), &self.device)?
-            .to_dtype(self.dtype)?;
-
-        // 4. Encode audio features
-        self.model.encoder.forward(&mel_tensor, true)?;
-        let audio_features = self.model.encoder.forward(&mel_tensor, false)
+        // 3. Encode audio features
+        let audio_features = self.model.encoder.forward(&mel_tensor, true)
             .context("Whisper encoder forward pass failed")?;
 
-        // 5. Decode autoregressively
+        // 4. Decode autoregressively
         let sot_token = 50258u32; // <|startoftranscript|>
         let eot_token = 50257u32; // <|endoftranscript|>
         let trans_token = 50359u32; // <|transcribe|>
@@ -144,37 +128,46 @@ impl WhisperPipeline {
         let lang_token = self.tokenizer.token_to_id(&format!("<|{}|>", lang_str))
             .unwrap_or(50259); // Default to <|en|> (50259)
 
-        let mut prompt_tokens = vec![sot_token, lang_token, trans_token];
+        let mut tokens = vec![sot_token, lang_token, trans_token];
         if !timestamps {
-            prompt_tokens.push(notimestamps_token);
+            tokens.push(notimestamps_token);
         }
+
+        let suppress_tokens: Vec<f32> = (0..self.config.vocab_size as u32)
+            .map(|i| {
+                if self.config.suppress_tokens.contains(&i) || (timestamps && i == notimestamps_token) {
+                    f32::NEG_INFINITY
+                } else {
+                    0.0f32
+                }
+            })
+            .collect();
+        let suppress_tokens_tensor = Tensor::new(suppress_tokens.as_slice(), &self.device)?
+            .to_dtype(self.dtype)?;
 
         self.model.decoder.reset_kv_cache();
         let mut generated_tokens = Vec::new();
         let max_target_positions = self.config.max_target_positions.min(448);
 
-        // Feed initial prompt tokens
-        let mut curr_token_tensor = Tensor::new(prompt_tokens.as_slice(), &self.device)?
-            .unsqueeze(0)?;
+        for i in 0..max_target_positions {
+            let tokens_t = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
+            let ys = self.model.decoder.forward(&tokens_t, &audio_features, i == 0)?;
 
-        let mut is_first = true;
-        for _ in 0..max_target_positions {
-            let logits = self.model.decoder.forward(&curr_token_tensor, &audio_features, is_first)?;
-            is_first = false;
+            let (_, seq_len, _) = ys.dims3()?;
+            let last_hidden = ys.narrow(1, seq_len - 1, 1)?;
+            let logits = self.model.decoder.final_linear(&last_hidden)?;
+            let logits_1d = logits.squeeze(0)?.squeeze(0)?;
+            let filtered_logits = logits_1d.broadcast_add(&suppress_tokens_tensor)?;
 
-            let (_, seq_len, _) = logits.dims3()?;
-            let last_logit = logits.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
-            let linear_logits = self.model.decoder.final_linear(&last_logit)?;
-
-            // Greedy argmax selection
-            let next_token = linear_logits.squeeze(0)?.argmax(0)?.to_scalar::<u32>()?;
+            // Greedy argmax
+            let next_token = filtered_logits.argmax(0)?.to_scalar::<u32>()?;
 
             if next_token == eot_token {
                 break;
             }
 
+            tokens.push(next_token);
             generated_tokens.push(next_token);
-            curr_token_tensor = Tensor::new(&[next_token], &self.device)?.unsqueeze(0)?;
         }
 
         let text = self.tokenizer.decode(&generated_tokens, true)
