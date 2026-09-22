@@ -17,11 +17,13 @@
    - [Memory & VRAM Management Modes](#memory--vram-management-modes)
    - [Attention Backend Manette (FlashAttention-2)](#attention-backend-manette-flashattention-2)
    - [Text-to-Image Generation (SDXL & FLUX.1/FLUX.2)](#text-to-image-generation-flux1--flux2-mmdit-family)
+   - [Z-Image Turbo Realtime DiT (4 Steps, FlashAttention-2)](#z-image-turbo-realtime-dit-s3-dit-6b)
    - [FLUX.2 Image-to-Image (Img2Img)](#flux2-image-to-image-img2img-transformation)
    - [FLUX.2 Inpainting & Masked Diffusion](#flux2-inpainting--masked-diffusion)
+   - [FLUX.2 Multi-Image Reference Conditioning (Mode Édition, 4D RoPE)](#flux2-multi-image-reference-conditioning-mode-édition)
    - [SDXL Image-to-Image (Img2Img)](#image-to-image-img2img)
    - [SDXL Inpainting & Mask-Guided Diffusion](#inpainting--mask-guided-diffusion)
-   - [Hot LoRA Merging](#hot-lora-merging)
+   - [Hot LoRA Merging (SDXL, FLUX.1 & FLUX.2-Dev)](#hot-lora-merging)
    - [ControlNet (Canny Edge)](#controlnet-canny-edge)
 5. [REST API & WebSocket Server Reference](#5-rest-api--websocket-server-reference)
    - [Endpoints & JSON Payload Schema](#endpoints--json-payload-schema)
@@ -447,10 +449,57 @@ let params = DiffusionParams {
 };
 ```
 
-> **Note** — Replace `<MODELS_DIR>` with your local models directory. The Rust library itself contains
-> no hardcoded paths; models are supplied at call time. The Dev pipeline currently renders a
-> recognisable fox with a residual "stained-glass" grain; Klein-4B/9B are fully photorealistic.
-> Dev polish is tracked in the ROADMAP.
+> **Note** — Replace `<MODELS_DIR>` with your local models directory. With the official 40-layer Mistral VLM (`FLUX.2-dev_text_encoder`), $\theta = 10^9$ RoPE phase, guidance scaled by $1000\times$, and spatial-first patch unpacking, **FLUX.2-Dev produces crystal-clear, photorealistic 1024x1024 renders**.
+
+---
+
+### Z-Image Turbo Realtime DiT (S3-DiT 6B)
+
+`aurora-rust-engine` provides a **100% pure Rust** implementation of the **Z-Image Turbo** (S3-DiT 6B) text-to-image architecture with **native FlashAttention-2**:
+
+* **Architecture** : 30-layer Scalable Single-Stream Transformer (S3-DiT), Qwen3-4B text encoder, 16-channel VAE.
+* **Euler Flow-Match Solver** : Exact discrete velocity inversion (`pred_v.neg()?`) and dynamic shift timestep schedule ($\mu = m \times \text{seq\_len} + b$).
+* **Unified Sequence Order** : Canonical diffusers alignment `[x_img, text_feat]` with 3D RoPE spatial-temporal phase.
+* **Performance** : 4-step generation in **29.9s total** (~7.47s / step) on CUDA BF16.
+
+```rust
+use aurora_rust_engine::pipelines::z_image_turbo::ZImageTurboPipeline;
+use aurora_rust_engine::traits::DiffusionParams;
+use candle_core::Device;
+
+let device = Device::new_cuda(0)?;
+
+// 1. Load All-In-One (AIO) FP8 Checkpoint or standalone weights
+let mut pipeline = ZImageTurboPipeline::from_single_file(
+    "<MODELS_DIR>/z_image/z_image_turbo_aio_fp8.safetensors",
+    device,
+)?;
+
+// 2. Enable FlashAttention-2 (7.4x acceleration: 55.2s -> 7.47s / step)
+pipeline.enable_flash_attn();
+
+// 3. Configure 4-step fast sampling
+let params = DiffusionParams {
+    prompt: "a photorealistic portrait of an old sailor with a weathered face and white beard, dramatic lighting, 8k",
+    negative_prompt: None,
+    num_steps: 4,
+    guidance_scale: 1.0,
+    width: 512,
+    height: 512,
+    seed: 42,
+};
+
+// 4. Generate image
+let (image, metrics) = pipeline.generate_with_metrics(params, None::<fn(usize, usize, &candle_core::Tensor)>)?;
+image.save("zimage_turbo_test.png")?;
+println!("Generated in {:.2}s (4 steps)", metrics.total_wallclock_ms / 1000.0);
+```
+
+**CLI Command**:
+```powershell
+$env:CUDARC_CUDA_VERSION = "12080"
+cargo run --release --features cuda,flash-attn --bin test_zimage_turbo
+```
 
 ---
 
@@ -499,6 +548,69 @@ let params = InpaintParams {
 
 let (inpainted_image, metrics) = flux_pipeline.generate_inpaint(params, None::<fn(usize, usize, &candle_core::Tensor)>)?;
 inpainted_image.save("flux2_inpaint_lion_crown.png")?;
+```
+
+---
+
+### FLUX.2 Multi-Image Reference Conditioning (Mode Édition)
+
+`aurora-rust-engine` introduces native support for **FLUX.2 Multi-Image Reference Conditioning** (Mode Édition) using the **4-axis Rotary Position Embeddings (4D RoPE)** architecture:
+
+* **No external adapters (Zero IP-Adapter overhead)** : The model utilizes native joint attention across the canvas, prompt, and reference tokens.
+* **4D RoPE Identity Coordinates** :
+  $$\text{RoPE Axis} = [T=0, Y, X, \text{Ref\_ID}]$$
+  * Main generated canvas tokens: $\text{Ref\_ID} = 0$.
+  * Reference image $k$ tokens: $\text{Ref\_ID} = k$.
+* **Full VAE Integration** : Automatically encodes reference images via `FluxVaeEncoder` (32-channel), applies $2\times 2$ patchification, and standardizes latents with `BatchNorm` statistics.
+
+```rust
+use aurora_rust_engine::pipelines::FluxPipeline;
+use aurora_rust_engine::traits::DiffusionParams;
+use aurora_rust_engine::diffusion::vae_flux::{FluxVaeDecoder, FluxVaeEncoder};
+use candle_core::Device;
+
+let device = Device::new_cuda(0)?;
+
+// 1. Initialize FLUX.2 Pipeline with Streamer
+let mut pipeline = FluxPipeline::from_single_file_streaming(
+    "<MODELS_DIR>/flux/flux2DevFp8Scaled_fp8Scaled.safetensors",
+    device.clone(),
+)?;
+pipeline.enable_flash_attn();
+
+// 2. Attach VAE Encoder & Decoder
+pipeline.set_vae(decoder);
+pipeline.set_vae_encoder(encoder);
+
+// 3. Load Reference Image(s)
+let ref_image = image::open("character_sheet.png")?;
+
+let params = DiffusionParams {
+    prompt: "a majestic portrait of the character standing in a futuristic metropolis at sunset, cinematic, 8k",
+    negative_prompt: None,
+    num_steps: 12,
+    guidance_scale: 3.5,
+    width: 512,
+    height: 512,
+    seed: 42,
+};
+
+// 4. Generate with Reference Conditioning (supports multiple reference images in slice)
+let (image, metrics) = pipeline.generate_with_refs(
+    params,
+    &[ref_image],
+    None::<fn(usize, usize, &candle_core::Tensor)>,
+)?;
+
+image.save("character_edited.png")?;
+```
+
+**CLI Command**:
+```powershell
+$env:CUDARC_CUDA_VERSION = "12080"
+$env:REF = "outputs/flux_showcase/flux_dev_img2img.png"
+$env:PROMPT = "a majestic arctic fox sitting gracefully under golden autumn leaves, close-up portrait, photorealistic, 8k"
+cargo run --release --features cuda,flash-attn --bin test_flux_reference_edit
 ```
 
 ---
@@ -569,28 +681,41 @@ for lora in pipeline.loaded_loras() {
 pipeline.unload_all_loras()?;
 ```
 
-#### LoRA on the Flux MMDiT family (Flux.1 / Flux.2-Klein)
+#### LoRA on the Flux MMDiT family (Flux.1, Flux.2-Klein & FLUX.2-Dev)
 
-The same `load_lora` / `unload_all_loras` API also works on the Flux MMDiT pipeline (`FluxPipeline`),
-and accepts **both** common LoRA key conventions transparently:
+The same `load_lora` / `unload_all_loras` API works transparently across all MMDiT pipelines (`FluxPipeline`),
+accepting **all major LoRA key formats** (Diffusers `transformer.*`, BFL `lora_unet_double_blocks.*`, Kohya `diffusion_model.*`):
 
-- **Diffusers style** — `transformer.transformer_blocks.{i}.attn.to_q` / `single_transformer_blocks.{i}.attn.to_k`
-- **BFL / native style** — `lora_unet_double_blocks.{i}.img_attn_qkv` / `lora_unet_single_blocks.{i}.linear1`
+- **FLUX.2-Dev Scaled Support** : Fully compatible with FP8 weights (`flux2DevFp8Scaled_fp8Scaled.safetensors`). LoRA deltas are dynamically dequantized and spliced into each block during streaming without extra memory footprint.
+- **Combined Img2Img + LoRA** : Enables applying fine-tuned styles and character concepts on top of existing base images.
 
 ```rust
 use aurora_rust_engine::pipelines::FluxPipeline;
+use aurora_rust_engine::traits::Img2ImgParams;
 
-let mut pipeline = FluxPipeline::from_single_file_streaming("<MODELS_DIR>/flux1-dev-fp8.safetensors", device)?;
+let mut pipeline = FluxPipeline::from_single_file_streaming(
+    "<MODELS_DIR>/flux/flux2DevFp8Scaled_fp8Scaled.safetensors",
+    device,
+)?;
 pipeline.enable_flash_attn();
 
-// Hot-merge a Flux LoRA (key convention auto-detected, applied per-block in the streamer)
-pipeline.load_lora("<MODELS_DIR>/loras/my_flux_style.safetensors", 0.85)?;
+// Hot-merge FLUX.2-Dev LoRA (e.g., dragon tattoo style or character)
+pipeline.load_lora("<MODELS_DIR>/loras/flux2tatooR32.safetensors", 0.85)?;
 
-// Generate — the merged weights are applied with zero extra VRAM (sequential block streaming)
-let (image, _) = pipeline.generate_with_metrics(params, None)?;
+// Apply on top of existing image via Img2Img
+let base_img = image::open("subject.png")?.to_rgb8();
+let params = Img2ImgParams {
+    prompt: "a muscular man with intricate dragon tattoo on his chest and arm, studio portrait, photorealistic, 8k",
+    negative_prompt: None,
+    image: base_img,
+    strength: 0.50, // Preserves 50% base structure, transforms remaining with prompt + LoRA
+    num_steps: 12,
+    guidance_scale: 3.5,
+    seed: 42,
+};
 
-// Revert to base weights
-pipeline.unload_all_loras();
+let (transformed_image, metrics) = pipeline.generate_img2img(params, None::<fn(usize, usize, &candle_core::Tensor)>)?;
+transformed_image.save("flux_dev_img2img_lora.png")?;
 ```
 
 Because the transformer weights are loaded in a low-VRAM block-by-block streamer, each LoRA delta is

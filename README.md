@@ -25,8 +25,10 @@ It provides a robust, zero-Python alternative for running generative diffusion m
 - **Unified HuggingFace AutoModel Facade**: Standard `AutoModel::from_local` and `AutoModel::from_pretrained` interface supporting both generative diffusion pipelines and autoregressive text models.
 - **CausalLM Text-to-Text Generation (Pure Rust)**: Autoregressive text generation with GPU KV-Cache supporting **Llama 3 / DeepSeek**, **Qwen 2.5/3.5**, **Gemma 2/3**, and **Mistral** in both **GGUF** (quantized Q4_K_M, Q8_0) and **SafeTensors** formats.
 - **Flux.1 & Flux.2 Family Full Support**: Native implementation of Multimodal Diffusion Transformers (MMDiT) for **Flux.1 [dev/schnell]**, **Flux.2-Klein-4B**, **Flux.2-Klein-9B**, and **Flux.2-Dev Scaled** with exact 3D/4D Rotary Position Embeddings (RoPE).
+- **Z-Image Turbo Realtime DiT (S3-DiT 6B)**: 100% pure Rust 4-step real-time inference with native FlashAttention-2, Qwen3-4B text conditioning, 16-channel VAE, and dynamic shift timestep scheduling.
+- **FLUX.2 Multi-Image Reference Conditioning (Mode Édition)**: Native zero-adapter reference image guidance using 4D RoPE spatial-temporal coordinates $[T, Y, X, \text{Ref}]$ and VAE latent token injection for identity preservation across scenes.
 - **Sub-7.5GB VRAM Flux Sequential Block Streaming**: Executes massive MMDiT models (3.88B to 12B parameters) with on-demand per-block GPU streaming and zero WDDM paging.
-- **FLUX.2 Image-to-Image (Img2Img) & Inpainting**: Contextual ODE transformation and sharp mask boundary preservation with flow-matching background re-injection.
+- **FLUX.2 Image-to-Image (Img2Img) & Inpainting with LoRA**: Contextual ODE transformation, LoRA adapter hot-splicing during block streaming, and sharp mask boundary preservation with flow-matching background re-injection.
 - **Pure Rust 32-Channel & 16-Channel `FluxVaeEncoder` & `FluxVaeDecoder`**: Bit-exact VAE encoding and decoding with BatchNorm latent standardization.
 - **SDXL & Pony XL Full Support**: Seamless support for all `.safetensors` single-file checkpoints from Civitai and Hugging Face.
 - **Native FlashAttention-2 Acceleration**: Up to 9.5x faster attention computation with fused CUDA kernels under Windows MSVC and Linux.
@@ -259,7 +261,10 @@ See [`ROADMAP.md`](ROADMAP.md) for full technical specifications and development
 - [x] **Milestone 10**: Flux.2-Klein-4B MMDiT & Quality Parity
 - [x] **Milestone 11**: Scaling to FLUX.2-Klein-9B & FLUX.2-Dev
 - [x] **Milestone 12**: FLUX.2 Img2Img & Inpainting Pipeline (Pure Rust 16/32-ch VAE)
+- [x] **Milestone 13**: FLUX.2-Dev LoRA Hot Merging (T2I & Img2Img)
+- [x] **Milestone 14**: FLUX.2 Multi-Image Reference Conditioning / Mode Édition (4D RoPE)
 - [x] **Milestone 16**: CausalLM LLM Text Generation & AutoModel Facade (Llama, DeepSeek, Qwen, Gemma, Mistral in GGUF/Safetensors)
+- [x] **Milestone 17**: Z-Image Turbo S3-DiT 6B Pure Rust Realtime Pipeline with FlashAttention-2
 
 ---
 
