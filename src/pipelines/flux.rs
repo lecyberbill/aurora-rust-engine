@@ -608,6 +608,133 @@ impl FluxPipeline {
         Self::from_single_file_streaming(checkpoint_path, device)
     }
 
+    /// Load Flux.1 / Flux.2 pipeline directly into GPU VRAM (In-Memory mode, zero streaming).
+    /// Recommended for GPUs with 16GB - 24GB+ VRAM (RTX 3090 / 4090, A100, H100) for maximum
+    /// generation throughput with zero per-block host-to-device transfers.
+    pub fn from_single_file_in_memory<P: AsRef<Path>>(checkpoint_path: P, device: Device) -> crate::error::Result<Self> {
+        let is_cuda = device.is_cuda();
+        let checkpoint_buf = checkpoint_path.as_ref().to_path_buf();
+
+        let archive = Arc::new(if checkpoint_buf.is_dir() {
+            SafeTensorsArchive::open_shards_dir(&checkpoint_buf)?
+        } else {
+            SafeTensorsArchive::open(&checkpoint_buf)?
+        });
+        let is_sd35_ck = archive.keys().any(|k| k.contains("joint_blocks."));
+        let dtype = if is_sd35_ck || !is_cuda { DType::F32 } else { DType::F16 };
+        let router = WeightRouter::new(&archive, device.clone(), dtype);
+
+        println!("🚀 Constructing Pure Rust Flux In-Memory Transformer (High VRAM / Max Throughput)...");
+        let has_guidance = archive.keys().any(|k| k.contains("guidance_in") || k.contains("time_guidance_embed"));
+        let is_klein = archive.keys().any(|k| k.contains("double_stream_modulation") || k.contains("img_attn.norm.key_norm.scale"));
+
+        let count_single = |prefixes: &[&str]| -> usize {
+            let mut max_s = 0;
+            for k in archive.keys() {
+                for p in prefixes {
+                    if let Some(rest) = k.strip_prefix(p) {
+                        if let Some(idx_str) = rest.split('.').next() {
+                            if let Ok(idx) = idx_str.parse::<usize>() { max_s = max_s.max(idx + 1); }
+                        }
+                    }
+                }
+            }
+            max_s
+        };
+
+        let is_sd35 = archive.keys().any(|k| k.contains("joint_blocks.") || k.contains("x_embedder."));
+        let config = if is_sd35 {
+            let max_joint = {
+                let mut m = 0;
+                for k in archive.keys() {
+                    for p in ["joint_blocks.", "model.diffusion_model.joint_blocks."] {
+                        if let Some(rest) = k.strip_prefix(p) {
+                            if let Some(i) = rest.split('.').next().and_then(|s| s.parse::<usize>().ok()) { m = m.max(i + 1); }
+                        }
+                    }
+                }
+                m
+            };
+            if max_joint > 30 { FluxConfig::sd35_large() } else { FluxConfig::sd35_medium() }
+        } else if is_klein {
+            let s_count = count_single(&["single_blocks.", "model.diffusion_model.single_blocks."]);
+            if s_count > 22 {
+                println!("✨ Detected Flux.2-Klein 9B checkpoint (in-memory)!");
+                FluxConfig::klein_9b()
+            } else {
+                println!("✨ Detected Flux.2-Klein 4B checkpoint (in-memory)!");
+                FluxConfig::klein_4b()
+            }
+        } else if has_guidance {
+            let mut max_s = 0;
+            for k in archive.keys() {
+                if let Some(rest) = k.strip_prefix("single_blocks.") {
+                    if let Some(idx_str) = rest.split('.').next() {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            max_s = max_s.max(idx + 1);
+                        }
+                    }
+                }
+            }
+            if max_s > 40 {
+                println!("✨ Detected Flux.2-Dev Scaled checkpoint (in-memory)!");
+                FluxConfig::flux2_dev()
+            } else {
+                println!("✨ Detected Flux.1-Dev checkpoint (in-memory)!");
+                FluxConfig::dev()
+            }
+        } else {
+            println!("✨ Detected Flux.1-Schnell checkpoint (in-memory)!");
+            FluxConfig::schnell()
+        };
+
+        let vb = router.flux_var_builder()?;
+        let mut transformer = FluxTransformer::new(config.clone(), vb)?;
+
+        let is_diffusers = !is_sd35 && archive.keys().any(|k| k.starts_with("x_embedder.") || k.starts_with("context_embedder."));
+        transformer.swap_scale_shift = !is_diffusers;
+        if is_sd35 {
+            if let Some(key) = archive.keys().find(|k| k.ends_with("pos_embed")).cloned() {
+                let pe = archive.get_tensor(&key, &device, dtype)?;
+                transformer.set_pos_embed(pe);
+            }
+        }
+
+        let clip_l = match router.clip_l_var_builder_on_device(&Device::Cpu, DType::F32) {
+            Ok(clip_vb) => crate::text::ClipTextEncoder::new_sd15(clip_vb).ok(),
+            Err(_) => None,
+        };
+
+        let t5xxl = match router.t5xxl_var_builder_on_device(&Device::Cpu, DType::F32) {
+            Ok(t5_vb) => crate::text::T5TextEncoder::new(t5_vb, None).ok(),
+            Err(_) => None,
+        };
+
+        let vae = match router.vae_var_builder() {
+            Ok(vae_vb) => crate::diffusion::vae_flux::FluxVaeDecoder::new(vae_vb).ok(),
+            Err(_) => None,
+        };
+
+        let scheduler = FlowMatchEulerScheduler::new(FlowMatchEulerConfig::default());
+
+        Ok(Self {
+            checkpoint_path: checkpoint_buf,
+            transformer,
+            scheduler,
+            clip_l,
+            openclip_g: None,
+            t5xxl,
+            qwen3: None,
+            mistral: None,
+            vae,
+            vae_encoder: None,
+            streamer: None, // In-Memory mode: zero block streaming!
+            lora_manager: crate::lora::LoRAManager::new(),
+            device,
+            dtype,
+        })
+    }
+
     /// Generate image using Rectified Flow ODE solver (default 4 steps for Schnell)
     pub fn generate_with_metrics<F>(
         &mut self,

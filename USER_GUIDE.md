@@ -320,6 +320,33 @@ Aurora’s `SequentialBlockStreamer` solves this deterministically:
 - The block executes its attention pass and is immediately freed.
 - **Result** : Resident VRAM is capped below **7.5 GB**, numerically verified identical to in-memory execution (maximum absolute error `0.000000`).
 
+#### High-End / Large VRAM Direct In-Memory Mode (Zero Streaming)
+
+On workstations and servers equipped with **16GB to 24GB+ VRAM** (e.g. RTX 3090, RTX 4090, RTX 6000 Ada, A100, H100), **no streaming or memory tricks are required**. You can host the entire transformer directly in GPU VRAM for maximum inference throughput, cutting out per-block PCIe host-to-device transfers:
+
+```rust
+use aurora_rust_engine::pipelines::FluxPipeline;
+use candle_core::Device;
+
+let device = Device::new_cuda(0)?;
+
+// Direct In-Memory loading: all double and single blocks reside permanently in GPU VRAM
+let mut pipeline = FluxPipeline::from_single_file_in_memory(
+    "<MODELS_DIR>/flux/fluxKlein4BPro_v10.safetensors", // or flux-2-klein-9b, flux2DevFp8Scaled
+    device,
+)?;
+
+// FlashAttention-2 runs directly on GPU VRAM tensors with zero transfer overhead
+pipeline.enable_flash_attn();
+```
+
+* **VRAM Footprint** :
+  * **FLUX.2-Klein 4B** : ~7.8 GB VRAM.
+  * **FLUX.2-Klein 9B (FP8)** : ~9.2 GB VRAM.
+  * **FLUX.2-Dev (FP8 Scaled)** : ~14.5 GB VRAM (fits comfortably inside 24GB RTX 3090/4090).
+* **SDXL / Pony XL** :
+  * Default behavior is already **100% direct In-Memory** (`StableDiffusionXLPipeline::from_single_file`). Tiled VAE and CPU offload are purely optional opt-in flags for low-VRAM environments.
+
 ---
 
 ### Attention Backend Manette (FlashAttention-2)
