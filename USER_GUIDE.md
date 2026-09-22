@@ -948,28 +948,32 @@ fn main() -> anyhow::Result<()> {
 
 Aurora incorporates pure-Rust audio transcription powered by OpenAI's **Whisper** family (`whisper-large-v3`, `whisper-turbo`):
 
-* **No external Python/FFmpeg required** : Mel-filterbank spectrogram extraction (128 Mel frequency bins at 16 kHz) is calculated in pure Rust.
-* **Multilingual & Automatic Language ID** : Transcribes 99+ languages with automatic language detection and word-level timestamps.
+* **No external Python/FFmpeg required** : Mel-filterbank spectrogram extraction (80/128 Mel frequency bins at 16 kHz) is calculated in pure Rust ([`src/audio/mel.rs`](file:///d:/image_to_text/TransRust/src/audio/mel.rs)).
+* **Multilingual & Timestamp Decoding** : Transcribes 99+ languages with autoregressive Transformer decoder.
 
 ```rust
-use aurora_rust_engine::models::AutoModel;
-use candle_core::Device;
+use aurora_rust_engine::audio::WavAudio;
+use aurora_rust_engine::pipelines::WhisperPipeline;
+use candle_core::{DType, Device};
 
 let device = Device::new_cuda(0)?;
 
-// Load Whisper Turbo from Safetensors or GGUF
-let mut whisper = AutoModel::from_local(
-    "<MODELS_DIR>/whisper/whisper-large-v3-turbo.safetensors",
+// Load Whisper STT Pipeline from Safetensors
+let mut whisper = WhisperPipeline::from_files(
+    "models/whisper/config.json",
+    "models/whisper/model.safetensors",
+    "models/whisper/tokenizer.json",
     device,
-    candle_core::DType::F16,
+    DType::F16,
 )?;
 
-// Transcribe audio WAV file (16kHz mono PCM)
-let transcript = whisper.transcribe("voice_note.wav")?;
-println!("Transcription: \"{}\"", transcript.text);
-for segment in transcript.segments {
-    println!("[{:.2}s -> {:.2}s] {}", segment.start, segment.end, segment.text);
-}
+// Load WAV audio file (pure Rust RIFF decoder)
+let audio = WavAudio::load_wav("voice_recording.wav")?;
+
+// Transcribe to text with language specification
+let result = whisper.transcribe(&audio, Some("fr"), false)?;
+println!("Transcription: \"{}\"", result.text);
+println!("Duration: {:.2}s (processed in {:.1}ms)", result.duration_seconds, result.inference_time_ms);
 ```
 
 ---
@@ -1129,6 +1133,8 @@ Aurora comes with pre-built test and benchmark executables in `src/bin/`:
 | **`test_controlnet`** | `cargo run --release --bin test_controlnet --features cuda,flash-attn` | Canny edge Multi-ControlNet integration test |
 | **`test_text_gen`** | `cargo run --release --bin test_text_gen --features cuda "<model.gguf>" "<prompt>"` | **CausalLM Text Generation** (Llama/DeepSeek/Qwen/Gemma/Mistral) |
 | **`test_tts`** | `cargo run --bin test_tts` | **Audio & Neural Text-to-Speech (TTS)** validation harness (WAV + Parler/DAC) |
+| **`test_whisper`** | `cargo run --bin test_whisper` | **Speech-to-Text (STT)** Whisper transcription harness (pure Rust Slaney Mel filterbank) |
+
 
 ---
 
