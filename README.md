@@ -1,6 +1,6 @@
 # Aurora Rust Engine (`aurora-rust-engine`)
 
-> **Pure Rust inference engine for modern image generation and diffusion architectures**
+> **Pure Rust inference engine for image, text, speech & music generation — zero Python**
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![CUDA](https://img.shields.io/badge/cuda-12.x-green.svg)](https://developer.nvidia.com/cuda-toolkit)
@@ -15,7 +15,17 @@
 
 👉 **Looking for full documentation? See the complete [User & Developer Guide (USER_GUIDE.md)](USER_GUIDE.md)** for SDK examples, REST API payloads, scheduler configurations, and VRAM optimization tips.
 
-It provides a robust, zero-Python alternative for running generative diffusion models (Stable Diffusion XL, Pony XL, and future DiT/Flux architectures) with deterministic execution, in-memory zero-overhead LoRA weight merging, and sub-8GB VRAM footprint.
+It provides a robust, zero-Python alternative for running state-of-the-art generative models across **four modalities** — image (**SDXL / Pony**, **FLUX.1 & FLUX.2**, **Z-Image Turbo**), text (**CausalLM**: Qwen / Llama / Mistral / Gemma / DeepSeek), speech (**Whisper STT**, **Parler-TTS / Kokoro**) and **music** (**ACE-Step 1.5**) — with deterministic execution, in-memory zero-overhead LoRA weight merging, and a sub-8 GB VRAM footprint.
+
+### 🧠 Supported Models
+
+| Modality | Models |
+|---|---|
+| **Image** | SDXL / Pony XL (all single-file checkpoints), FLUX.1 `[dev/schnell]`, FLUX.2-Klein-4B / Klein-9B / Dev, Z-Image Turbo (S3-DiT 6B) |
+| **Text (CausalLM)** | Qwen 2.5/3(.5), Llama 3, Mistral, Gemma 2/3, DeepSeek — GGUF (Q4_K_M/Q8_0) & SafeTensors |
+| **Speech-to-Text** | Whisper Large-v3 / Turbo (native Slaney Mel + encoder/decoder) |
+| **Text-to-Speech** | Parler-TTS, Kokoro-82M |
+| **Text-to-Music** | ACE-Step 1.5 — Turbo / Base / SFT / XL (4B), 48 kHz stereo, lyrics, WAV / OGG / MP3 |
 
 ---
 
@@ -36,6 +46,8 @@ It provides a robust, zero-Python alternative for running generative diffusion m
 - **Exact Penultimate Text Parity**: Custom penultimate hidden state extractors for CLIP-L, OpenCLIP-bigG, and multi-layer concat for Qwen3-4B (Layers 9/18/27).
 - **Seamless $C^\infty$ Cosine Tiled VAE**: 4-quadrant $72\times 72$ latent decoding with 128px smooth cosine cross-fade eliminating all tile seams.
 - **Deterministic Schedulers**: Continuous Euler Discrete, Flow Matching Rectified Euler ODE (`step_at` support for arbitrary start step), and DPM-Solver++ 2M Karras.
+- **Whisper Speech-to-Text (Pure Rust)**: Bit-exact Whisper Large-v3 / Turbo transcription with a native Slaney Mel-filterbank, pure Rust WAV I/O, and multilingual decoding in `src/pipelines/whisper.rs`.
+- **Neural Text-to-Speech (Parler-TTS & Kokoro-82M)**: Pure Rust TTS with voice/style descriptors and a native WAV encoder in `src/pipelines/tts.rs`.
 - **ACE-Step 1.5 Text-to-Music (Pure Rust)**: Full 1D DiT + Flow-Matching + Oobleck 48 kHz stereo VAE port with bit-exact validation vs HuggingFace Diffusers. Supports **Turbo / Base / SFT / XL** variants, classifier-free guidance (APG), Qwen3 text+lyric conditioning, a 5Hz Qwen3 LM planner, a deterministic seeded RNG, and WAV / OGG Vorbis / MP3 export. See [`docs/ACESTEP_AUDIO_SPEC.md`](docs/ACESTEP_AUDIO_SPEC.md).
 
 ---
@@ -81,6 +93,21 @@ cargo run --release --bin test_lora --features cuda,flash-attn
 ### 7. Run Comprehensive 15-Model Benchmark
 ```bash
 cargo run --release --bin stress_test --features cuda,flash-attn
+```
+
+### 8. Generate Music (ACE-Step 1.5 — 48 kHz stereo, lyrics, WAV/OGG/MP3)
+```bash
+cargo run --release --features cuda --bin test_audio_diffusion -- --model-dir G:/models/Audio --duration 30 --steps 8 --lyrics-file scripts/lyrics_fr.txt --lang fr --format ogg --out ma_musique
+```
+
+### 9. Transcribe Speech (Whisper STT)
+```bash
+cargo run --release --features cuda --bin test_whisper
+```
+
+### 10. Text-to-Speech (Parler-TTS / Kokoro)
+```bash
+cargo run --release --features cuda --bin test_tts
 ```
 
 ---
@@ -245,6 +272,16 @@ cargo run --release --bin server --features cuda,flash-attn
 | Pure Rust Canny Edge Extraction | N/A | **< 12 ms** | Real-time |
 | Inference VRAM Allocation | 7.6 GB | 7.6 GB | **0 MB LoRA overhead** |
 
+### 🎵 Audio & Music (RTX 4070 Ti 12 GB, `--release`, bf16)
+
+| Task | Config | Result |
+|---|---|---|
+| ACE-Step 1.5 **Turbo** | 5 s, 8 steps | real-time |
+| ACE-Step 1.5 **Turbo** | 180 s (3 min), 8 steps | **116.7 s end-to-end (1.54× real-time)** |
+| ACE-Step 1.5 **Base** (CFG/APG) | 10 s, 30 steps | 2.7 s |
+| Whisper STT | bit-exact vs reference | native Mel + encoder/decoder |
+| Export | 48 kHz stereo | WAV · OGG Vorbis 192 kb/s · MP3 192 kb/s |
+
 ---
 
 ## 🗺️ Project Roadmap
@@ -266,7 +303,13 @@ See [`ROADMAP.md`](ROADMAP.md) for full technical specifications and development
 - [x] **Milestone 14**: FLUX.2 Multi-Image Reference Conditioning / Mode Édition (4D RoPE)
 - [x] **Milestone 16**: CausalLM LLM Text Generation & AutoModel Facade (Llama, DeepSeek, Qwen, Gemma, Mistral in GGUF/Safetensors)
 - [x] **Milestone 17**: Z-Image Turbo S3-DiT 6B Pure Rust Realtime Pipeline with FlashAttention-2
-- [x] **Milestone 21 (Audio)**: ACE-Step 1.5 Text-to-Music — Turbo/Base/XL 1D DiT, Oobleck 48 kHz VAE, Flow-Matching + APG guidance, 5Hz Qwen3 LM planner, WAV/OGG/MP3 codecs, bit-exact validation vs Diffusers ([spec](docs/ACESTEP_AUDIO_SPEC.md))
+- [x] **Milestone 20**: Audio-to-Text & Speech Transcription — Whisper Large-v3 / Turbo (native Slaney Mel, bit-exact)
+- [x] **Milestone 21**: Text-to-Audio & Music — ACE-Step 1.5 Turbo/Base/XL 1D DiT + Oobleck 48 kHz VAE + APG guidance + 5Hz Qwen3 LM planner + WAV/OGG/MP3 ([spec](docs/ACESTEP_AUDIO_SPEC.md))
+- [x] **Milestone 22**: Neural Text-to-Speech — Parler-TTS (Kokoro-82M in progress)
+- [ ] **Milestone 15** (proposed): LoRA Training Engine (pure Rust)
+- [ ] **Milestone 18** (proposed): Vision-Language & Multimodal Models (VLM)
+- [ ] **Milestone 19** (proposed): Spatio-Temporal Video Diffusion (Text-to-Video / Image-to-Video)
+- [ ] **Milestone 21 (rest)**: Stable Audio Open & MusicGen backends
 
 ---
 
