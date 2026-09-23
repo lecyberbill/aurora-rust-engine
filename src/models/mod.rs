@@ -8,6 +8,7 @@
 //! infer any supported model instead of wiring pipelines by hand.
 
 pub mod acestep;
+pub mod acestep_codec;
 pub mod acestep_lm;
 pub mod auto;
 pub mod common;
@@ -18,6 +19,7 @@ pub mod registry;
 pub mod text;
 
 pub use acestep::{AceStepConditionEncoder, AceStepTransformer1D, AceStepTransformerConfig};
+pub use acestep_codec::AceStepAudioCodec;
 pub use acestep_lm::AceStepLm;
 pub use auto::{AutoModel, BoxedModel, ModelLoadConfig};
 pub use common::{downcast_model, AnyModel, EncodeModel, GenerationModel, ImageGenerationModel, ModelKind};

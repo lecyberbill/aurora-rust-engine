@@ -22,6 +22,7 @@ Composants portés :
 | **AutoencoderOobleck** | VAE 48 kHz stéréo (Snake1d + WeightNorm) | `src/audio/vae_oobleck.rs` |
 | **Flow-Matching Euler** | ordonnanceur de débruissage + CFG (APG) | `AceStepTransformer1D::{flow_match_euler, flow_match_euler_cfg}` |
 | **5Hz LM planner** | Qwen3 causal LM (CoT métadonnées/paroles) | `src/models/acestep_lm.rs` (`AceStepLm`) |
+| **Codec 5 Hz (FSQ)** | tokens sémantiques ↔ hints 25 Hz (FSQ 64k, attention-pooler + detokenizer) | `src/models/acestep_codec.rs` (`AceStepAudioCodec`) |
 | **Codecs sortie** | WAV / OGG Vorbis / MP3 | `src/audio/encode.rs`, `src/audio/wav.rs` |
 | **RNG déterministe** | bruit initial reproductible depuis un seed | `src/audio/rng.rs` |
 
@@ -158,7 +159,28 @@ timesignature: 4
 > Correction notable : `CausalLMPipeline::forward_layer` n'appliquait pas `q_norm`/`k_norm`
 > (spécifique Qwen3) → sortie corrompue. Corrigé ; bénéficie à tous les usages Qwen3 du moteur.
 
-La génération des **audio-codes 5Hz** (tokens sémantiques FSQ pour cover/repaint) reste à porter.
+**Génération contrainte des codes 5Hz** : `CausalLMPipeline::generate_ids(prompt, …, allowed)`
+restreint le vocabulaire aux tokens `<|audio_code_N|>` (N ∈ [0, 63999]) ;
+`AceStepLm::generate_codes` mappe id→code et produit la séquence. Le decode suit la référence
+(`quantizer.get_output_from_indices` → `detokenizer` → hints 25 Hz).
+
+### 6.b Codec 5 Hz (FSQ) — validé
+
+`AceStepAudioCodec` (`src/models/acestep_codec.rs`) implémente le tokenizer/detokenizer sémantique :
+- `ResidualFsq` : `project_in` 2048→6, soft-clamp, `symmetry_preserving_bound` (hard-clamp),
+  `codes_to_indices`, et `get_output_from_indices` (codebook implicite 64 000 construit en Rust).
+- `AttentionPooler` (special token + 2 couches) et `AudioTokenDetokenizer` (special_tokens + 2 couches + `proj_out`).
+- API : `tokenize(features[·,·,64])`, `detokenize(tokens)`, `detokenize_from_indices(indices)`.
+
+Poids exportés par `convert_acestep_base.py` dans `audio_codec/codec.safetensors`.
+
+> Le codec est un **code sémantique** ultra-basse-débit (~80 bits/s). Décoder les hints
+> directement par le VAE donne quasi-silence (corr 0.18) : c'est attendu. Son vrai rôle est de
+> **conditionner** le DiT (hints comme `src_latents`, ex. `codec_hint_conditioned.wav` → audible).
+
+**WIP** : le chemin complet `LM codes → hints → DiT → audio` (`test_acestep_lm_codes`) fonctionne
+techniquement mais ne reproduit pas encore la qualité de la référence (conditionnement « cover »
+exact non porté).
 
 ---
 
@@ -173,6 +195,7 @@ Scripts de dump (`scripts/dump_*.py`, exécutés avec un env torch) + bins de co
 | `test_acestep_qwen_ref` (Qwen3) | last_hidden (28 couches) | **3.3e-4** |
 | `test_acestep_pipeline_ref` (boucle Euler turbo) | latents finaux | **5.7e-5** |
 | `test_apg` (APG) | guidance CFG | **2.4e-6** |
+| `test_acestep_codec_ref` (codec 5 Hz FSQ) | quantized / indices / detokenize | **0.0 / 0.0 / 3.8e-6** |
 | `test_acestep_iso` (bout-en-bout) | condition / latents | base **2.2e-4** / XL 3.3e-1* |
 
 \* XL validé en bf16 (perte de précision du checkpoint converti) ; reconvertir en f32 pour
@@ -201,7 +224,9 @@ cargo run --bin test_acestep_iso -- --model-dir G:/models/Audio-base --ref outpu
 ## 9. Limitations & suite
 
 - **XL** : converti et fonctionnel ; iso exact à refaire en f32.
-- **LM** : audio-codes 5Hz (FSQ) non portés ; le planner texte (CoT) l'est.
+- **LM-codes → audio** : WIP — génération contrainte et codec OK, mais le conditionnement
+  « cover » exact de la référence (is_covers, audio_cover_strength, cover_noise_strength) reste à aligner.
+- **Codec 5 Hz (FSQ)** : validé bit-exact ; le planner texte (CoT) l'est aussi.
 - **Cover / repaint / extract / lego / complete** : non portés (text2music seulement).
 - Parité RNG cross-langage : le seed Rust est déterministe mais ne reproduit pas `torch.randn` ;
   l'iso utilise l'injection de bruit (`generate_with_noise`).
@@ -211,10 +236,12 @@ cargo run --bin test_acestep_iso -- --model-dir G:/models/Audio-base --ref outpu
 ```
 src/audio/encode.rs            codecs OGG/MP3
 src/audio/rng.rs               RNG seedé
-src/models/acestep_lm.rs       planner LM 5Hz
 src/models/acestep.rs          DiT + ConditionEncoder (config-driven + CFG/APG)
-src/pipelines/audio_diffusion.rs   API pipeline + sampler
-scripts/convert_acestep_base.py    conversion repo -> diffusers
+src/models/acestep_codec.rs    codec 5 Hz (ResidualFSQ + pooler + detokenizer)
+src/models/acestep_lm.rs       planner LM 5 Hz (CoT + codes contraints)
+src/pipelines/audio_diffusion.rs   API pipeline + sampler + context_from_src
+scripts/convert_acestep_base.py    conversion repo -> diffusers (+ audio_codec)
 scripts/dump_*.py                  dumps de référence PyTorch
-src/bin/test_acestep_*.rs          harnais de validation
+src/bin/test_acestep_*.rs          harnais de validation (dit/cond/qwen/pipeline/codec/iso/lm)
+src/bin/test_{apg,audio_encode,audio_codec_roundtrip,acestep_lm_codes}.rs
 ```

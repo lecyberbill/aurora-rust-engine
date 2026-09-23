@@ -250,6 +250,14 @@ impl AudioDiffusionPipeline {
         Ok((condition, context_latents))
     }
 
+    /// Build `context_latents [1, T, 128] = [src_latents, chunk_mask]` with an explicit
+    /// source (e.g. 5Hz codec hints for cover / LM-code conditioning). `src` is `[1, T, 64]`.
+    pub fn context_from_src(&self, src: &Tensor, num_frames: usize) -> Result<Tensor> {
+        let src = src.to_dtype(self.dtype)?;
+        let chunk = Tensor::ones((1, num_frames, 64), self.dtype, &self.device)?;
+        Ok(Tensor::cat(&[&src, &chunk], 2)?)
+    }
+
     /// Run the Flow-Matching Euler sampler from explicit conditioning/context/noise.
     /// Returns the final latents `[1, 64, T]`.
     pub fn diffuse(

@@ -61,6 +61,15 @@ def convert_transformer(sd):
     return out
 
 
+def convert_audio_codec(sd):
+    """Extract the 5Hz audio codec (attention pooler + FSQ tokenizer + detokenizer)."""
+    out = {}
+    for k, v in sd.items():
+        if k.startswith("tokenizer.") or k.startswith("detokenizer."):
+            out[attn_to_diffusers(k)] = v
+    return out
+
+
 def convert_condition_encoder(sd, silence_latent):
     out = {}
     for k, v in sd.items():
@@ -117,6 +126,13 @@ def main():
     save_file(cond, os.path.join(args.out, "condition_encoder", "diffusion_pytorch_model.safetensors"))
     with open(os.path.join(args.out, "condition_encoder", "config.json"), "w") as f:
         json.dump(cfg, f, indent=2)
+
+    print("Writing audio_codec ...")
+    codec = cast(convert_audio_codec(sd))
+    codec_dir = os.path.join(args.out, "audio_codec")
+    os.makedirs(codec_dir, exist_ok=True)
+    save_file(codec, os.path.join(codec_dir, "codec.safetensors"))
+    print(f"  audio_codec keys={len(codec)}")
 
     # Shared components (text encoder, tokenizer, VAE, scheduler).
     for sub in ("text_encoder", "tokenizer", "vae", "scheduler"):

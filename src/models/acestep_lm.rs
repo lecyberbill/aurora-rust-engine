@@ -60,6 +60,65 @@ impl AceStepLm {
         self.pipeline.generate(prompt, params).map_err(|e| anyhow!("{e}"))
     }
 
+    /// Map every vocabulary id to its audio-code value (`<|audio_code_N|>` -> `N`),
+    /// plus the set of valid audio-code token ids.
+    pub fn audio_code_map(&self) -> (Vec<Option<u32>>, std::collections::HashSet<u32>) {
+        let vocab = self.pipeline.config.vocab_size;
+        let mut map = vec![None; vocab];
+        let mut set = std::collections::HashSet::new();
+        if let Some(tok) = &self.pipeline.tokenizer {
+            for id in 0..vocab as u32 {
+                if let Some(s) = tok.id_to_token(id) {
+                    if let Some(rest) = s.strip_prefix("<|audio_code_") {
+                        if let Some(num) = rest.strip_suffix("|>") {
+                            if let Ok(n) = num.parse::<u32>() {
+                                map[id as usize] = Some(n);
+                                set.insert(id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (map, set)
+    }
+
+    /// Codes-phase prompt: chat prompt + CoT + `\n\n`, assistant turn left open.
+    pub fn build_codes_prompt(caption: &str, lyrics: &str, cot: &str) -> String {
+        let mut p = Self::build_formatted_prompt(caption, lyrics);
+        p.push_str(cot);
+        p.push_str("\n\n");
+        p
+    }
+
+    /// Generate `num_codes` audio-code values (5Hz semantic tokens) constrained to
+    /// the `<|audio_code_N|>` vocabulary.
+    pub fn generate_codes(
+        &mut self,
+        caption: &str,
+        lyrics: &str,
+        cot: &str,
+        num_codes: usize,
+        seed: u64,
+    ) -> Result<Vec<u32>> {
+        let (map, set) = self.audio_code_map();
+        let prompt = Self::build_codes_prompt(caption, lyrics, cot);
+        let ids = self
+            .pipeline
+            .generate_ids(&prompt, num_codes + 16, 0.9, Some(&set), seed)
+            .map_err(|e| anyhow!("{e}"))?;
+        let mut codes = Vec::with_capacity(num_codes);
+        for id in ids {
+            if let Some(Some(n)) = map.get(id as usize) {
+                codes.push(*n);
+                if codes.len() >= num_codes {
+                    break;
+                }
+            }
+        }
+        Ok(codes)
+    }
+
     /// Plan metadata / lyrics / CoT for a caption (the LM "thinking" phase).
     pub fn plan(&mut self, caption: &str, lyrics: &str, max_tokens: usize) -> Result<String> {
         let prompt = Self::build_formatted_prompt(caption, lyrics);

@@ -406,6 +406,126 @@ impl CausalLMPipeline {
         Ok(output_text)
     }
 
+    /// Autoregressive generation restricted to an optional token set (e.g. ACE-Step
+    /// `<|audio_code_N|>` tokens). Returns the generated token ids (prompt excluded).
+    pub fn generate_ids(
+        &mut self,
+        prompt: &str,
+        max_new: usize,
+        temperature: f64,
+        allowed: Option<&std::collections::HashSet<u32>>,
+        seed: u64,
+    ) -> Result<Vec<u32>> {
+        let prompt_tokens = {
+            let tokenizer = self
+                .tokenizer
+                .as_ref()
+                .ok_or_else(|| LuminaError::Config("Tokenizer not attached".into()))?;
+            tokenizer
+                .encode(prompt, true)
+                .map_err(|e| LuminaError::Candle(candle_core::Error::Msg(e.to_string())))?
+                .get_ids()
+                .to_vec()
+        };
+        if prompt_tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.kv_cache.reset();
+        let mut rng = crate::audio::rng::SeededRng::new(seed);
+        let input = Tensor::new(&prompt_tokens[..], &self.device)
+            .map_err(LuminaError::Candle)?
+            .unsqueeze(0)
+            .map_err(LuminaError::Candle)?;
+        let mut last = self
+            .forward(&input, 0)?
+            .i((0, prompt_tokens.len() - 1))
+            .map_err(LuminaError::Candle)?;
+        let mut pos = prompt_tokens.len();
+        let mut out = Vec::new();
+
+        loop {
+            let tok = Self::sample_restricted(&last, temperature, allowed, &mut rng)?;
+            if let Some(set) = allowed {
+                if !set.contains(&tok) {
+                    break;
+                }
+            }
+            if tok == 151645 || tok == 151643 {
+                break;
+            }
+            out.push(tok);
+            if out.len() >= max_new {
+                break;
+            }
+            let next = Tensor::new(&[tok], &self.device)
+                .map_err(LuminaError::Candle)?
+                .unsqueeze(0)
+                .map_err(LuminaError::Candle)?;
+            last = self
+                .forward(&next, pos)?
+                .i((0, 0))
+                .map_err(LuminaError::Candle)?;
+            pos += 1;
+        }
+        Ok(out)
+    }
+
+    fn sample_restricted(
+        logits: &Tensor,
+        temperature: f64,
+        allowed: Option<&std::collections::HashSet<u32>>,
+        rng: &mut crate::audio::rng::SeededRng,
+    ) -> Result<u32> {
+        let mut v: Vec<f32> = logits
+            .to_dtype(DType::F32)
+            .map_err(LuminaError::Candle)?
+            .to_vec1()
+            .map_err(LuminaError::Candle)?;
+        if let Some(set) = allowed {
+            for (i, x) in v.iter_mut().enumerate() {
+                if !set.contains(&(i as u32)) {
+                    *x = f32::NEG_INFINITY;
+                }
+            }
+        }
+        if temperature <= 0.0 {
+            let mut best = (0usize, f32::NEG_INFINITY);
+            for (i, &x) in v.iter().enumerate() {
+                if x.is_finite() && x > best.1 {
+                    best = (i, x);
+                }
+            }
+            return Ok(best.0 as u32);
+        }
+        let maxv = v
+            .iter()
+            .cloned()
+            .filter(|x| x.is_finite())
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        for x in v.iter_mut() {
+            if x.is_finite() {
+                *x = (((*x - maxv) as f64) / temperature).exp() as f32;
+                sum += *x;
+            } else {
+                *x = 0.0;
+            }
+        }
+        if sum <= 0.0 {
+            return Ok(0);
+        }
+        let r = rng.next_f32() * sum;
+        let mut acc = 0.0f32;
+        for (i, &x) in v.iter().enumerate() {
+            acc += x;
+            if acc >= r {
+                return Ok(i as u32);
+            }
+        }
+        Ok(0)
+    }
+
     /// Forward pass through the Transformer
     fn forward(&mut self, input_ids: &Tensor, pos: usize) -> Result<Tensor> {
         let (_b_size, seq_len) = input_ids.shape().dims2().map_err(LuminaError::Candle)?;
