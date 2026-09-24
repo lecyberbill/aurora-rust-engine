@@ -413,6 +413,7 @@ impl CausalLMPipeline {
         prompt: &str,
         max_new: usize,
         temperature: f64,
+        top_p: f64,
         allowed: Option<&std::collections::HashSet<u32>>,
         seed: u64,
     ) -> Result<Vec<u32>> {
@@ -445,7 +446,7 @@ impl CausalLMPipeline {
         let mut out = Vec::new();
 
         loop {
-            let tok = Self::sample_restricted(&last, temperature, allowed, &mut rng)?;
+            let tok = Self::sample_restricted(&last, temperature, top_p, allowed, &mut rng)?;
             if let Some(set) = allowed {
                 if !set.contains(&tok) {
                     break;
@@ -474,6 +475,7 @@ impl CausalLMPipeline {
     fn sample_restricted(
         logits: &Tensor,
         temperature: f64,
+        top_p: f64,
         allowed: Option<&std::collections::HashSet<u32>>,
         rng: &mut crate::audio::rng::SeededRng,
     ) -> Result<u32> {
@@ -514,6 +516,34 @@ impl CausalLMPipeline {
         }
         if sum <= 0.0 {
             return Ok(0);
+        }
+        // Top-P (nucleus) filtering to keep the code sequence coherent.
+        if top_p < 1.0 {
+            let mut order: Vec<usize> = (0..v.len()).collect();
+            order.sort_by(|&a, &b| v[b].partial_cmp(&v[a]).unwrap_or(std::cmp::Ordering::Equal));
+            let mut cum = 0.0f32;
+            let mut kept = 0usize;
+            for &i in &order {
+                if v[i] > 0.0 {
+                    cum += v[i] / sum;
+                    kept += 1;
+                    if cum >= top_p as f32 {
+                        break;
+                    }
+                }
+            }
+            let keep: std::collections::HashSet<usize> = order.into_iter().take(kept).collect();
+            let mut new_sum = 0.0f32;
+            for (i, x) in v.iter_mut().enumerate() {
+                if !keep.contains(&i) {
+                    *x = 0.0;
+                } else {
+                    new_sum += *x;
+                }
+            }
+            if new_sum > 0.0 {
+                sum = new_sum;
+            }
         }
         let r = rng.next_f32() * sum;
         let mut acc = 0.0f32;

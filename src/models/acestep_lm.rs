@@ -72,8 +72,10 @@ impl AceStepLm {
                     if let Some(rest) = s.strip_prefix("<|audio_code_") {
                         if let Some(num) = rest.strip_suffix("|>") {
                             if let Ok(n) = num.parse::<u32>() {
-                                map[id as usize] = Some(n);
-                                set.insert(id);
+                                if n <= 63999 {
+                                    map[id as usize] = Some(n);
+                                    set.insert(id);
+                                }
                             }
                         }
                     }
@@ -105,7 +107,7 @@ impl AceStepLm {
         let prompt = Self::build_codes_prompt(caption, lyrics, cot);
         let ids = self
             .pipeline
-            .generate_ids(&prompt, num_codes + 16, 0.9, Some(&set), seed)
+            .generate_ids(&prompt, num_codes + 16, 0.85, 0.9, Some(&set), seed)
             .map_err(|e| anyhow!("{e}"))?;
         let mut codes = Vec::with_capacity(num_codes);
         for id in ids {

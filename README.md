@@ -48,7 +48,7 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 - **Deterministic Schedulers**: Continuous Euler Discrete, Flow Matching Rectified Euler ODE (`step_at` support for arbitrary start step), and DPM-Solver++ 2M Karras.
 - **Whisper Speech-to-Text (Pure Rust)**: Bit-exact Whisper Large-v3 / Turbo transcription with a native Slaney Mel-filterbank, pure Rust WAV I/O, and multilingual decoding in `src/pipelines/whisper.rs`.
 - **Neural Text-to-Speech (Parler-TTS & Kokoro-82M)**: Pure Rust TTS with voice/style descriptors and a native WAV encoder in `src/pipelines/tts.rs`.
-- **ACE-Step 1.5 Text-to-Music (Pure Rust)**: Full 1D DiT + Flow-Matching + Oobleck 48 kHz stereo VAE port with bit-exact validation vs HuggingFace Diffusers. Supports **Turbo / Base / SFT / XL** variants, classifier-free guidance (APG), Qwen3 text+lyric conditioning, a 5Hz Qwen3 LM planner, a deterministic seeded RNG, and WAV / OGG Vorbis / MP3 export. See [`docs/ACESTEP_AUDIO_SPEC.md`](docs/ACESTEP_AUDIO_SPEC.md).
+- **ACE-Step 1.5 Text-to-Music (Pure Rust)**: Full 1D DiT + Flow-Matching + Oobleck 48 kHz stereo VAE port with bit-exact validation vs HuggingFace Diffusers. Supports **Turbo / Base / SFT / XL** variants, classifier-free guidance (APG), Qwen3 text+lyric conditioning, a **5Hz Qwen3 LM planner** (CoT metadata + constrained semantic audio-code generation driving the DiT), a bit-exact **5Hz FSQ audio codec**, a deterministic seeded RNG, and WAV / OGG Vorbis / MP3 export. See [`docs/ACESTEP_AUDIO_SPEC.md`](docs/ACESTEP_AUDIO_SPEC.md).
 
 ---
 

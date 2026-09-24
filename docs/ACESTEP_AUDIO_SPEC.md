@@ -178,9 +178,14 @@ Poids exportés par `convert_acestep_base.py` dans `audio_codec/codec.safetensor
 > directement par le VAE donne quasi-silence (corr 0.18) : c'est attendu. Son vrai rôle est de
 > **conditionner** le DiT (hints comme `src_latents`, ex. `codec_hint_conditioned.wav` → audible).
 
-**WIP** : le chemin complet `LM codes → hints → DiT → audio` (`test_acestep_lm_codes`) fonctionne
-techniquement mais ne reproduit pas encore la qualité de la référence (conditionnement « cover »
-exact non porté).
+**Chemin complet validé à l'oreille** : `LM codes → hints → DiT → audio`
+(`test_acestep_lm_codes`) produit de la vraie musique. Point clé : le sampling des codes doit
+utiliser **top-p (0.9)** comme la référence — un sampling à température seule (sans top-p) donne
+des codes temporellement incohérents et un audio haché. Les codes sont filtrés à `[0, 63999]`.
+
+```powershell
+cargo run --release --features cuda --bin test_acestep_lm_codes -- --duration 30 --out outputs/audio_showcase/lm_codes_song_30s.ogg
+```
 
 ---
 
@@ -224,9 +229,10 @@ cargo run --bin test_acestep_iso -- --model-dir G:/models/Audio-base --ref outpu
 ## 9. Limitations & suite
 
 - **XL** : converti et fonctionnel ; iso exact à refaire en f32.
-- **LM-codes → audio** : WIP — génération contrainte et codec OK, mais le conditionnement
-  « cover » exact de la référence (is_covers, audio_cover_strength, cover_noise_strength) reste à aligner.
-- **Codec 5 Hz (FSQ)** : validé bit-exact ; le planner texte (CoT) l'est aussi.
+- **LM-codes → audio** : ✅ fonctionnel (LM CoT → codes contraints top-p → hints → DiT → musique),
+  exemple `outputs/audio_showcase/lm_codes_song_30s.ogg`.
+- **Codec 5 Hz (FSQ)** : validé bit-exact ; le planner texte (CoT) et la génération de codes le sont aussi.
+- **Cover / repaint / extract / lego / complete** : non portés (text2music + LM-codes seulement).
 - **Cover / repaint / extract / lego / complete** : non portés (text2music seulement).
 - Parité RNG cross-langage : le seed Rust est déterministe mais ne reproduit pas `torch.randn` ;
   l'iso utilise l'injection de bruit (`generate_with_noise`).

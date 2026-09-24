@@ -1,14 +1,37 @@
 // [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: Full ACE-Step LM-codes path (LM CoT -> audio codes -> hints -> DiT -> WAV)
 
-use aurora_rust_engine::audio::{seeded_randn, AudioFormat};
+use aurora_rust_engine::audio::seeded_randn;
 use aurora_rust_engine::models::{AceStepAudioCodec, AceStepLm};
 use aurora_rust_engine::pipelines::AudioDiffusionPipeline;
 use candle_core::{DType, Device, Tensor};
 
 fn main() -> anyhow::Result<()> {
     let lm_dir = "G:/models/Audio/Ace-Step1.5/acestep-5Hz-lm-1.7B";
-    let model_dir = std::env::args().nth(1).unwrap_or_else(|| "G:/models/Audio".to_string()); // Turbo by default
     let codec_dir = "G:/models/Audio-base";
+    let argv: Vec<String> = std::env::args().collect();
+    let mut model_dir = "G:/models/Audio".to_string(); // Turbo by default
+    let mut out_file = "outputs/audio_showcase/lm_codes_song.ogg".to_string();
+    let mut dur_override: Option<f32> = None;
+    let mut i = 1;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "--model-dir" | "-m" => {
+                model_dir = argv.get(i + 1).cloned().unwrap_or(model_dir);
+                i += 1;
+            }
+            "--out" | "-o" => {
+                out_file = argv.get(i + 1).cloned().unwrap_or(out_file);
+                i += 1;
+            }
+            "--duration" | "-d" => {
+                dur_override = argv.get(i + 1).and_then(|s| s.parse::<f32>().ok());
+                i += 1;
+            }
+            other if i == 1 => model_dir = other.to_string(),
+            _ => {}
+        }
+        i += 1;
+    }
     let caption = "warm uplifting acoustic pop, acoustic guitar, piano, drums, smooth vocal melody";
     let lyrics = "[verse]\nShining like the morning sun, a brand new melody has just begun";
     let language = "fr";
@@ -40,7 +63,10 @@ fn main() -> anyhow::Result<()> {
             duration_sec = d;
         }
     }
-    duration_sec = duration_sec.clamp(4.0, 24.0);
+    if let Some(d) = dur_override {
+        duration_sec = d;
+    }
+    duration_sec = duration_sec.clamp(4.0, 60.0);
     println!("--- planned duration: {duration_sec}s, steps: {steps}");
 
     let num_codes = (duration_sec * 5.0).round() as usize; // 5Hz
@@ -82,10 +108,11 @@ fn main() -> anyhow::Result<()> {
     let latents = pipeline.diffuse_guided(&cond, &ctx, &noise, steps, guidance)?;
     let audio = pipeline.decode(&latents)?;
 
-    std::fs::create_dir_all("outputs/audio_showcase")?;
-    let out = "outputs/audio_showcase/lm_codes_song.wav";
-    audio.save_encoded(out, AudioFormat::Wav)?;
-    println!("saved {out} ({:.2}s)", audio.duration_seconds());
+    if let Some(dir) = std::path::Path::new(&out_file).parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    audio.save_auto(&out_file)?;
+    println!("saved {out_file} ({:.2}s)", audio.duration_seconds());
 
     Ok(())
 }
