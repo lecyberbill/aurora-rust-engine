@@ -29,11 +29,16 @@ fn main() -> Result<()> {
 
     let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
     let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
+    let low_vram = args.iter().any(|a| a == "--low-vram");
 
-    println!("1️⃣ Loading ACE-Step 1.5 Turbo pipeline from {:?} on {:?} ({:?})...", model_dir, device, dtype);
+    println!("1️⃣ Loading ACE-Step 1.5 pipeline from {:?} on {:?} ({:?})...", model_dir, device, dtype);
     let t_load = Instant::now();
-    let pipeline = AudioDiffusionPipeline::from_folder(model_dir, device, dtype)
-        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+    let pipeline = if low_vram {
+        AudioDiffusionPipeline::from_pretrained_low_vram(model_dir)
+    } else {
+        AudioDiffusionPipeline::from_folder(model_dir, device, dtype)
+    }
+    .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
     println!("   ✅ Pipeline loaded in {:.2}s", t_load.elapsed().as_secs_f32());
     println!("   🔍 Text Encoder Qwen3: {}", if pipeline.text_encoder.is_some() { "✅ ACTIVE (1024d)" } else { "[-] NONE" });
     println!("   🔍 Condition Encoder:  {}", if pipeline.condition_encoder.is_some() { "✅ ACTIVE (2048d)" } else { "[-] NONE" });

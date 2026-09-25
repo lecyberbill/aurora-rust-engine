@@ -33,6 +33,7 @@ SRC = "D:/image_to_text/TransRust/outputs/audio_showcase/codec_original.wav"
 CAPTION = "warm uplifting acoustic pop, acoustic guitar, piano, drums, smooth vocal melody"
 
 TASKS = {
+    "text2music": dict(instruction="Fill the audio semantic mask based on the given conditions:"),
     "extract": dict(instruction="Extract the VOCALS track from the audio:"),
     "lego": dict(instruction="Generate the DRUMS track based on the audio context:"),
     "complete": dict(instruction="Complete the input track with VOCALS | GUITAR:"),
@@ -113,12 +114,12 @@ def run(task, model="acestep-v15-base", chunk_mask_mode="auto"):
         handler.model.prepare_noise = pn
     params = GenerationParams(
         task_type=task,
-        src_audio=SRC,
-        reference_audio=SRC if os.environ.get("REF_SRC") else None,
+        src_audio=None if task == "text2music" else SRC,
+        reference_audio=SRC if (os.environ.get("REF_SRC") and task != "text2music") else None,
         caption=CAPTION,
         lyrics="[instrumental]",
         vocal_language="unknown",
-        duration=6.0,
+        duration=30.0 if task == "text2music" else 6.0,
         inference_steps=50,
         guidance_scale=7.0,
         seed=42,
