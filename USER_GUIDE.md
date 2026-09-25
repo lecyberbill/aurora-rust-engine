@@ -1100,7 +1100,9 @@ audio.save_auto("vocals.wav")?;
 * **Timbre** : set `.refer_latents = Some(&lat)` (a `reference_audio`); by default the learned
   silence latent is used (reference parity).
 * **Models** : the **2B** `acestep-v15-base` / `acestep-v15-sft` are recommended. The **XL 5B**
-  (~10 GB bf16) is borderline on a 12 GB GPU.
+  (~10 GB bf16) needs the low-VRAM loader: `AudioDiffusionPipeline::from_pretrained_low_vram(path)`
+  (or `--low-vram` on the CLI) keeps the text/condition encoders on **CPU (f32)** and only the
+  DiT + VAE on the GPU, making 5B fit a 12 GB card. Conditioning is bit-comparable to the normal path.
 * **Sources** : use real music (≥ 30 s); very short or artefact clips can render distorted.
 * **Build** : always compile with `--features cuda` (otherwise CUDA is silently unavailable and the
   pipeline falls back to CPU/f32).

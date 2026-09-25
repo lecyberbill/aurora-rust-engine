@@ -212,6 +212,9 @@ pub struct AudioDiffusionPipeline {
     pub text_encoder: Option<Qwen3TextEncoder>,
     pub device: Device,
     pub dtype: DType,
+    /// Device holding `text_encoder` / `condition_encoder` (may be CPU to save VRAM).
+    pub encoder_device: Device,
+    pub encoder_dtype: DType,
     pub variant: AceStepVariant,
     pub default_guidance_scale: f32,
     /// Set on SFT-stems checkpoints (`model.config.is_lego_sft`); enables the
@@ -228,6 +231,7 @@ impl AudioDiffusionPipeline {
         device: Device,
         dtype: DType,
     ) -> Self {
+        let encoder_device = device.clone();
         Self {
             transformer,
             vae,
@@ -235,6 +239,8 @@ impl AudioDiffusionPipeline {
             text_encoder,
             device,
             dtype,
+            encoder_device,
+            encoder_dtype: dtype,
             variant: AceStepVariant::Turbo,
             default_guidance_scale: 1.0,
             is_lego_sft: false,
@@ -245,15 +251,37 @@ impl AudioDiffusionPipeline {
     pub fn from_pretrained<P: AsRef<Path>>(model_dir: P) -> Result<Self> {
         let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
         let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
-        Self::from_folder(model_dir, device, dtype)
+        Self::from_folder_impl(model_dir, device, dtype, None)
     }
 
-    /// Load the pipeline from local model paths
+    /// Like [`Self::from_pretrained`] but loads the text/condition encoders on **CPU (f32)**,
+    /// keeping only the DiT + VAE on the GPU. Lets 5B XL checkpoints fit a 12 GB card.
+    pub fn from_pretrained_low_vram<P: AsRef<Path>>(model_dir: P) -> Result<Self> {
+        let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+        let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
+        Self::from_folder_impl(model_dir, device, dtype, Some((Device::Cpu, DType::F32)))
+    }
+
+    /// Load the pipeline from local model paths (encoders on `device`).
     pub fn from_folder<P: AsRef<Path>>(
         model_dir: P,
         device: Device,
         dtype: DType,
     ) -> Result<Self> {
+        Self::from_folder_impl(model_dir, device, dtype, None)
+    }
+
+    /// Core loader. `encoders` optionally overrides the device/dtype for the text and
+    /// condition encoders (e.g. `(Cpu, F32)` to offload them for low-VRAM setups).
+    pub fn from_folder_impl<P: AsRef<Path>>(
+        model_dir: P,
+        device: Device,
+        dtype: DType,
+        encoders: Option<(Device, DType)>,
+    ) -> Result<Self> {
+        let (enc_device, enc_dtype) = encoders
+            .clone()
+            .unwrap_or_else(|| (device.clone(), dtype));
         let dir = model_dir.as_ref();
         let vae_path = dir.join("vae").join("diffusion_pytorch_model.safetensors");
         let trans_dir = dir.join("transformer");
@@ -284,18 +312,20 @@ impl AudioDiffusionPipeline {
         ).context("Failed to load AceStep 1D Transformer")?;
 
         let condition_encoder = if cond_path.exists() {
-            AceStepConditionEncoder::from_safetensors(&cond_path, &device, dtype).ok()
+            AceStepConditionEncoder::from_safetensors(&cond_path, &enc_device, enc_dtype).ok()
         } else {
             None
         };
 
         let text_encoder = if te_path.exists() {
-            Qwen3TextEncoder::from_safetensors(&te_path, Some(&tok_path), &device, dtype).ok()
+            Qwen3TextEncoder::from_safetensors(&te_path, Some(&tok_path), &enc_device, enc_dtype).ok()
         } else {
             None
         };
 
         let mut pipeline = Self::new(transformer, vae, condition_encoder, text_encoder, device, dtype);
+        pipeline.encoder_device = enc_device;
+        pipeline.encoder_dtype = enc_dtype;
 
         // Detect Turbo vs Base/SFT from the transformer config (`is_turbo`).
         let cfg_path = dir.join("transformer").join("config.json");
@@ -353,6 +383,11 @@ impl AudioDiffusionPipeline {
         refer_latents: Option<&Tensor>,
         src_latents: Option<&Tensor>,
     ) -> Result<(Tensor, Tensor)> {
+        // Encoders may live on a different device (e.g. CPU for low-VRAM XL loads).
+        let refer_owned = match refer_latents {
+            Some(r) => Some(r.to_device(&self.encoder_device)?.to_dtype(self.encoder_dtype)?),
+            None => None,
+        };
         let (condition, src_64, chunk_64) = if let (Some(te), Some(ce)) =
             (&self.text_encoder, &self.condition_encoder)
         {
@@ -373,13 +408,15 @@ impl AudioDiffusionPipeline {
                 .embed_ids(&lyric_ids)
                 .map_err(|e| anyhow::anyhow!("Lyric embedding failed: {}", e))?;
             let cond = ce
-                .forward_condition_ex(&text_hidden, &lyric_embeds, refer_latents)
-                .map_err(|e| anyhow::anyhow!("Condition encoding failed: {}", e))?;
+                .forward_condition_ex(&text_hidden, &lyric_embeds, refer_owned.as_ref())
+                .map_err(|e| anyhow::anyhow!("Condition encoding failed: {}", e))?
+                .to_device(&self.device)?
+                .to_dtype(self.dtype)?;
 
             let src = match src_latents {
                 Some(s) => s.to_dtype(self.dtype)?,
                 None => {
-                    let sil = ce.silence_latent.to_dtype(self.dtype)?;
+                    let sil = ce.silence_latent.to_dtype(self.dtype)?.to_device(&self.device)?;
                     let avail = sil.dim(1)?;
                     if num_frames <= avail {
                         sil.narrow(1, 0, num_frames)?
@@ -416,7 +453,7 @@ impl AudioDiffusionPipeline {
             .condition_encoder
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("condition encoder required for task conditioning"))?;
-        let sil = ce.silence_latent.to_dtype(self.dtype)?;
+        let sil = ce.silence_latent.to_dtype(self.dtype)?.to_device(&self.device)?;
         let avail = sil.dim(1)?;
         let tiled = if num_frames <= avail {
             sil.narrow(1, 0, num_frames)?
@@ -540,7 +577,8 @@ impl AudioDiffusionPipeline {
                 .as_ref()
                 .map(|ce| {
                     ce.null_condition_emb
-                        .to_dtype(self.dtype)
+                        .to_device(&self.device)
+                        .and_then(|n| n.to_dtype(self.dtype))
                         .and_then(|n| n.broadcast_as(condition.dims()))
                 })
                 .transpose()?
@@ -643,6 +681,7 @@ impl AudioDiffusionPipeline {
             if let Some(ce) = &self.condition_encoder {
                 let null = ce
                     .null_condition_emb
+                    .to_device(&self.device)?
                     .to_dtype(self.dtype)?
                     .broadcast_as(condition.dims())?;
                 return Ok(self.transformer.flow_match_euler_cfg(

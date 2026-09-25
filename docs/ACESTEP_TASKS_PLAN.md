@@ -105,8 +105,9 @@ Fichiers : `flow_match_euler*` (params `clean_src`, `repaint_mask`, `noise`, rat
 - ✅ **Validé à l'oreille** (source 30 s) : `extract`/`lego`/`complete` = vraie musique avec
   **SFT 2B** (`D:/models/Audio-sft`), `base 2B` et `xl-base` (extract OK). Source courte/artefact
   (`codec_original` 6 s) → distordu ; utiliser de vraies chansons.
-- ⚠️ **VRAM** : `xl-turbo`/`xl-base` 5B (~10 Go bf16) limite sur RTX 4070 Ti 12 Go → peut pendre/OOM.
-  Préférer les modèles 2B (`acestep-v15-base`, `acestep-v15-sft`) pour ces tâches.
+- ⚠️ **VRAM** : `xl-turbo`/`xl-base` 5B (~10 Go bf16) limite sur RTX 4070 Ti 12 Go.
+  → `AudioDiffusionPipeline::from_pretrained_low_vram()` / `--low-vram` : encodeurs texte/condition
+  sur **CPU f32**, DiT+VAE sur GPU (corr 0.998 vs chemin normal). Préférer 2B sinon.
 - ⚠️ **Build CUDA obligatoire** : `cargo build --release --features cuda` (sinon `Device::new_cuda`
   échoue silencieusement → CPU F32). Sur GPU : ~3 s (6 s) / ~16 s (30 s) par tâche.
 

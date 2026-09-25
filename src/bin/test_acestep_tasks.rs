@@ -77,8 +77,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     let use_cpu = argv.iter().any(|a| a == "--cpu");
+    let low_vram = argv.iter().any(|a| a == "--low-vram");
     let pipeline = if use_cpu {
         AudioDiffusionPipeline::from_folder(&model_dir, Device::Cpu, DType::F32)?
+    } else if low_vram {
+        AudioDiffusionPipeline::from_pretrained_low_vram(&model_dir)?
     } else {
         AudioDiffusionPipeline::from_pretrained(&model_dir)?
     };
