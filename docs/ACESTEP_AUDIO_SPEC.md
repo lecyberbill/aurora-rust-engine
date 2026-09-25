@@ -228,12 +228,17 @@ cargo run --bin test_acestep_iso -- --model-dir G:/models/Audio-base --ref outpu
 
 ## 9. Limitations & suite
 
-- **XL** : converti et fonctionnel ; iso exact à refaire en f32.
+- **XL** : converti et fonctionnel (base + SFT via low-VRAM) ; iso exact à refaire en f32.
 - **LM-codes → audio** : ✅ fonctionnel (LM CoT → codes contraints top-p → hints → DiT → musique),
   exemple `outputs/audio_showcase/lm_codes_song_30s.ogg`.
 - **Codec 5 Hz (FSQ)** : validé bit-exact ; le planner texte (CoT) et la génération de codes le sont aussi.
-- **Cover / repaint / extract / lego / complete** : non portés (text2music + LM-codes seulement).
-- **Cover / repaint / extract / lego / complete** : non portés (text2music seulement).
+- **Cover / repaint / extract / lego / complete** : ✅ portés (`TaskRequest` + `generate_task`).
+  Repaint **bit-exact** (7.9e-6) ; cover (avec **FSQ optionnel**, `--cover-fsq`) ; extract/lego/complete
+  via le masque « auto » (`chunk_mask=2.0`). Validés à l'oreille (base 2B, XL-base, SFT/XL-SFT).
+- **Captions SFT-stems** (`Global:/Local:/Mask Control:`, `is_lego_sft`) : implémentées, prêtes pour un
+  checkpoint stems (non public) — `--lego-sft` force le format.
+- **Low-VRAM** : `from_pretrained_low_vram()` / `--low-vram` (encodeurs texte/condition sur CPU)
+  pour faire tenir les checkpoints **XL 5B** sur 12 Go.
 - Parité RNG cross-langage : le seed Rust est déterministe mais ne reproduit pas `torch.randn` ;
   l'iso utilise l'injection de bruit (`generate_with_noise`).
 
@@ -242,12 +247,14 @@ cargo run --bin test_acestep_iso -- --model-dir G:/models/Audio-base --ref outpu
 ```
 src/audio/encode.rs            codecs OGG/MP3
 src/audio/rng.rs               RNG seedé
+src/audio/vae_oobleck.rs       VAE Oobleck 48 kHz (décodeur + encodeur)
 src/models/acestep.rs          DiT + ConditionEncoder (config-driven + CFG/APG)
-src/models/acestep_codec.rs    codec 5 Hz (ResidualFSQ + pooler + detokenizer)
+src/models/acestep_tasks.rs    tâches (`AceStepTask`) + instructions + caption SFT-stems
+src/models/acestep_codec.rs    codec 5 Hz (ResidualFSQ + pooler + detokenizer ; split diffusers)
 src/models/acestep_lm.rs       planner LM 5 Hz (CoT + codes contraints)
-src/pipelines/audio_diffusion.rs   API pipeline + sampler + context_from_src
+src/pipelines/audio_diffusion.rs   API pipeline + sampler + `TaskRequest`/`generate_task` + low-VRAM
 scripts/convert_acestep_base.py    conversion repo -> diffusers (+ audio_codec)
-scripts/dump_*.py                  dumps de référence PyTorch
-src/bin/test_acestep_*.rs          harnais de validation (dit/cond/qwen/pipeline/codec/iso/lm)
+scripts/dump_*.py / run_acestep_*.py  dumps & références PyTorch
+src/bin/test_acestep_*.rs          harnais (dit/cond/qwen/pipeline/codec/iso/lm/vae_enc/tasks/cover/repaint)
 src/bin/test_{apg,audio_encode,audio_codec_roundtrip,acestep_lm_codes}.rs
 ```

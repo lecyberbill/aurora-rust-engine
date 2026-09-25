@@ -1,6 +1,7 @@
 # Plan — ACE-Step 1.5 : Cover / Repaint / Extract / Lego / Complete
 
-**Date** : 2026-09-24 | **Statut** : ✅ Étapes 1-5 implémentées (cover / repaint / extract / lego / complete) — captions SFT-stems en attente du checkpoint `is_lego_sft`
+**Date** : 2026-09-24 (maj 2026-09-25) | **Statut** : ✅ Complet — étapes 1-5 faites (cover / repaint /
+extract / lego / complete) + cover FSQ + captions SFT-stems (`is_lego_sft`) + low-VRAM XL.
 **Contexte** : le chemin `text2music` (Turbo/Base/XL), le **codec 5 Hz (FSQ)** et le
 **LM-codes → musique** sont livrés et validés ([`ACESTEP_AUDIO_SPEC.md`](ACESTEP_AUDIO_SPEC.md)).
 Reste les tâches audio avancées.
