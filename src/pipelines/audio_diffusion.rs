@@ -7,7 +7,10 @@ use std::time::Instant;
 
 use crate::audio::{seeded_randn, AutoencoderOobleck, AudioFormat, OobleckConfig, WavAudio};
 use crate::models::acestep_tasks;
-use crate::models::{AceStepConditionEncoder, AceStepTransformer1D, AceStepTransformerConfig, FlowMatchConfig};
+use crate::models::{
+    AceStepAudioCodec, AceStepConditionEncoder, AceStepTransformer1D, AceStepTransformerConfig,
+    FlowMatchConfig,
+};
 use crate::text::Qwen3TextEncoder;
 
 /// Telemetry metrics for Audio Diffusion synthesis
@@ -118,6 +121,9 @@ pub struct TaskRequest<'a> {
     pub cover_strength: f32,
     /// `> 0` initializes `x_t` from the source at the nearest timestep.
     pub cover_noise_strength: f32,
+    /// `cover` only: roundtrip the source latents through the 5Hz FSQ codec
+    /// (`is_covers=1` in the reference) before conditioning.
+    pub cover_fsq: bool,
 }
 
 impl<'a> TaskRequest<'a> {
@@ -142,6 +148,7 @@ impl<'a> TaskRequest<'a> {
             chunk_mask_value: f32::NAN,
             cover_strength: 1.0,
             cover_noise_strength: 0.0,
+            cover_fsq: false,
         }
     }
 
@@ -202,6 +209,10 @@ impl<'a> TaskRequest<'a> {
         self.chunk_mask_value = chunk_mask_value;
         self
     }
+    pub fn with_cover_fsq(mut self, cover_fsq: bool) -> Self {
+        self.cover_fsq = cover_fsq;
+        self
+    }
 }
 
 /// End-to-End Pure Rust Generative Audio & Music Diffusion Pipeline
@@ -210,6 +221,9 @@ pub struct AudioDiffusionPipeline {
     pub vae: AutoencoderOobleck,
     pub condition_encoder: Option<AceStepConditionEncoder>,
     pub text_encoder: Option<Qwen3TextEncoder>,
+    /// Optional 5Hz audio codec (loaded from the diffusers `audio_tokenizer` /
+    /// `audio_token_detokenizer` folders) for FSQ-roundtrip cover conditioning.
+    pub codec: Option<AceStepAudioCodec>,
     pub device: Device,
     pub dtype: DType,
     /// Device holding `text_encoder` / `condition_encoder` (may be CPU to save VRAM).
@@ -237,6 +251,7 @@ impl AudioDiffusionPipeline {
             vae,
             condition_encoder,
             text_encoder,
+            codec: None,
             device,
             dtype,
             encoder_device,
@@ -326,6 +341,13 @@ impl AudioDiffusionPipeline {
         let mut pipeline = Self::new(transformer, vae, condition_encoder, text_encoder, device, dtype);
         pipeline.encoder_device = enc_device;
         pipeline.encoder_dtype = enc_dtype;
+
+        // Optional 5Hz codec (diffusers split layout), kept on CPU/f32 for FSQ-roundtrip cover.
+        let tok_codec = dir.join("audio_tokenizer").join("diffusion_pytorch_model.safetensors");
+        let detok_codec = dir.join("audio_token_detokenizer").join("diffusion_pytorch_model.safetensors");
+        if tok_codec.exists() && detok_codec.exists() {
+            pipeline.codec = AceStepAudioCodec::from_diffusers(&tok_codec, &detok_codec, &Device::Cpu, DType::F32).ok();
+        }
 
         // Detect Turbo vs Base/SFT from the transformer config (`is_turbo`).
         let cfg_path = dir.join("transformer").join("config.json");
@@ -514,6 +536,19 @@ impl AudioDiffusionPipeline {
         };
 
         let src = req.src_latents.to_dtype(self.dtype)?;
+        // Cover FSQ (`is_covers=1`): roundtrip the source through the 5Hz codec.
+        let src = if task == acestep_tasks::AceStepTask::Cover && req.cover_fsq && num_frames % 5 == 0 {
+            match &self.codec {
+                Some(codec) => {
+                    let s_cpu = req.src_latents.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+                    let (q, _idx) = codec.tokenize(&s_cpu)?;
+                    codec.detokenize(&q)?.to_device(&self.device)?.to_dtype(self.dtype)?
+                }
+                None => src,
+            }
+        } else {
+            src
+        };
         let mut src_task_vec: Vec<f32> = src.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
         // `chunk_mask`: explicit 0/1 for repaint; `cover` → 1.0; `extract`/`lego`/`complete` → 2.0
         // ("auto"/Mask Control). A non-NaN `chunk_mask_value` overrides the per-task default.

@@ -1099,6 +1099,12 @@ audio.save_auto("vocals.wav")?;
   explicit `0/1` mask from the repaint span. `--chunk <v>` / `.with_chunk_mask_value(v)` overrides.
 * **Timbre** : set `.refer_latents = Some(&lat)` (a `reference_audio`); by default the learned
   silence latent is used (reference parity).
+* **Cover FSQ** : `.with_cover_fsq(true)` (or `--cover-fsq`) roundtrips the source through the
+  **5Hz audio codec** (`is_covers=1` in the reference) — loaded automatically from the diffusers
+  `audio_tokenizer` / `audio_token_detokenizer` folders (kept on CPU/f32).
+* **SFT-stems captions** : on a checkpoint whose config sets `is_lego_sft` (or forced via
+  `--lego-sft`), the caption becomes `Global:/Local:/Mask Control:` built by
+  `lego_sft_caption()` from `.with_global_caption(...)` and the per-stem caption.
 * **Models** : the **2B** `acestep-v15-base` / `acestep-v15-sft` are recommended. The **XL 5B**
   (~10 GB bf16) needs the low-VRAM loader: `AudioDiffusionPipeline::from_pretrained_low_vram(path)`
   (or `--low-vram` on the CLI) keeps the text/condition encoders on **CPU (f32)** and only the

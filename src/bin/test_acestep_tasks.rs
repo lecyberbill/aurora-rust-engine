@@ -78,13 +78,17 @@ fn main() -> anyhow::Result<()> {
 
     let use_cpu = argv.iter().any(|a| a == "--cpu");
     let low_vram = argv.iter().any(|a| a == "--low-vram");
-    let pipeline = if use_cpu {
+    let lego_sft = argv.iter().any(|a| a == "--lego-sft");
+    let mut pipeline = if use_cpu {
         AudioDiffusionPipeline::from_folder(&model_dir, Device::Cpu, DType::F32)?
     } else if low_vram {
         AudioDiffusionPipeline::from_pretrained_low_vram(&model_dir)?
     } else {
         AudioDiffusionPipeline::from_pretrained(&model_dir)?
     };
+    if lego_sft {
+        pipeline.is_lego_sft = true;
+    }
     println!(
         "pipeline: variant={:?} dtype={:?} is_lego_sft={}",
         pipeline.variant, pipeline.dtype, pipeline.is_lego_sft
@@ -113,6 +117,9 @@ fn main() -> anyhow::Result<()> {
         .with_cover_strength(cover_strength)
         .with_cover_noise_strength(cover_noise_strength);
     req.chunk_mask_value = chunk_mask_value;
+    if argv.iter().any(|a| a == "--cover-fsq") {
+        req.cover_fsq = true;
+    }
     if matches!(task.as_str(), "extract" | "lego") {
         req = req.with_track_name(&track);
     }

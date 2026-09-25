@@ -98,7 +98,7 @@ Fichiers : `flow_match_euler*` (params `clean_src`, `repaint_mask`, `noise`, rat
 - Instructions : `generate_instruction(task, track, classes)` (fait).
 - `generate_task` : `chunk_mask` + `src_latents` (lego garde la source dans la zone ; repaint la silence),
   `repaint_mask` pour repaint/lego, sampler `flow_match` (CFG/APG sur base, no-CFG sur turbo).
-- Bins : `test_acestep_tasks.rs` (`-t extract|lego|complete|repaint|cover --track --classes --repaint-start/end --chunk <v>`).
+- Bins : `test_acestep_tasks.rs` (`-t extract|lego|complete|repaint|cover --track --classes --repaint-start/end --chunk <v> --cover-fsq --lego-sft`).
 - ⚠️ **`chunk_mask` = 2.0** (« auto »/Mask Control) pour extract/lego/complete → **musique** ;
   `1.0` → rumble basse fréquence (centroïde ~150 Hz). Repaint reste en 0/1 explicite.
   Défaut `TaskRequest.chunk_mask_value = NaN` → résolu par tâche (`cover` 1.0, le reste 2.0).
@@ -174,7 +174,9 @@ Harnais : `scripts/dump_acestep_<task>_ref.py` + `src/bin/test_acestep_<task>.rs
 - [x] Repaint : mask + injection par étape + blend final (**bit-exact 7.9e-6** vs réf rejouée).
 - [x] SFT général converti ; **extract/lego/complete** câblés + testés (base & SFT).
 - [x] `chunk_mask=2.0` (auto) requis pour extract/lego/complete — validé à l'oreille (base/XL-base/SFT).
-- [x] Modèle par défaut : **2B** (`acestep-v15-base` / `acestep-v15-sft`) — XL 5B limite en 12 Go.
+- [x] Modèle par défaut : **2B** (`acestep-v15-base` / `acestep-v15-sft`) ; XL 5B via **low-VRAM**.
+- [x] **Cover FSQ** (`is_covers=1`) : roundtrip codec 5 Hz depuis le layout diffusers (`--cover-fsq`).
+- [x] **Captions SFT-stems** (`Global:/Local:/Mask Control:`) dès que `is_lego_sft` est vrai (`--lego-sft`).
 - [ ] Docs + commit.
 
 ## Fichiers concernés

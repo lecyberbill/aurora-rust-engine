@@ -263,6 +263,30 @@ impl AceStepAudioCodec {
         })
     }
 
+    /// Load from the split diffusers layout: `audio_tokenizer/…` (pooler + FSQ) and
+    /// `audio_token_detokenizer/…` (each file's keys are already at the module root).
+    pub fn from_diffusers<P: AsRef<Path>, Q: AsRef<Path>>(
+        tokenizer_path: P,
+        detokenizer_path: Q,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Self> {
+        let vb_tok = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[tokenizer_path.as_ref()], dtype, device)
+                .with_context(|| format!("failed to load audio tokenizer at {:?}", tokenizer_path.as_ref()))?
+        };
+        let vb_detok = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[detokenizer_path.as_ref()], dtype, device)
+                .with_context(|| format!("failed to load audio detokenizer at {:?}", detokenizer_path.as_ref()))?
+        };
+        let tokenizer = AceStepAudioTokenizer::load(vb_tok, dtype, device)?;
+        let detokenizer = AudioTokenDetokenizer::load(vb_detok)?;
+        Ok(Self {
+            tokenizer,
+            detokenizer,
+        })
+    }
+
     /// Acoustic features `[B, T, 64]` (T divisible by 5) → `(quantized [B, T/5, 2048], indices [B, T/5])`.
     pub fn tokenize(&self, features: &Tensor) -> Result<(Tensor, Tensor)> {
         let (b, t, d) = features.dims3()?;
