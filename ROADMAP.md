@@ -549,10 +549,10 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 
 **Goal.** Provide production-grade, low-latency Speech-to-Text (STT) and audio transcription in 100% pure Rust:
 
-- [ ] **Whisper Engine (`src/models/audio/whisper.rs`)**:
+- [x] **Whisper Engine (`src/pipelines/whisper.rs`)**:
   - Support for **Whisper Large-v3**, **Whisper Turbo**, and quantized variants (GGUF / Safetensors).
-  - Pure Rust Mel-filterbank spectrogram extraction (128 Mel bins, 16kHz audio sampling, dynamic padding).
-  - Encoder-Decoder autoregressive cross-attention loop with Greedy & Beam Search decoding.
+  - Pure Rust Mel-filterbank spectrogram extraction (128 Mel bins, 16kHz audio sampling, dynamic padding) — `src/audio/mel.rs`.
+  - Encoder-Decoder autoregressive cross-attention loop with Greedy & Beam Search decoding (bit-exact vs reference).
   - Multilingual transcription, automatic language identification, and word-level timestamp alignment.
 - [ ] **Moonshine Real-Time Streaming STT (`src/models/audio/moonshine.rs`)**:
   - Sub-50ms on-device audio transcription designed for live microphone streams without chunking latency.
@@ -561,17 +561,20 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 
 ---
 
-## 🚀 Milestone 21: Text-to-Audio & Sound Diffusion (Stable Audio Open & MusicGen)
+## 🚀 Milestone 21: Text-to-Audio, Music & Editing (ACE-Step 1.5 / Stable Audio Open / MusicGen)
 
 **Goal.** Bring high-fidelity generative sound design and music synthesis to the engine using 1D continuous diffusion:
 
-- [ ] **Stable Audio Open 1.0 & AceStep Audio Diffusion (`src/pipelines/audio_diffusion.rs`)**:
-  - Continuous 1D Diffusion Transformer (1D DiT) operating on latent audio representations.
-  - **AceStep 1D DiT**: Qwen3 text conditioning + 1D DiT Transformer + AutoencoderOobleck 44.1kHz stereo VAE with Flow Matching Euler scheduler.
-  - **Stable Audio Open**: T5 text conditioning with timing conditioning embeddings (`seconds_start`, `seconds_total`).
-  - AutoencoderOobleck / DAC 64-channel 1D VAE Decoder in pure Rust for latent-to-waveform reconstruction.
-- [ ] **MusicGen Autoregressive Music Engine**:
-  - Multi-codebook EnCodec generation for melodic and harmonic music generation.
+- [x] **ACE-Step 1.5 (`src/pipelines/audio_diffusion.rs`, `src/models/acestep*.rs`, `src/audio/vae_oobleck.rs`)**:
+  - Continuous 1D Diffusion Transformer (1D DiT) + **AutoencoderOobleck 48 kHz stereo** VAE (encodeur + décodeur) + Flow-Matching Euler, bit-exact vs HuggingFace Diffusers.
+  - **Turbo / Base / SFT / XL** (2B & 5B), Qwen3 text+lyric conditioning, **CFG/APG** (Base/SFT/XL) and Turbo (8 steps).
+  - **5Hz Qwen3 LM planner** (CoT metadata + constrained semantic audio-code generation) + bit-exact **5Hz FSQ audio codec**.
+  - **Source-audio tasks** via `TaskRequest` + `AudioDiffusionPipeline::generate_task`: **cover** (optional FSQ roundtrip),
+    **repaint** (bit-exact 7.9e-6), **extract / lego / complete** (chunk-mask "auto" 2.0); SFT-stems
+    `Global:/Local:/Mask Control:` captions; **low-VRAM** loader (encoders on CPU) fits 5B XL on 12 GB.
+  - Deterministic seeded RNG and native **WAV / OGG Vorbis / MP3** export.
+- [ ] **Stable Audio Open 1.0**: T5 text conditioning with timing conditioning embeddings (`seconds_start`, `seconds_total`).
+- [ ] **MusicGen Autoregressive Music Engine**: Multi-codebook EnCodec generation for melodic and harmonic music generation.
 
 ---
 
@@ -579,12 +582,12 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 
 **Goal.** Ultra-fast, human-sounding Text-to-Speech (TTS) with expressive prosody:
 
-- [ ] **Parler-TTS Generative Voice Engine (`src/pipelines/tts.rs`)**:
+- [x] **Parler-TTS Generative Voice Engine (`src/pipelines/tts.rs`)**:
   - Controllable voice synthesis guided by text descriptions (pitch, speed, gender, room acoustics).
   - T5 text conditioning + multi-codebook autoregressive transformer decoder.
   - Neural audio vocoding via Descript Audio Codec (DAC) producing 44.1 kHz broadcast-grade speech.
   - Native pure Rust WAV encoder (`src/audio/wav.rs`) with zero external C/FFmpeg dependencies.
-- [ ] **Kokoro-82M Ultra-Compact TTS (`src/models/audio/kokoro.rs`)**:
+- [x] **Kokoro-82M Ultra-Compact TTS (`src/pipelines/tts.rs`)**:
   - 82M parameter lightweight architecture generating voice at **> 50x realtime** on CPU/GPU.
   - Style-embedding voice conditioning (multiple predefined American & British male/female voice profiles).
   - G2P (Grapheme-to-Phoneme) and stress-accent tokenizer in pure Rust.
