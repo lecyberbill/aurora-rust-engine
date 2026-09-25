@@ -980,33 +980,46 @@ println!("Duration: {:.2}s (processed in {:.1}ms)", result.duration_seconds, res
 
 ---
 
-### Text-to-Audio & Sound Diffusion (Stable Audio Open)
+### Text-to-Audio & Sound Design (Stable Audio Open)
 
-Aurora supports high-fidelity audio generation from text prompts using 1D continuous diffusion models like **Stable Audio Open 1.0**:
+Pure-Rust port of **Stable Audio Open 1.0** — music, ambient soundscapes and foley at **44.1 kHz
+stereo** (up to ~47 s), from a text prompt plus a duration window.
 
-* **Continuous 1D DiT** : Generates music, ambient soundscapes, and foley sound effects at **44.1 kHz stereo** (up to 47 seconds).
-* **Timing Conditioners** : Precision duration control through `seconds_start` and `seconds_total` timing embeddings.
-* **1D Audio VAE** : AutoencoderOobleck / DAC 64-channel 1D VAE decoding directly into uncompressed 44.1 kHz audio waveforms.
+Architecture: **T5-base** prompt encoder + Fourier `seconds_start` / `seconds_total` conditioners
+(`StableAudioProjectionModel`) → **DiT** `continuous_transformer` (24 layers × 1536, GQA cross-attn,
+partial RoPE, global conditioning) → **EDM/SDE DPM-Solver++** `CosineDPMSolverMultistepScheduler`
+(v_prediction) → **AutoencoderOobleck** 44.1 kHz VAE decode.
 
 ```rust
-use aurora_rust_engine::pipelines::audio::StableAudioPipeline;
-use candle_core::Device;
+use aurora_rust_engine::pipelines::StableAudioPipeline;
 
-let device = Device::new_cuda(0)?;
+let pipe = StableAudioPipeline::from_pretrained("G:/models/Audio/stable-audio-open-models")?;
 
-let mut pipeline = StableAudioPipeline::from_single_file(
-    "<MODELS_DIR>/audio/stable-audio-open-1.0.safetensors",
-    device,
+// 20 s lo-fi beat; negative prompt is optional (empty → zeroed unconditional branch).
+let audio = pipe.generate(
+    "Lo-fi hip hop beat, chillhop, 80 bpm, mellow piano, vinyl crackle, warm bass",
+    "Low quality, distorted, harsh",
+    0.0,   // seconds_start
+    20.0,  // seconds_end
+    100,   // denoising steps
+    7.0,   // guidance scale
+    0,     // seed
 )?;
+audio.save_auto("lofi.ogg")?;
+```
 
-// Generate a 15-second cinematic ambient track
-let sound = pipeline.generate_sound(
-    "Cinematic drum crescendo with deep sub-bass impact and rain ambience, 44.1kHz stereo",
-    15.0, // Duration in seconds
-    50,   // Denoising steps
-)?;
+* **Models** : `stabilityai/stable-audio-open-1.0` (gated) or the diffusers mirror
+  `AEmotionStudio/stable-audio-open-models` (layout: `text_encoder/`, `projection_model/`,
+  `transformer/`, `vae/`, `tokenizer/`).
+* **Determinism** : the SDE DPM-Solver++ is stochastic; the initial latent and the per-step
+  Brownian noise are drawn from the seeded engine RNG (the Brownian increments over disjoint
+  schedule intervals are independent `N(0,1)`). Same seed → identical audio.
 
-sound.save_wav("output_ambience.wav")?;
+```powershell
+# CLI (100 steps, 20 s)
+cargo run --release --features cuda --bin test_stable_audio -- `
+  -m G:/models/Audio/stable-audio-open-models `
+  -p "Lo-fi hip hop beat, chillhop, 80 bpm, mellow piano, vinyl crackle" -d 20 -s 100 -g 7 -o lofi.ogg
 ```
 
 ---

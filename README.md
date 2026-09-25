@@ -26,6 +26,7 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 | **Speech-to-Text** | Whisper Large-v3 / Turbo (native Slaney Mel + encoder/decoder) |
 | **Text-to-Speech** | Parler-TTS, Kokoro-82M |
 | **Text-to-Music & Editing** | ACE-Step 1.5 — Turbo / Base / SFT / XL, 48 kHz stereo, lyrics, WAV / OGG / MP3, **cover / repaint / extract / lego / complete** |
+| **Text-to-Audio / Sound Design** | Stable Audio Open 1.0 — T5 + timing conds, 44.1 kHz stereo (≤47 s), SFX / ambient / music |
 
 ---
 
@@ -49,6 +50,8 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 - **Whisper Speech-to-Text (Pure Rust)**: Bit-exact Whisper Large-v3 / Turbo transcription with a native Slaney Mel-filterbank, pure Rust WAV I/O, and multilingual decoding in `src/pipelines/whisper.rs`.
 - **Neural Text-to-Speech (Parler-TTS & Kokoro-82M)**: Pure Rust TTS with voice/style descriptors and a native WAV encoder in `src/pipelines/tts.rs`.
 - **ACE-Step 1.5 Text-to-Music & Editing (Pure Rust)**: Full 1D DiT + Flow-Matching + Oobleck 48 kHz stereo VAE port with bit-exact validation vs HuggingFace Diffusers. Supports **Turbo / Base / SFT / XL** variants, classifier-free guidance (APG), Qwen3 text+lyric conditioning, a **5Hz Qwen3 LM planner** (CoT metadata + constrained semantic audio-code generation driving the DiT), a bit-exact **5Hz FSQ audio codec**, a deterministic seeded RNG, and WAV / OGG Vorbis / MP3 export. The **source-audio tasks** — **cover** (with optional FSQ roundtrip), **repaint** (bit-exact), **extract**, **lego** and **complete** — run through `TaskRequest` + `AudioDiffusionPipeline::generate_task` (SFT-stems `Global:/Local:/Mask Control:` captions included). A **low-VRAM** loader (encoders on CPU) fits the 5B **XL** checkpoints on 12 GB. See [`docs/ACESTEP_AUDIO_SPEC.md`](docs/ACESTEP_AUDIO_SPEC.md) and [`docs/ACESTEP_TASKS_PLAN.md`](docs/ACESTEP_TASKS_PLAN.md).
+
+- **Stable Audio Open 1.0 (Pure Rust)**: Text-to-audio / sound-design pipeline — T5-base prompt + Fourier `seconds_start`/`seconds_total` conditioners, a 24-layer **DiT** continuous transformer with GQA cross-attention and partial RoPE, an **EDM/SDE DPM-Solver++** scheduler (`v_prediction`), and the **AutoencoderOobleck** 44.1 kHz stereo VAE. All modules validated vs `diffusers`; see [`USER_GUIDE.md`](USER_GUIDE.md).
 
 ---
 

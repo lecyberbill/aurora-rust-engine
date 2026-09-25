@@ -573,7 +573,7 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
     **repaint** (bit-exact 7.9e-6), **extract / lego / complete** (chunk-mask "auto" 2.0); SFT-stems
     `Global:/Local:/Mask Control:` captions; **low-VRAM** loader (encoders on CPU) fits 5B XL on 12 GB.
   - Deterministic seeded RNG and native **WAV / OGG Vorbis / MP3** export.
-- [ ] **Stable Audio Open 1.0**: T5 text conditioning with timing conditioning embeddings (`seconds_start`, `seconds_total`).
+- [x] **Stable Audio Open 1.0** (`src/pipelines/stable_audio.rs`, `src/models/stable_audio*.rs`, `src/models/t5.rs`): T5-base + Fourier timing conditioners + DiT `continuous_transformer` (24×1536, GQA, partial RoPE) + EDM/SDE DPM-Solver++ + Oobleck 44.1 kHz VAE. Modules validated vs diffusers (projection bit-exact, VAE 6.7e-6, DiT 3.6e-4, scheduler 1e-6).
 - [ ] **MusicGen Autoregressive Music Engine**: Multi-codebook EnCodec generation for melodic and harmonic music generation.
 
 ---
