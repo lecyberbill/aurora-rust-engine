@@ -10,6 +10,7 @@
 pub mod acestep;
 pub mod acestep_codec;
 pub mod acestep_lm;
+pub mod acestep_tasks;
 pub mod auto;
 pub mod common;
 pub mod config;
@@ -18,7 +19,7 @@ pub mod image;
 pub mod registry;
 pub mod text;
 
-pub use acestep::{AceStepConditionEncoder, AceStepTransformer1D, AceStepTransformerConfig};
+pub use acestep::{AceStepConditionEncoder, AceStepTransformer1D, AceStepTransformerConfig, FlowMatchConfig};
 pub use acestep_codec::AceStepAudioCodec;
 pub use acestep_lm::AceStepLm;
 pub use auto::{AutoModel, BoxedModel, ModelLoadConfig};

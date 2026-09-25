@@ -254,6 +254,58 @@ impl OobleckDecoderBlock {
     }
 }
 
+/// Oobleck Encoder Block: Snake1d + strided Conv1d + 3 MRF Residual Units (mirror of the decoder).
+#[derive(Debug, Clone)]
+pub struct OobleckEncoderBlock {
+    snake1: Snake1d,
+    conv1: WeightNormConv1d,
+    res_unit1: OobleckResidualUnit,
+    res_unit2: OobleckResidualUnit,
+    res_unit3: OobleckResidualUnit,
+}
+
+impl OobleckEncoderBlock {
+    pub fn load(vb: VarBuilder, input_dim: usize, output_dim: usize, stride: usize) -> Result<Self> {
+        let pad = (stride as f64 / 2.0).ceil() as usize;
+        let snake1 = Snake1d::load(vb.pp("snake1"), input_dim, true)?;
+        let conv1 = WeightNormConv1d::load(
+            vb.pp("conv1"),
+            input_dim,
+            output_dim,
+            2 * stride,
+            Conv1dConfig {
+                padding: pad,
+                stride,
+                dilation: 1,
+                groups: 1,
+                ..Default::default()
+            },
+            true,
+        )?;
+
+        let res_unit1 = OobleckResidualUnit::load(vb.pp("res_unit1"), input_dim, 1)?;
+        let res_unit2 = OobleckResidualUnit::load(vb.pp("res_unit2"), input_dim, 3)?;
+        let res_unit3 = OobleckResidualUnit::load(vb.pp("res_unit3"), input_dim, 9)?;
+
+        Ok(Self {
+            snake1,
+            conv1,
+            res_unit1,
+            res_unit2,
+            res_unit3,
+        })
+    }
+
+    pub fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
+        // Encoder order: residual units at input channels, then Snake + strided Conv.
+        let x = self.res_unit1.forward(x)?;
+        let x = self.res_unit2.forward(&x)?;
+        let x = self.res_unit3.forward(&x)?;
+        let x = self.snake1.forward(&x)?;
+        self.conv1.forward(&x)
+    }
+}
+
 /// AutoencoderOobleck Decoder Configuration
 #[derive(Debug, Clone)]
 pub struct OobleckConfig {
@@ -284,6 +336,10 @@ pub struct AutoencoderOobleck {
     blocks: Vec<OobleckDecoderBlock>,
     snake1: Snake1d,
     conv2: WeightNormConv1d,
+    enc_conv1: WeightNormConv1d,
+    enc_blocks: Vec<OobleckEncoderBlock>,
+    enc_snake1: Snake1d,
+    enc_conv2: WeightNormConv1d,
     pub config: OobleckConfig,
 }
 
@@ -341,11 +397,58 @@ impl AutoencoderOobleck {
             false,
         )?;
 
+        // Encoder (mirror of the decoder): strided convs in the original downsampling order.
+        let vb_enc = vb.pp("encoder");
+        let enc_conv1 = WeightNormConv1d::load(
+            vb_enc.pp("conv1"),
+            config.audio_channels,
+            config.decoder_channels * multiples[0],
+            7,
+            Conv1dConfig {
+                padding: 3,
+                dilation: 1,
+                groups: 1,
+                stride: 1,
+                ..Default::default()
+            },
+            true,
+        )?;
+        let mut enc_blocks = Vec::with_capacity(config.downsampling_ratios.len());
+        for (i, &stride) in config.downsampling_ratios.iter().enumerate() {
+            let in_dim = config.decoder_channels * multiples[i];
+            let out_dim = config.decoder_channels * multiples[i + 1];
+            enc_blocks.push(OobleckEncoderBlock::load(
+                vb_enc.pp(format!("block.{}", i)),
+                in_dim,
+                out_dim,
+                stride,
+            )?);
+        }
+        let enc_snake1 = Snake1d::load(vb_enc.pp("snake1"), c_out_conv1, true)?;
+        let enc_conv2 = WeightNormConv1d::load(
+            vb_enc.pp("conv2"),
+            c_out_conv1,
+            2 * config.decoder_input_channels,
+            3,
+            Conv1dConfig {
+                padding: 1,
+                dilation: 1,
+                groups: 1,
+                stride: 1,
+                ..Default::default()
+            },
+            true,
+        )?;
+
         Ok(Self {
             conv1,
             blocks,
             snake1,
             conv2,
+            enc_conv1,
+            enc_blocks,
+            enc_snake1,
+            enc_conv2,
             config,
         })
     }
@@ -398,6 +501,64 @@ impl AutoencoderOobleck {
             self.config.sampling_rate,
             ch as u16,
         ))
+    }
+
+    /// Encode a waveform `[batch, audio_channels, samples]` into the latent distribution's
+    /// mean and log-variance `[batch, latent_channels, frames]`.
+    /// Raw encoder output (before the mean/logvar split), `[B, 2*latent, T]`.
+    pub fn encode_raw(&self, audio: &Tensor) -> candle_core::Result<Tensor> {
+        let mut x = self.enc_conv1.forward(audio)?;
+        for blk in &self.enc_blocks {
+            x = blk.forward(&x)?;
+        }
+        x = self.enc_snake1.forward(&x)?;
+        self.enc_conv2.forward(&x)
+    }
+
+    /// Encode into the posterior `(mean, std)` matching diffusers
+    /// `OobleckDiagonalGaussianDistribution` (`scale = raw[:, C:]`, `std = softplus(scale)+1e-4`).
+    pub fn encode_dist(&self, audio: &Tensor) -> candle_core::Result<(Tensor, Tensor)> {
+        let x = self.encode_raw(audio)?;
+        let c = self.config.decoder_input_channels;
+        let mean = x.narrow(1, 0, c)?;
+        let scale = x.narrow(1, c, c)?;
+        let std = ((scale.exp()? + 1.0)?.log()? + 1e-4)?;
+        Ok((mean, std))
+    }
+
+    /// Deterministic VAE encode (uses the distribution mean).
+    pub fn encode(&self, audio: &Tensor) -> candle_core::Result<Tensor> {
+        Ok(self.encode_dist(audio)?.0)
+    }
+
+    /// Memory-bounded tiled encode (overlap-discard) on the waveform.
+    pub fn encode_tiled(
+        &self,
+        audio: &Tensor,
+        core_latent: usize,
+        overlap_latent: usize,
+    ) -> candle_core::Result<Tensor> {
+        let ratio = self.samples_per_frame();
+        let n = audio.dim(2)?;
+        let core = core_latent * ratio;
+        let overlap = overlap_latent * ratio;
+        if n <= core + 2 * overlap {
+            return self.encode(audio);
+        }
+        let mut pieces: Vec<Tensor> = Vec::new();
+        let mut core_start = 0usize;
+        while core_start < n {
+            let core_end = (core_start + core).min(n);
+            let left = core_start.saturating_sub(overlap);
+            let right = (core_end + overlap).min(n);
+            let chunk = audio.narrow(2, left, right - left)?;
+            let lat = self.encode(&chunk)?;
+            let skip = (core_start - left) / ratio;
+            let take = (core_end - core_start) / ratio;
+            pieces.push(lat.narrow(2, skip, take)?);
+            core_start = core_end;
+        }
+        Tensor::cat(&pieces, 2)
     }
 
     /// Output samples per latent frame (product of the downsampling ratios, e.g. 1920).

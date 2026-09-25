@@ -27,6 +27,8 @@
    - [ControlNet (Canny Edge)](#controlnet-canny-edge)
    - [Audio-to-Text & Speech Transcription (Whisper Turbo)](#audio-to-text--speech-transcription-whisper)
    - [Text-to-Audio & Sound Diffusion (Stable Audio Open)](#text-to-audio--sound-diffusion-stable-audio-open)
+   - [Text-to-Music (ACE-Step 1.5 — Turbo / Base / XL)](#text-to-music-ace-step-15--turbo--base--xl)
+   - [Music Editing & Source-Audio Tasks (Cover / Repaint / Extract / Lego / Complete)](#music-editing--source-audio-tasks-cover--repaint--extract--lego--complete)
    - [Text-to-Speech (TTS / Parler-TTS & Kokoro-82M)](#text-to-speech-tts--parler-tts--kokoro-82m)
 5. [REST API & WebSocket Server Reference](#5-rest-api--websocket-server-reference)
    - [Endpoints & JSON Payload Schema](#endpoints--json-payload-schema)
@@ -1054,6 +1056,62 @@ cmd /c '"...\vcvarsall.bat" x64 && cargo run --release --features cuda --bin tes
 
 ---
 
+### Music Editing & Source-Audio Tasks (Cover / Repaint / Extract / Lego / Complete)
+
+The same ACE-Step 1.5 checkpoint drives the **source-audio** tasks through a single
+`TaskRequest`, 100% pure Rust. The pipeline mirrors the reference handler's conditioning:
+task instruction, `Global:/Local:` caption (SFT-stems), `src_latents`, chunk mask, and the
+repaint step-injection + boundary crossfade (validated **bit-exact** against PyTorch).
+
+```rust
+use aurora_rust_engine::pipelines::{AudioDiffusionPipeline, TaskRequest};
+
+let pipeline = AudioDiffusionPipeline::from_pretrained("G:/models/Audio-sft")?;
+
+// Source audio -> [1, 2, N] tensor -> VAE encode -> frame-major latents [1, T, 64].
+let src_latents = pipeline.vae.encode(&audio)?.transpose(1, 2)?.contiguous()?;
+
+let req = TaskRequest::new("extract", &src_latents)   // extract | lego | complete | repaint | cover
+    .with_track_name("vocals")                        // extract / lego
+    .with_caption("warm acoustic pop, guitar, piano, drums, vocals")
+    .with_language("unknown")
+    .with_steps(50)                                   // 50 for Base/SFT, 8 for Turbo
+    .with_guidance_scale(7.0)                         // CFG/APG (ignored by Turbo)
+    .with_seed(42);
+
+let (audio, _metrics) = pipeline.generate_task(&req)?;
+audio.save_auto("vocals.wav")?;
+```
+
+| Task | Instruction | Source handling |
+|---|---|---|
+| `cover` | "Generate audio semantic tokens based on the given conditions:" | melodic/timbral seed (`cover_strength`, `cover_noise_strength`) |
+| `repaint` | "Repaint the mask area based on the given conditions:" | masked region regenerated, boundaries crossfaded (`.with_repaint_span(start, end)`) |
+| `extract` | "Extract the {TRACK} track from the audio:" | isolates one stem |
+| `lego` | "Generate the {TRACK} track based on the audio context:" | adds a stem in context (optional repaint span) |
+| `complete` | "Complete the input track with {CLASSES}:" | fills missing parts (`.with_complete_track_classes(vec![...])`) |
+
+**Key notes**
+
+* **Chunk mask** : `extract`/`lego`/`complete` use the `"auto"` **Mask Control value `2.0`**
+  (`TaskRequest.chunk_mask_value`, default `2.0`). A value of `1.0` produces low-frequency noise.
+  `repaint` uses the explicit `0/1` mask from the repaint span; the `--chunk <v>` CLI flag overrides.
+* **Timbre** : set `.refer_latents = Some(&lat)` (a `reference_audio`); by default the learned
+  silence latent is used (reference parity).
+* **Models** : the **2B** `acestep-v15-base` / `acestep-v15-sft` are recommended. The **XL 5B**
+  (~10 GB bf16) is borderline on a 12 GB GPU.
+* **Sources** : use real music (≥ 30 s); very short or artefact clips can render distorted.
+* **Build** : always compile with `--features cuda` (otherwise CUDA is silently unavailable and the
+  pipeline falls back to CPU/f32).
+
+```powershell
+# CLI: extract a stem
+cargo run --release --features cuda --bin test_acestep_tasks -- `
+  -m G:/models/Audio-sft -t extract --track vocals --src my_song.wav -o vocals.ogg -s 50 -g 7
+```
+
+---
+
 ### Text-to-Speech (TTS / Parler-TTS & Kokoro-82M)
 
 Aurora provides neural speech synthesis pipelines in 100% pure Rust:
@@ -1179,6 +1237,10 @@ Aurora comes with pre-built test and benchmark executables in `src/bin/`:
 | **`test_text_gen`** | `cargo run --release --bin test_text_gen --features cuda "<model.gguf>" "<prompt>"` | **CausalLM Text Generation** (Llama/DeepSeek/Qwen/Gemma/Mistral) |
 | **`test_tts`** | `cargo run --bin test_tts` | **Audio & Neural Text-to-Speech (TTS)** validation harness (WAV + Parler/DAC) |
 | **`test_whisper`** | `cargo run --bin test_whisper` | **Speech-to-Text (STT)** Whisper transcription harness (pure Rust Slaney Mel filterbank) |
+| **`test_audio_diffusion`** | `cargo run --release --features cuda --bin test_audio_diffusion -- --model-dir G:/models/Audio --duration 30 --steps 8` | **Text-to-Music** end-to-end (ACE-Step 1.5 Turbo/Base/XL) |
+| **`test_acestep_tasks`** | `cargo run --release --features cuda --bin test_acestep_tasks -- -m G:/models/Audio-sft -t extract --track vocals --src song.wav -o out.ogg -s 50 -g 7` | **Source-audio tasks** (cover / repaint / extract / lego / complete) |
+| **`test_acestep_cover`** | `cargo run --release --features cuda --bin test_acestep_cover -- --model-dir G:/models/Audio --src song.wav` | Cover task harness (source → VAE → DiT) |
+| **`test_acestep_repaint`** | `cargo run --release --features cuda --bin test_acestep_repaint -- -m G:/models/Audio-base --src song.wav` | Repaint harness (mask + step injection + boundary blend) |
 
 
 ---

@@ -7,7 +7,7 @@ pub mod whisper;
 pub mod z_image_turbo;
 
 pub use audio_diffusion::{
-    AceStepVariant, AudioDiffusionPipeline, AudioGenerationMetrics, TextToMusicRequest,
+    AceStepVariant, AudioDiffusionPipeline, AudioGenerationMetrics, TaskRequest, TextToMusicRequest,
 };
 pub use flux::FluxPipeline;
 pub use sd15::StableDiffusionPipeline;

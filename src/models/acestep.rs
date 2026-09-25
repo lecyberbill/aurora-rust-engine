@@ -321,6 +321,31 @@ pub fn apg_forward(
     guided.to_dtype(orig)
 }
 
+/// Full Flow-Matching configuration (cover / repaint extras). All tensors are `[1, ...]`.
+pub struct FlowMatchConfig<'a> {
+    pub condition: &'a Tensor,
+    pub null_condition: Option<&'a Tensor>,
+    pub condition_non_cover: Option<&'a Tensor>,
+    pub null_condition_non_cover: Option<&'a Tensor>,
+    /// `[1, T, 128] = [src_latents, chunk_mask]`.
+    pub context_latents: &'a Tensor,
+    pub context_latents_non_cover: Option<&'a Tensor>,
+    /// `[1, T, 64]` initial noise.
+    pub noise: &'a Tensor,
+    pub t_schedule: &'a [f64],
+    pub guidance_scale: f32,
+    /// Fraction of steps conditioned on the cover source (1.0 = always).
+    pub cover_strength: f32,
+    /// `> 0` initializes `x_t` from `clean_src` at the nearest timestep.
+    pub cover_noise_strength: f32,
+    /// `[1, T, 64]` clean source latents (repaint / cover init).
+    pub clean_src: Option<&'a Tensor>,
+    /// `[1, T]` repaint mask (True = generate, False = preserve).
+    pub repaint_mask: Option<&'a Tensor>,
+    pub repaint_injection_ratio: f32,
+    pub repaint_crossfade_frames: usize,
+}
+
 /// Single 1D Transformer Layer with Self-Attention, Cross-Attention and AdaLN-Zero
 pub struct AceStepTransformerBlock {
     self_attn: AceStepAttention,
@@ -773,6 +798,143 @@ impl AceStepTransformer1D {
         }
         Ok(xt)
     }
+
+    /// One denoising step: returns the (CFG-guided) velocity `[1, 64, T]`.
+    #[allow(clippy::too_many_arguments)]
+    fn sample_velocity(
+        &self,
+        condition: &Tensor,
+        null_condition: Option<&Tensor>,
+        ctx_t: &Tensor, // [1, 128, T]
+        xt: &Tensor,    // [1, 64, T]
+        t_curr: f64,
+        guidance_scale: f32,
+        momentum: &mut Option<Tensor>,
+    ) -> candle_core::Result<Tensor> {
+        let dev = xt.device();
+        let dt = xt.dtype();
+        if let Some(null) = null_condition {
+            let cond2 = Tensor::cat(&[condition, null], 0)?;
+            let ctx2 = Tensor::cat(&[ctx_t, ctx_t], 0)?;
+            let x2 = Tensor::cat(&[xt, xt], 0)?;
+            let in_latents = Tensor::cat(&[&ctx2, &x2], 1)?;
+            let ts = Tensor::new(&[t_curr as f32, t_curr as f32], dev)?.to_dtype(dt)?;
+            let v = self.forward(&in_latents, &ts, &ts, &cond2)?; // [2, 64, T]
+            let v_t = v.transpose(1, 2)?.contiguous()?; // [2, T, 64]
+            let guided = apg_forward(&v_t.narrow(0, 0, 1)?, &v_t.narrow(0, 1, 1)?, guidance_scale, momentum)?;
+            guided.transpose(1, 2)?.contiguous()
+        } else {
+            let in_latents = Tensor::cat(&[ctx_t, xt], 1)?;
+            let ts = Tensor::new(&[t_curr as f32], dev)?.to_dtype(dt)?;
+            self.forward(&in_latents, &ts, &ts, condition)
+        }
+    }
+
+    /// Generic Flow-Matching Euler sampler (Turbo & Base/XL) with cover / repaint extras.
+    pub fn flow_match(&self, cfg: &FlowMatchConfig) -> candle_core::Result<Tensor> {
+        let mut xt = cfg.noise.transpose(1, 2)?.contiguous()?; // [1,64,T]
+        let noise_t = cfg.noise.transpose(1, 2)?.contiguous()?;
+        let n = cfg.t_schedule.len();
+
+        let src_t = match cfg.clean_src {
+            Some(s) => Some(s.transpose(1, 2)?.contiguous()?),
+            None => None,
+        };
+
+        // Cover-noise initialization: renoise src at the nearest timestep, truncate schedule.
+        let mut start_step = 0usize;
+        if cfg.cover_noise_strength > 0.0 {
+            if let Some(src_t) = &src_t {
+                let eff = 1.0 - cfg.cover_noise_strength as f64;
+                let (idx, t) = cfg
+                    .t_schedule
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| (a.1 - eff).abs().partial_cmp(&(b.1 - eff).abs()).unwrap())
+                    .map(|(i, t)| (i, *t))
+                    .unwrap();
+                xt = ((&noise_t * t)? + (src_t * (1.0 - t))?)?;
+                start_step = idx;
+            }
+        }
+
+        let cover_steps = (n as f64 * cfg.cover_strength as f64) as usize;
+        let mut momentum: Option<Tensor> = None;
+        let mut switched = false;
+        let mut cur_cond = cfg.condition;
+        let mut cur_null = cfg.null_condition;
+        let mut cur_ctx = cfg.context_latents.transpose(1, 2)?.contiguous()?;
+
+        for step in start_step..n {
+            if !switched
+                && step >= cover_steps
+                && cfg.condition_non_cover.is_some()
+                && cfg.context_latents_non_cover.is_some()
+            {
+                switched = true;
+                cur_cond = cfg.condition_non_cover.unwrap();
+                cur_null = cfg.null_condition_non_cover;
+                cur_ctx = cfg.context_latents_non_cover.unwrap().transpose(1, 2)?.contiguous()?;
+                momentum = None;
+            }
+            let t_curr = cfg.t_schedule[step];
+            let dt_step = if step == n - 1 { t_curr } else { t_curr - cfg.t_schedule[step + 1] };
+            let vt = self.sample_velocity(cur_cond, cur_null, &cur_ctx, &xt, t_curr, cfg.guidance_scale, &mut momentum)?;
+            xt = (xt - vt.affine(dt_step, 0.0)?)?;
+
+            // Repaint step injection on the first `injection_cutoff` steps.
+            if let (Some(mask), Some(src_t)) = (cfg.repaint_mask, &src_t) {
+                let cutoff = (cfg.repaint_injection_ratio * n as f32).round() as usize;
+                if step < cutoff {
+                    let t_after = if step == n - 1 { 0.0 } else { cfg.t_schedule[step + 1] };
+                    let zt = ((&noise_t * t_after)? + (src_t * (1.0 - t_after))?)?;
+                    xt = mask_blend(mask, &xt, &zt)?;
+                }
+            }
+        }
+
+        // Final repaint boundary blend (soft crossfade).
+        if let (Some(mask), Some(src_t)) = (cfg.repaint_mask, &src_t) {
+            if cfg.repaint_crossfade_frames > 0 {
+                let soft = soft_repaint_mask(mask, cfg.repaint_crossfade_frames)?
+                    .unsqueeze(1)?
+                    .to_dtype(xt.dtype())?
+                    .broadcast_as(xt.shape())?;
+                let inv = soft.affine(-1.0, 1.0)?;
+                xt = ((xt.broadcast_mul(&soft)? + src_t.broadcast_mul(&inv)?))?;
+            }
+        }
+        Ok(xt)
+    }
+}
+
+/// `xt*mask + zt*(1-mask)` with `mask` broadcast to `xt`.
+fn mask_blend(mask: &Tensor, xt: &Tensor, zt: &Tensor) -> candle_core::Result<Tensor> {
+    let m = mask.to_dtype(xt.dtype())?.unsqueeze(1)?.broadcast_as(xt.shape())?;
+    let inv = m.affine(-1.0, 1.0)?;
+    xt.broadcast_mul(&m)? + zt.broadcast_mul(&inv)?
+}
+
+/// Build a soft repaint mask with linear crossfade ramps at the repaint boundaries.
+fn soft_repaint_mask(mask: &Tensor, crossfade: usize) -> candle_core::Result<Tensor> {
+    let dims = mask.dims().to_vec();
+    let t = *dims.last().unwrap();
+    let m: Vec<f32> = mask.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+    let mut soft = m.clone();
+    let idxs: Vec<usize> = m.iter().enumerate().filter(|(_, &v)| v > 0.5).map(|(i, _)| i).collect();
+    if !idxs.is_empty() && idxs.len() < t {
+        let left = idxs[0];
+        let right = idxs[idxs.len() - 1] + 1;
+        let fs = left.saturating_sub(crossfade);
+        for k in 0..(left - fs) {
+            soft[fs + k] = (k as f32 + 1.0) / ((left - fs) as f32 + 1.0);
+        }
+        let fe = (right + crossfade).min(t);
+        for k in 0..(fe - right) {
+            soft[right + k] = 1.0 - (k as f32 + 1.0) / ((fe - right) as f32 + 1.0);
+        }
+    }
+    Tensor::from_vec(soft, dims, mask.device())
 }
 
 /// Single Lyric Encoder Transformer Layer (2048 hidden, 6144 intermediate, 16 heads)
@@ -947,9 +1109,24 @@ impl AceStepConditionEncoder {
         text_embeds: &Tensor,
         lyric_embeds: &Tensor,
     ) -> candle_core::Result<Tensor> {
+        self.forward_condition_ex(text_embeds, lyric_embeds, None)
+    }
+
+    /// Like [`Self::forward_condition`] but with explicit reference-audio latents for the
+    /// timbre encoder (`None` uses the learned `silence_latent`).
+    pub fn forward_condition_ex(
+        &self,
+        text_embeds: &Tensor,
+        lyric_embeds: &Tensor,
+        refer_latents: Option<&Tensor>,
+    ) -> candle_core::Result<Tensor> {
         let text_p = self.text_projector.forward(text_embeds)?;
         let lyric_e = self.forward_lyrics(lyric_embeds)?;
-        let timbre = self.encode_timbre(&self.silence_latent.narrow(1, 0, Self::TIMBRE_FIX_FRAME)?)?;
+        let ref_lat = match refer_latents {
+            Some(r) => r.clone(),
+            None => self.silence_latent.narrow(1, 0, Self::TIMBRE_FIX_FRAME)?,
+        };
+        let timbre = self.encode_timbre(&ref_lat)?;
         Tensor::cat(&[&lyric_e, &timbre, &text_p], 1)
     }
 
