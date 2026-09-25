@@ -41,7 +41,7 @@ fn main() -> anyhow::Result<()> {
     let mut cover_strength = 1.0f32;
     let mut cover_noise_strength = 0.0f32;
     let mut refer_src = false;
-    let mut chunk_mask_value = 2.0f32;
+    let mut chunk_mask_value = f32::NAN;
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {

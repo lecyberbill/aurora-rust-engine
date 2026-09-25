@@ -101,7 +101,7 @@ Fichiers : `flow_match_euler*` (params `clean_src`, `repaint_mask`, `noise`, rat
 - Bins : `test_acestep_tasks.rs` (`-t extract|lego|complete|repaint|cover --track --classes --repaint-start/end --chunk <v>`).
 - ⚠️ **`chunk_mask` = 2.0** (« auto »/Mask Control) pour extract/lego/complete → **musique** ;
   `1.0` → rumble basse fréquence (centroïde ~150 Hz). Repaint reste en 0/1 explicite.
-  Défaut `TaskRequest.chunk_mask_value = 2.0`.
+  Défaut `TaskRequest.chunk_mask_value = NaN` → résolu par tâche (`cover` 1.0, le reste 2.0).
 - ✅ **Validé à l'oreille** (source 30 s) : `extract`/`lego`/`complete` = vraie musique avec
   **SFT 2B** (`D:/models/Audio-sft`), `base 2B` et `xl-base` (extract OK). Source courte/artefact
   (`codec_original` 6 s) → distordu ; utiliser de vraies chansons.

@@ -1093,9 +1093,10 @@ audio.save_auto("vocals.wav")?;
 
 **Key notes**
 
-* **Chunk mask** : `extract`/`lego`/`complete` use the `"auto"` **Mask Control value `2.0`**
-  (`TaskRequest.chunk_mask_value`, default `2.0`). A value of `1.0` produces low-frequency noise.
-  `repaint` uses the explicit `0/1` mask from the repaint span; the `--chunk <v>` CLI flag overrides.
+* **Chunk mask** : resolved per task when `TaskRequest.chunk_mask_value` is left at its `NaN`
+  default — `cover` → `1.0`, `extract`/`lego`/`complete` → `2.0` (the `"auto"` **Mask Control**
+  value). Setting `1.0` on extract/lego/complete produces low-frequency noise. `repaint` uses the
+  explicit `0/1` mask from the repaint span. `--chunk <v>` / `.with_chunk_mask_value(v)` overrides.
 * **Timbre** : set `.refer_latents = Some(&lat)` (a `reference_audio`); by default the learned
   silence latent is used (reference parity).
 * **Models** : the **2B** `acestep-v15-base` / `acestep-v15-sft` are recommended. The **XL 5B**

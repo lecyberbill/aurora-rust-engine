@@ -111,7 +111,8 @@ pub struct TaskRequest<'a> {
     pub steps: usize,
     pub guidance_scale: f32,
     pub seed: u64,
-    /// Chunk-mask fill value for non-repaint tasks (1.0 = plain, 2.0 = "auto"/Mask Control).
+    /// Chunk-mask fill value for non-repaint tasks. `f32::NAN` (default) resolves per task:
+    /// `cover` → 1.0, `extract`/`lego`/`complete` → 2.0 ("auto"/Mask Control).
     pub chunk_mask_value: f32,
     /// Fraction of steps conditioned on the cover source (1.0 = always).
     pub cover_strength: f32,
@@ -137,8 +138,8 @@ impl<'a> TaskRequest<'a> {
             steps: 8,
             guidance_scale: 1.0,
             seed: 42,
-            // "auto"/Mask Control value used by extract/lego/complete (repaint uses explicit 0/1).
-            chunk_mask_value: 2.0,
+            // `NAN` = resolve per task (cover 1.0; extract/lego/complete 2.0).
+            chunk_mask_value: f32::NAN,
             cover_strength: 1.0,
             cover_noise_strength: 0.0,
         }
@@ -195,6 +196,10 @@ impl<'a> TaskRequest<'a> {
     }
     pub fn with_cover_noise_strength(mut self, cover_noise_strength: f32) -> Self {
         self.cover_noise_strength = cover_noise_strength;
+        self
+    }
+    pub fn with_chunk_mask_value(mut self, chunk_mask_value: f32) -> Self {
+        self.chunk_mask_value = chunk_mask_value;
         self
     }
 }
@@ -473,9 +478,18 @@ impl AudioDiffusionPipeline {
 
         let src = req.src_latents.to_dtype(self.dtype)?;
         let mut src_task_vec: Vec<f32> = src.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
-        // `chunk_mask`: explicit 0/1 for repaint; all-ones (boolean `True` in the
-        // reference, the "auto" mode 2.0 is a no-op on a bool tensor) otherwise.
-        let mut chunk_vec = vec![req.chunk_mask_value; num_frames];
+        // `chunk_mask`: explicit 0/1 for repaint; `cover` → 1.0; `extract`/`lego`/`complete` → 2.0
+        // ("auto"/Mask Control). A non-NaN `chunk_mask_value` overrides the per-task default.
+        let chunk_value = if req.chunk_mask_value.is_nan() {
+            if task == acestep_tasks::AceStepTask::Cover {
+                1.0
+            } else {
+                2.0
+            }
+        } else {
+            req.chunk_mask_value
+        };
+        let mut chunk_vec = vec![chunk_value; num_frames];
         let repaint_mask = if let Some((sl, el)) = span {
             let mut rm = vec![0.0f32; num_frames];
             for k in sl..el {
