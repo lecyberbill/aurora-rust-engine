@@ -1,6 +1,7 @@
 // [WFGY] Zone: SAFE | λ: 0.10 | Fallbacks: 0 | Action: Audio Subsystem Module Definition
 
 pub mod encode;
+pub mod encodec;
 pub mod mel;
 pub mod rng;
 pub mod vae_oobleck;
