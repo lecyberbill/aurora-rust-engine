@@ -1,5 +1,6 @@
 pub mod audio_diffusion;
 pub mod flux;
+pub mod musicgen;
 pub mod sd15;
 pub mod sdxl;
 pub mod stable_audio;
@@ -11,6 +12,7 @@ pub use audio_diffusion::{
     AceStepVariant, AudioDiffusionPipeline, AudioGenerationMetrics, TaskRequest, TextToMusicRequest,
 };
 pub use flux::FluxPipeline;
+pub use musicgen::MusicgenPipeline;
 pub use sd15::StableDiffusionPipeline;
 pub use sdxl::StableDiffusionXLPipeline;
 pub use stable_audio::StableAudioPipeline;

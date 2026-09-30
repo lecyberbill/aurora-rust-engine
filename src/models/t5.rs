@@ -232,6 +232,21 @@ pub struct T5Encoder {
 impl T5Encoder {
     pub fn from_safetensors<P: AsRef<Path>>(path: P, device: &Device, dtype: DType) -> Result<Self> {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path.as_ref()], dtype, device)? };
+        Self::load(vb, device, dtype)
+    }
+
+    /// Like [`Self::from_safetensors`] but under a key `prefix` (e.g. `"text_encoder"` for MusicGen).
+    pub fn from_safetensors_prefix<P: AsRef<Path>>(
+        path: P,
+        prefix: &str,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Self> {
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path.as_ref()], dtype, device)? };
+        Self::load(vb.pp(prefix), device, dtype)
+    }
+
+    pub fn load(vb: VarBuilder, device: &Device, dtype: DType) -> Result<Self> {
         let shared = vb.get((32128, D_MODEL), "shared.weight")?;
         let mut blocks = Vec::with_capacity(NUM_LAYERS);
         for i in 0..NUM_LAYERS {
