@@ -16,6 +16,7 @@ pub mod common;
 pub mod config;
 pub mod descriptor;
 pub mod image;
+pub mod moonshine;
 pub mod registry;
 pub mod stable_audio;
 pub mod stable_audio_dit;
@@ -38,5 +39,6 @@ pub use descriptor::{
     ResolvedModel, TextEncoderConfig, TextEncoderSpec,
 };
 pub use image::DiffusionModel;
+pub use moonshine::MoonshineModel;
 pub use registry::ModelRegistry;
 pub use text::TextModel;
