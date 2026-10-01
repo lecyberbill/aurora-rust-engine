@@ -44,9 +44,19 @@ fn main() -> anyhow::Result<()> {
     let archive = Arc::new(SafeTensorsArchive::open(&aio_path)?);
     let keys: Vec<String> = archive.keys().map(|k| k.to_string()).collect();
     println!("🔑 Total keys: {}", keys.len());
-    println!("📋 Non-block keys in archive:");
-    for k in keys.iter().filter(|k| !k.starts_with("blocks.") && !k.starts_with("model.diffusion_model.blocks.")) {
-        println!("   • {}", k);
+    println!("📋 Tensor shapes for sample keys:");
+    let sample_keys = [
+        "first.weight", "first.bias", "tmlp.0.weight", "tmlp.0.bias", "tmlp.2.weight", "tmlp.2.bias",
+        "txtmlp.0.scale", "txtmlp.1.weight", "txtmlp.3.weight",
+        "blocks.0.prenorm.scale", "blocks.0.attn.gate.weight", "blocks.0.attn.wq.weight",
+        "blocks.0.attn.wo.weight", "blocks.0.mlp.gate.weight", "blocks.0.mlp.up.weight", "blocks.0.mlp.down.weight",
+        "txtfusion.layerwise_blocks.0.prenorm.scale", "txtfusion.refiner_blocks.0.prenorm.scale",
+        "last.linear.weight", "last.norm.scale", "last.modulation.lin"
+    ];
+    for &k in &sample_keys {
+        if let Ok(t) = archive.get_tensor(k, &device, dtype) {
+            println!("   • {:<42} shape={:?}", k, t.dims());
+        }
     }
 
     // 1. Probe Text Encoder (if embedded)
