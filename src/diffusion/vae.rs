@@ -309,17 +309,29 @@ impl FastLatentPreviewer {
             latent.clone()
         };
 
-        let (_c, h, w) = latent.dims3()?;
-        let weights_data = [
-            0.298f32, 0.207f32, 0.208f32, -0.040f32,
-            0.224f32, 0.232f32, -0.279f32, 0.045f32,
-            0.179f32, -0.341f32, 0.138f32, 0.098f32,
-        ];
+        let (c, h, w) = latent.dims3()?;
+        let weight_tensor = if c == 4 {
+            let weights_data = [
+                0.298f32, 0.207f32, 0.208f32, -0.040f32,
+                0.224f32, 0.232f32, -0.279f32, 0.045f32,
+                0.179f32, -0.341f32, 0.138f32, 0.098f32,
+            ];
+            Tensor::from_slice(&weights_data, (3, 4), latent.device())?
+        } else if c == 16 {
+            // 16-channel Flux / Z-Image / Krea2 latent preview projection (3, 16)
+            let mut weights_data = vec![0.0f32; 3 * 16];
+            weights_data[0] = 0.35; weights_data[1] = 0.25; weights_data[2] = 0.15;
+            weights_data[16 + 0] = 0.25; weights_data[16 + 1] = 0.35; weights_data[16 + 2] = -0.15;
+            weights_data[32 + 0] = 0.15; weights_data[32 + 1] = -0.25; weights_data[32 + 2] = 0.35;
+            Tensor::from_vec(weights_data, (3, 16), latent.device())?
+        } else {
+            // Generic N-channel fallback: extract first 3 channels
+            let first3 = latent.narrow(0, 0, 3.min(c))?;
+            return tensor_to_rgb_image(&first3);
+        };
 
-        let weight_tensor = Tensor::from_slice(&weights_data, (3, 4), latent.device())?
-            .to_dtype(latent.dtype())?;
-
-        let latent_flat = latent.reshape((4, h * w))?;
+        let weight_tensor = weight_tensor.to_dtype(latent.dtype())?;
+        let latent_flat = latent.reshape((c, h * w))?;
         let rgb_flat = weight_tensor.matmul(&latent_flat)?;
         let rgb_chw = rgb_flat.reshape((3, h, w))?;
 

@@ -108,6 +108,12 @@ mod tests {
         let img = FastLatentPreviewer::preview_latent(&dummy_latent).unwrap();
         assert_eq!(img.width(), 32);
         assert_eq!(img.height(), 32);
+
+        // Test 16-channel latent preview for Flux / Z-Image / Krea2
+        let dummy_latent_16 = Tensor::randn(0.0f32, 1.0f32, (1, 16, 128, 128), &device).unwrap();
+        let img_16 = FastLatentPreviewer::preview_latent(&dummy_latent_16).unwrap();
+        assert_eq!(img_16.width(), 128);
+        assert_eq!(img_16.height(), 128);
     }
 
     #[test]
