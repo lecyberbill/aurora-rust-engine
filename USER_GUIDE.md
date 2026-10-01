@@ -26,7 +26,9 @@
    - [Hot LoRA Merging](#hot-lora-merging)
    - [ControlNet (Canny Edge)](#controlnet-canny-edge)
    - [Audio-to-Text & Speech Transcription (Whisper Turbo)](#audio-to-text--speech-transcription-whisper)
-   - [Text-to-Audio & Sound Diffusion (Stable Audio Open)](#text-to-audio--sound-diffusion-stable-audio-open)
+   - [Speech-to-Text — Moonshine (lightweight, pure Rust)](#speech-to-text--moonshine-lightweight-pure-rust)
+   - [Text-to-Audio & Sound Design (Stable Audio Open)](#text-to-audio--sound-design-stable-audio-open)
+   - [Text-to-Music — MusicGen (Meta, pure Rust)](#text-to-music--musicgen-meta-pure-rust)
    - [Text-to-Music (ACE-Step 1.5 — Turbo / Base / XL)](#text-to-music-ace-step-15--turbo--base--xl)
    - [Music Editing & Source-Audio Tasks (Cover / Repaint / Extract / Lego / Complete)](#music-editing--source-audio-tasks-cover--repaint--extract--lego--complete)
    - [Text-to-Speech (TTS / Parler-TTS & Kokoro-82M)](#text-to-speech-tts--parler-tts--kokoro-82m)
@@ -980,6 +982,21 @@ println!("Duration: {:.2}s (processed in {:.1}ms)", result.duration_seconds, res
 
 ---
 
+### Speech-to-Text — Moonshine (lightweight, pure Rust)
+
+Pure-Rust port of **Moonshine** (tiny/base) — a small encoder-decoder ASR model, a fast alternative
+to Whisper for short utterances. Conv audio frontend (tanh / GroupNorm / GELU) → 6-layer encoder
+with **partial interleaved RoPE** → 6-layer decoder (causal self + cross attention, gated MLP),
+tied embeddings, greedy decode. Validated vs `transformers`: encoder **6.9e-6**, token ids identical.
+
+```powershell
+# CLI: transcribe a WAV (any sample rate; resampled to 16 kHz mono)
+cargo run --release --features cuda --bin test_moonshine -- `
+  -m G:/models/moonshine-tiny -w voice_recording.wav
+```
+
+---
+
 ### Text-to-Audio & Sound Design (Stable Audio Open)
 
 Pure-Rust port of **Stable Audio Open 1.0** — music, ambient soundscapes and foley at **44.1 kHz
@@ -1020,6 +1037,22 @@ audio.save_auto("lofi.ogg")?;
 cargo run --release --features cuda --bin test_stable_audio -- `
   -m G:/models/Audio/stable-audio-open-models `
   -p "Lo-fi hip hop beat, chillhop, 80 bpm, mellow piano, vinyl crackle" -d 20 -s 100 -g 7 -o lofi.ogg
+```
+
+---
+
+### Text-to-Music — MusicGen (Meta, pure Rust)
+
+Pure-Rust port of **MusicGen-small**. A **T5-base** prompt encoder → `enc_to_dec_proj` → an
+**autoregressive decoder** (24 layers × 1024, learned position table, summed per-codebook token
+embeddings, 4 LM heads) generating **4 EnCodec codebooks** with the MusicGen **delay pattern**
+(CFG) → **EnCodec 32 kHz** decoder (weight-norm conv/convT + LSTM bottleneck + residual blocks).
+Modules validated vs `transformers`: EnCodec **1.9e-6**, decoder logits **5e-4**.
+
+```powershell
+cargo run --release --features cuda --bin test_musicgen -- `
+  -m D:/models/musicgen-small `
+  -p "lo-fi hip hop beat, mellow piano, vinyl crackle, 80 bpm" -f 250 -g 3 -o lofi.ogg
 ```
 
 ---

@@ -554,8 +554,9 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
   - Pure Rust Mel-filterbank spectrogram extraction (128 Mel bins, 16kHz audio sampling, dynamic padding) — `src/audio/mel.rs`.
   - Encoder-Decoder autoregressive cross-attention loop with Greedy & Beam Search decoding (bit-exact vs reference).
   - Multilingual transcription, automatic language identification, and word-level timestamp alignment.
-- [ ] **Moonshine Real-Time Streaming STT (`src/models/audio/moonshine.rs`)**:
-  - Sub-50ms on-device audio transcription designed for live microphone streams without chunking latency.
+- [x] **Moonshine STT (`src/models/moonshine.rs`)**:
+  - Conv audio frontend (tanh/GroupNorm/GELU) + 6-layer encoder (partial interleaved RoPE) + 6-layer decoder (causal self + cross attention, gated MLP), tied embeddings, greedy decode.
+  - Validated vs `transformers`: encoder **6.9e-6**, token ids identical; `test_moonshine` CLI. (Streaming/mic variant still TODO.)
 - [ ] **Unified Trait Integration (`AudioTranscriptionModel`)**:
   - Clean facade: `AutoModel::from_pretrained("openai/whisper-large-v3-turbo")` yielding a `transcribe(audio_bytes) -> Transcript` API.
 
@@ -574,7 +575,7 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
     `Global:/Local:/Mask Control:` captions; **low-VRAM** loader (encoders on CPU) fits 5B XL on 12 GB.
   - Deterministic seeded RNG and native **WAV / OGG Vorbis / MP3** export.
 - [x] **Stable Audio Open 1.0** (`src/pipelines/stable_audio.rs`, `src/models/stable_audio*.rs`, `src/models/t5.rs`): T5-base + Fourier timing conditioners + DiT `continuous_transformer` (24×1536, GQA, partial RoPE) + EDM/SDE DPM-Solver++ + Oobleck 44.1 kHz VAE. Modules validated vs diffusers (projection bit-exact, VAE 6.7e-6, DiT 3.6e-4, scheduler 1e-6).
-- [ ] **MusicGen Autoregressive Music Engine**: Multi-codebook EnCodec generation for melodic and harmonic music generation.
+- [x] **MusicGen (`src/pipelines/musicgen.rs`, `src/models/musicgen.rs`, `src/audio/encodec.rs`)**: T5-base prompt → `enc_to_dec_proj` → 24-layer AR decoder (learned positions, 4 LM heads) with the MusicGen **delay pattern** (CFG) → **EnCodec 32 kHz** decoder (weight-norm conv/convT + LSTM + residual blocks). Validated vs `transformers`: EnCodec 1.9e-6, decoder logits 5e-4; `test_musicgen` CLI.
 
 ---
 

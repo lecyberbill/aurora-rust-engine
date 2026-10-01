@@ -155,20 +155,21 @@ impl MusicgenDecoder {
 
     /// `input_ids` `[1, 4, L]`, `enc` `[1, S, 1024]` → logits `[1, 4, L, 2048]`.
     pub fn forward(&self, input_ids: &Tensor, enc: &Tensor) -> candle_core::Result<Tensor> {
+        let b = input_ids.dim(0)?;
         let l = input_ids.dim(2)?;
         let mut hidden: Option<Tensor> = None;
         for cb in 0..N_CODEBOOKS {
-            let idx = input_ids.narrow(1, cb, 1)?.squeeze(1)?; // [1,L]
+            let idx = input_ids.narrow(1, cb, 1)?.squeeze(1)?; // [B,L]
             let e = self.embed_tokens[cb]
                 .index_select(&idx.flatten_all()?.contiguous()?, 0)?
-                .reshape((1, l, HIDDEN))?;
+                .reshape((b, l, HIDDEN))?;
             hidden = Some(match hidden {
                 None => e,
                 Some(h) => (h + e)?,
             });
         }
         let pos = self.embed_positions.narrow(0, 0, l)?.unsqueeze(0)?; // [1,L,1024]
-        let mut h = (hidden.unwrap() + pos)?;
+        let mut h = hidden.unwrap().broadcast_add(&pos)?;
         for layer in &self.layers {
             h = layer.forward(&h, enc)?;
         }
