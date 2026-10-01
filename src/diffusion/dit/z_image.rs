@@ -41,7 +41,7 @@ fn linear_or_no_bias(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Li
         .or_else(|_| candle_nn::linear_no_bias(in_dim, out_dim, vb))
 }
 
-/// SwiGLU Feed-Forward Network for Z-Image
+/// SwiGLU Feed-Forward Network for Z-Image / Krea2
 #[derive(Debug, Clone)]
 pub struct ZImageFeedForward {
     w1: Linear,
@@ -51,9 +51,12 @@ pub struct ZImageFeedForward {
 
 impl ZImageFeedForward {
     pub fn new(hidden_size: usize, intermediate_dim: usize, vb: VarBuilder) -> Result<Self> {
-        let w1 = linear_or_no_bias(hidden_size, intermediate_dim, vb.pp("w1"))?;
-        let w2 = linear_or_no_bias(intermediate_dim, hidden_size, vb.pp("w2"))?;
-        let w3 = linear_or_no_bias(hidden_size, intermediate_dim, vb.pp("w3"))?;
+        let w1 = linear_or_no_bias(hidden_size, intermediate_dim, vb.pp("w1"))
+            .or_else(|_| linear_or_no_bias(hidden_size, intermediate_dim, vb.pp("gate")))?;
+        let w2 = linear_or_no_bias(intermediate_dim, hidden_size, vb.pp("w2"))
+            .or_else(|_| linear_or_no_bias(intermediate_dim, hidden_size, vb.pp("down")))?;
+        let w3 = linear_or_no_bias(hidden_size, intermediate_dim, vb.pp("w3"))
+            .or_else(|_| linear_or_no_bias(hidden_size, intermediate_dim, vb.pp("up")))?;
         Ok(Self { w1, w2, w3 })
     }
 
@@ -66,10 +69,16 @@ impl ZImageFeedForward {
     }
 }
 
-/// Self-Attention with QK-Norm & RoPE for Z-Image
+#[derive(Debug, Clone)]
+pub enum ZImageQkv {
+    Merged(Linear),
+    Separate { wq: Linear, wk: Linear, wv: Linear },
+}
+
+/// Self-Attention with QK-Norm & RoPE for Z-Image / Krea2
 #[derive(Debug, Clone)]
 pub struct ZImageAttention {
-    qkv: Linear,
+    qkv: ZImageQkv,
     out: Linear,
     q_norm: RMSNorm,
     k_norm: RMSNorm,
@@ -80,10 +89,21 @@ pub struct ZImageAttention {
 
 impl ZImageAttention {
     pub fn new(hidden_size: usize, num_heads: usize, head_dim: usize, vb: VarBuilder) -> Result<Self> {
-        let qkv = linear_or_no_bias(hidden_size, hidden_size * 3, vb.pp("qkv"))?;
-        let out = linear_or_no_bias(hidden_size, hidden_size, vb.pp("out"))?;
-        let q_norm = RMSNorm::new(head_dim, vb.pp("q_norm"))?;
-        let k_norm = RMSNorm::new(head_dim, vb.pp("k_norm"))?;
+        let qkv = if let Ok(merged) = linear_or_no_bias(hidden_size, hidden_size * 3, vb.pp("qkv")) {
+            ZImageQkv::Merged(merged)
+        } else {
+            let wq = linear_or_no_bias(hidden_size, hidden_size, vb.pp("wq"))?;
+            let wk = linear_or_no_bias(hidden_size, hidden_size, vb.pp("wk"))?;
+            let wv = linear_or_no_bias(hidden_size, hidden_size, vb.pp("wv"))?;
+            ZImageQkv::Separate { wq, wk, wv }
+        };
+
+        let out = linear_or_no_bias(hidden_size, hidden_size, vb.pp("out"))
+            .or_else(|_| linear_or_no_bias(hidden_size, hidden_size, vb.pp("wo")))?;
+        let q_norm = RMSNorm::new(head_dim, vb.pp("q_norm"))
+            .or_else(|_| RMSNorm::new(head_dim, vb.pp("qknorm.qnorm")))?;
+        let k_norm = RMSNorm::new(head_dim, vb.pp("k_norm"))
+            .or_else(|_| RMSNorm::new(head_dim, vb.pp("qknorm.knorm")))?;
         let scale = 1.0 / (head_dim as f64).sqrt();
 
         Ok(Self {
@@ -105,14 +125,30 @@ impl ZImageAttention {
         let (b, seq_len, _hidden) = x.dims3()?;
         let orig_dtype = x.dtype();
 
-        let qkv = self.qkv.forward(x)?;
-        let chunks = qkv.chunk(3, 2)?;
-        let mut q = chunks[0].reshape((b, seq_len, self.num_heads, self.head_dim))?;
-        let mut k = chunks[1].reshape((b, seq_len, self.num_heads, self.head_dim))?;
-        let v = chunks[2].reshape((b, seq_len, self.num_heads, self.head_dim))?;
+        let (q_raw, k_raw, v) = match &self.qkv {
+            ZImageQkv::Merged(linear) => {
+                let qkv = linear.forward(x)?;
+                let chunks = qkv.chunk(3, 2)?;
+                (
+                    chunks[0].reshape((b, seq_len, self.num_heads, self.head_dim))?,
+                    chunks[1].reshape((b, seq_len, self.num_heads, self.head_dim))?,
+                    chunks[2].reshape((b, seq_len, self.num_heads, self.head_dim))?,
+                )
+            }
+            ZImageQkv::Separate { wq, wk, wv } => {
+                let q_proj = wq.forward(x)?;
+                let k_proj = wk.forward(x)?;
+                let v_proj = wv.forward(x)?;
+                (
+                    q_proj.reshape((b, seq_len, self.num_heads, self.head_dim))?,
+                    k_proj.reshape((b, seq_len, self.num_heads, self.head_dim))?,
+                    v_proj.reshape((b, seq_len, self.num_heads, self.head_dim))?,
+                )
+            }
+        };
 
-        q = self.q_norm.forward(&q)?;
-        k = self.k_norm.forward(&k)?;
+        let mut q = self.q_norm.forward(&q_raw)?;
+        let mut k = self.k_norm.forward(&k_raw)?;
 
         // Apply RoPE if provided
         if let Some((cos, sin)) = rotary_cos_sin {
@@ -190,14 +226,20 @@ pub struct ZImageBlock {
 
 impl ZImageBlock {
     pub fn new(cfg: &ZImageConfig, vb: VarBuilder) -> Result<Self> {
-        // adaLN_modulation: [15360, 256] -> 4 * 3840 = 15360 (shift_attn, scale_attn, gate_attn / ffn modulation)
-        let ada_ln = linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("adaLN_modulation.0"))?;
-        let attention_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm1"))?;
-        let attention = ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.head_dim, vb.pp("attention"))?;
-        let attention_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm2"))?;
-        let ffn_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm1"))?;
-        let feed_forward = ZImageFeedForward::new(cfg.hidden_size, cfg.intermediate_dim, vb.pp("feed_forward"))?;
-        let ffn_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm2"))?;
+        let ada_ln = linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("adaLN_modulation.0"))
+            .or_else(|_| linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("attn.gate")))?;
+        let attention_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm1"))
+            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("prenorm")))?;
+        let attention = ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.head_dim, vb.pp("attention"))
+            .or_else(|_| ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.head_dim, vb.pp("attn")))?;
+        let attention_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm2"))
+            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("postnorm")))?;
+        let ffn_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm1"))
+            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("prenorm")))?;
+        let feed_forward = ZImageFeedForward::new(cfg.hidden_size, cfg.intermediate_dim, vb.pp("feed_forward"))
+            .or_else(|_| ZImageFeedForward::new(cfg.hidden_size, cfg.intermediate_dim, vb.pp("mlp")))?;
+        let ffn_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm2"))
+            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("postnorm")))?;
 
         Ok(Self {
             ada_ln,
@@ -263,16 +305,25 @@ pub struct ZImageRefinerBlock {
 impl ZImageRefinerBlock {
     pub fn new(cfg: &ZImageConfig, vb: VarBuilder, has_adaln: bool) -> Result<Self> {
         let ada_ln = if has_adaln {
-            Some(linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("adaLN_modulation.0"))?)
+            Some(
+                linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("adaLN_modulation.0"))
+                    .or_else(|_| linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("attn.gate")))?
+            )
         } else {
             None
         };
-        let attention_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm1"))?;
-        let attention = ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.head_dim, vb.pp("attention"))?;
-        let attention_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm2"))?;
-        let ffn_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm1"))?;
-        let feed_forward = ZImageFeedForward::new(cfg.hidden_size, cfg.intermediate_dim, vb.pp("feed_forward"))?;
-        let ffn_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm2"))?;
+        let attention_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm1"))
+            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("prenorm")))?;
+        let attention = ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.head_dim, vb.pp("attention"))
+            .or_else(|_| ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.head_dim, vb.pp("attn")))?;
+        let attention_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm2"))
+            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("postnorm")))?;
+        let ffn_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm1"))
+            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("prenorm")))?;
+        let feed_forward = ZImageFeedForward::new(cfg.hidden_size, cfg.intermediate_dim, vb.pp("feed_forward"))
+            .or_else(|_| ZImageFeedForward::new(cfg.hidden_size, cfg.intermediate_dim, vb.pp("mlp")))?;
+        let ffn_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm2"))
+            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("postnorm")))?;
 
         Ok(Self {
             ada_ln,
@@ -342,8 +393,10 @@ pub struct ZImageTimestepEmbedder {
 
 impl ZImageTimestepEmbedder {
     pub fn new(vb: VarBuilder) -> Result<Self> {
-        let mlp_0 = linear(256, 1024, vb.pp("mlp.0"))?;
-        let mlp_2 = linear(1024, 256, vb.pp("mlp.2"))?;
+        let mlp_0 = linear(256, 1024, vb.pp("mlp.0"))
+            .or_else(|_| linear(256, 1024, vb.pp("0")))?;
+        let mlp_2 = linear(1024, 256, vb.pp("mlp.2"))
+            .or_else(|_| linear(1024, 256, vb.pp("2")))?;
         Ok(Self {
             mlp_0,
             mlp_2,
@@ -391,8 +444,10 @@ pub struct ZImageCaptionEmbedder {
 
 impl ZImageCaptionEmbedder {
     pub fn new(cfg: &ZImageConfig, vb: VarBuilder) -> Result<Self> {
-        let norm = RMSNorm::new(cfg.cap_dim, vb.pp("cap_embedder.0"))?;
-        let proj = linear(cfg.cap_dim, cfg.hidden_size, vb.pp("cap_embedder.1"))?;
+        let norm = RMSNorm::new(cfg.cap_dim, vb.pp("cap_embedder.0"))
+            .or_else(|_| RMSNorm::new(cfg.cap_dim, vb.pp("txtmlp.0")))?;
+        let proj = linear(cfg.cap_dim, cfg.hidden_size, vb.pp("cap_embedder.1"))
+            .or_else(|_| linear(cfg.cap_dim, cfg.hidden_size, vb.pp("txtmlp.1")))?;
         Ok(Self { norm, proj })
     }
 
@@ -412,7 +467,8 @@ pub struct ZImageFinalLayer {
 
 impl ZImageFinalLayer {
     pub fn new(cfg: &ZImageConfig, vb: VarBuilder) -> Result<Self> {
-        let ada_ln = linear(cfg.time_embed_dim, cfg.hidden_size, vb.pp("adaLN_modulation.1"))?;
+        let ada_ln = linear(cfg.time_embed_dim, cfg.hidden_size, vb.pp("adaLN_modulation.1"))
+            .or_else(|_| linear(cfg.time_embed_dim, cfg.hidden_size, vb.pp("modulation.lin")))?;
         let linear = linear(cfg.hidden_size, cfg.out_channels, vb.pp("linear"))?;
         Ok(Self { ada_ln, linear })
     }
@@ -447,31 +503,41 @@ pub struct ZImageTransformer {
 
 impl ZImageTransformer {
     pub fn new(cfg: ZImageConfig, vb: VarBuilder) -> Result<Self> {
-        let x_embedder = linear(cfg.in_channels, cfg.hidden_size, vb.pp("x_embedder"))?;
-        let x_pad_token = vb.get((1, cfg.hidden_size), "x_pad_token")?;
-        let cap_pad_token = vb.get((1, cfg.hidden_size), "cap_pad_token")?;
-        let t_embedder = ZImageTimestepEmbedder::new(vb.pp("t_embedder"))?;
+        let x_embedder = linear(cfg.in_channels, cfg.hidden_size, vb.pp("x_embedder"))
+            .or_else(|_| linear(cfg.in_channels, cfg.hidden_size, vb.pp("first")))?;
+        let x_pad_token = vb.get((1, cfg.hidden_size), "x_pad_token")
+            .unwrap_or_else(|_| Tensor::zeros((1, cfg.hidden_size), vb.dtype(), vb.device()).unwrap());
+        let cap_pad_token = vb.get((1, cfg.hidden_size), "cap_pad_token")
+            .unwrap_or_else(|_| Tensor::zeros((1, cfg.hidden_size), vb.dtype(), vb.device()).unwrap());
+        let t_embedder = ZImageTimestepEmbedder::new(vb.pp("t_embedder"))
+            .or_else(|_| ZImageTimestepEmbedder::new(vb.pp("tmlp")))?;
         let cap_embedder = ZImageCaptionEmbedder::new(&cfg, vb.clone())?;
 
         let mut context_refiner = Vec::with_capacity(2);
         for i in 0..2 {
-            let refiner = ZImageRefinerBlock::new(&cfg, vb.pp(format!("context_refiner.{}", i)), false)?;
-            context_refiner.push(refiner);
+            if let Ok(refiner) = ZImageRefinerBlock::new(&cfg, vb.pp(format!("context_refiner.{}", i)), false) {
+                context_refiner.push(refiner);
+            } else if let Ok(refiner) = ZImageRefinerBlock::new(&cfg, vb.pp(format!("txtfusion.refiner_blocks.{}", i)), false) {
+                context_refiner.push(refiner);
+            }
         }
 
         let mut layers = Vec::with_capacity(cfg.num_layers);
         for i in 0..cfg.num_layers {
-            let layer = ZImageBlock::new(&cfg, vb.pp(format!("layers.{}", i)))?;
+            let layer = ZImageBlock::new(&cfg, vb.pp(format!("layers.{}", i)))
+                .or_else(|_| ZImageBlock::new(&cfg, vb.pp(format!("blocks.{}", i))))?;
             layers.push(layer);
         }
 
         let mut noise_refiner = Vec::with_capacity(2);
         for i in 0..2 {
-            let refiner = ZImageRefinerBlock::new(&cfg, vb.pp(format!("noise_refiner.{}", i)), true)?;
-            noise_refiner.push(refiner);
+            if let Ok(refiner) = ZImageRefinerBlock::new(&cfg, vb.pp(format!("noise_refiner.{}", i)), true) {
+                noise_refiner.push(refiner);
+            }
         }
 
-        let final_layer = ZImageFinalLayer::new(&cfg, vb.pp("final_layer"))?;
+        let final_layer = ZImageFinalLayer::new(&cfg, vb.pp("final_layer"))
+            .or_else(|_| ZImageFinalLayer::new(&cfg, vb.pp("last")))?;
 
         Ok(Self {
             config: cfg,
