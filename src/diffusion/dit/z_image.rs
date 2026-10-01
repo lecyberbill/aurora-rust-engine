@@ -264,7 +264,7 @@ impl KreaAttention {
         // Scaled dot-product attention
         let q_scaled = (q * self.scale)?;
         let scores = q_scaled.matmul(&k.transpose(2, 3)?)?;
-        let weights = candle_nn::ops::softmax_last_dim(&scores)?;
+        let weights = crate::device::softmax_last_dim(&scores)?;
         let attn_out = weights.matmul(&v)?; // [B, H, L, D]
         let out_seq = attn_out.transpose(1, 2)?.contiguous()?.reshape((b, l, self.heads * self.head_dim))?;
         let gated_out = (out_seq * gate)?;
