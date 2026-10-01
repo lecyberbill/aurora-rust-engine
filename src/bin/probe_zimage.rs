@@ -44,8 +44,8 @@ fn main() -> anyhow::Result<()> {
     let archive = Arc::new(SafeTensorsArchive::open(&aio_path)?);
     let keys: Vec<String> = archive.keys().map(|k| k.to_string()).collect();
     println!("🔑 Total keys: {}", keys.len());
-    println!("📋 First 30 keys:");
-    for k in keys.iter().take(30) {
+    println!("📋 Non-block keys in archive:");
+    for k in keys.iter().filter(|k| !k.starts_with("blocks.") && !k.starts_with("model.diffusion_model.blocks.")) {
         println!("   • {}", k);
     }
 
