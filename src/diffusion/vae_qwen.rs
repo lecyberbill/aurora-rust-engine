@@ -36,14 +36,12 @@ impl VaeRMSNorm {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let orig_dtype = x.dtype();
         let x_f32 = x.to_dtype(DType::F32)?;
-        // Channel-wise RMS: norm along channel dim (dim 1)
-        let norm = x_f32.sqr()?.mean_keepdim(1)?.sqrt()?;
-        let eps = 1e-6f64;
-        let norm_eps = (norm + eps)?;
-        let normalized = x_f32.broadcast_div(&norm_eps)?;
-        let scaled = (normalized * self.scale)?;
+        // Exact RMSNorm along channel dim (dim 1): x / sqrt(mean(x^2) + eps) * gamma
+        let mean_sqr = x_f32.sqr()?.mean_keepdim(1)?;
+        let rms = (mean_sqr + 1e-6)?.sqrt()?;
+        let normalized = x_f32.broadcast_div(&rms)?;
         let gamma = self.gamma.to_device(x.device())?.to_dtype(DType::F32)?;
-        let out = scaled.broadcast_mul(&gamma)?;
+        let out = normalized.broadcast_mul(&gamma)?;
         out.to_dtype(orig_dtype)
     }
 }
@@ -270,12 +268,12 @@ impl QwenImageVaeDecoder {
             return Err(candle_core::Error::Msg(format!("QwenImageVaeDecoder expects 16 channels, got {}", c)));
         }
 
-        // 1. Exact Qwen / Wan Latent Denormalization: z = z * std + mean
+        // 1. Exact Qwen / Wan Latent Denormalization: z = latents / std + mean
         let mean = Tensor::from_slice(&QWEN_LATENTS_MEAN, (1, 16, 1, 1), latents.device())?
             .to_dtype(latents.dtype())?;
         let std = Tensor::from_slice(&QWEN_LATENTS_STD, (1, 16, 1, 1), latents.device())?
             .to_dtype(latents.dtype())?;
-        let z = latents.broadcast_mul(&std)?.broadcast_add(&mean)?;
+        let z = latents.broadcast_div(&std)?.broadcast_add(&mean)?;
 
         // 2. Initial convolution: [B, 16, H, W] -> [B, 384, H, W]
         let mut h_feat = self.conv_in.forward(&z)?;
