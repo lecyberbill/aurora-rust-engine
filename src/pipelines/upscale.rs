@@ -35,8 +35,8 @@ pub struct UpscaleParams {
 impl Default for UpscaleParams {
     fn default() -> Self {
         Self {
-            tile_size: 512,
-            tile_pad: 32,
+            tile_size: 256,
+            tile_pad: 16,
         }
     }
 }
@@ -190,15 +190,18 @@ impl UpscalePipeline {
                     .narrow(2, crop_y_start, crop_y_len)?
                     .narrow(3, crop_x_start, crop_x_len)?;
 
-                let tile_vec = cropped_tile.squeeze(0)?.to_vec3::<f32>()?;
+                let tile_flat = cropped_tile.flatten_all()?.to_vec1::<f32>()?;
+                let tile_pixels = crop_y_len * crop_x_len;
+                let out_stride = out_h * out_w;
+
                 for c in 0..3 {
-                    for (i, row) in tile_vec[c].iter().enumerate() {
-                        for (j, &val) in row.iter().enumerate() {
-                            let y = out_y_start + i;
-                            let x = out_x_start + j;
-                            let idx = c * (out_h * out_w) + y * out_w + x;
-                            out_data[idx] = val;
-                        }
+                    let src_c_offset = c * tile_pixels;
+                    let dst_c_offset = c * out_stride;
+                    for i in 0..crop_y_len {
+                        let src_row = src_c_offset + i * crop_x_len;
+                        let dst_row = dst_c_offset + (out_y_start + i) * out_w + out_x_start;
+                        out_data[dst_row..dst_row + crop_x_len]
+                            .copy_from_slice(&tile_flat[src_row..src_row + crop_x_len]);
                     }
                 }
             }
@@ -227,18 +230,19 @@ impl UpscalePipeline {
         let out_tensor = self.upscale_tensor(&input_tensor, params)?;
 
         // Convert back to image
-        let out_tensor = out_tensor.squeeze(0)?;
-        let (_, out_h, out_w) = out_tensor.dims3()?;
-        let out_data = out_tensor.to_vec3::<f32>()?;
+        let (_, _, out_h, out_w) = out_tensor.dims4()?;
+        let out_data = out_tensor.flatten_all()?.to_vec1::<f32>()?;
+        let out_pixels = out_h * out_w;
 
         let mut out_buffer: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(out_w as u32, out_h as u32);
-        for y in 0..out_h {
-            for x in 0..out_w {
-                let r = (out_data[0][y][x].clamp(0.0, 1.0) * 255.0).round() as u8;
-                let g = (out_data[1][y][x].clamp(0.0, 1.0) * 255.0).round() as u8;
-                let b = (out_data[2][y][x].clamp(0.0, 1.0) * 255.0).round() as u8;
-                out_buffer.put_pixel(x as u32, y as u32, Rgb([r, g, b]));
-            }
+        let raw_out = out_buffer.as_mut();
+        for i in 0..out_pixels {
+            let r = (out_data[i].clamp(0.0, 1.0) * 255.0).round() as u8;
+            let g = (out_data[out_pixels + i].clamp(0.0, 1.0) * 255.0).round() as u8;
+            let b = (out_data[2 * out_pixels + i].clamp(0.0, 1.0) * 255.0).round() as u8;
+            raw_out[i * 3] = r;
+            raw_out[i * 3 + 1] = g;
+            raw_out[i * 3 + 2] = b;
         }
 
         // If input had alpha channel, upscale alpha with bilinear and reconstruct RGBA

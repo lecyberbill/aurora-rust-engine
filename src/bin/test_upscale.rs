@@ -74,8 +74,8 @@ fn main() -> anyhow::Result<()> {
     println!("[ESRGAN] Input resolution: {}x{}", img.width(), img.height());
 
     let params = UpscaleParams {
-        tile_size: 512,
-        tile_pad: 32,
+        tile_size: 256,
+        tile_pad: 16,
     };
 
     println!("[ESRGAN] Upscaling image (tiled: {}px, pad: {}px)...", params.tile_size, params.tile_pad);
