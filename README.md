@@ -4,6 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![CUDA](https://img.shields.io/badge/cuda-12.x-green.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![ROCm](https://img.shields.io/badge/ROCm-10.0%20%2F%20HIP-red.svg)](docs/ROCM_SETUP.md)
 [![FlashAttention](https://img.shields.io/badge/FlashAttention-2-orange.svg)](https://github.com/Dao-AILab/flash-attention)
 [![License](https://img.shields.io/badge/license-Apache--2.0%20%2F%20MIT-blue.svg)](LICENSE)
 
@@ -11,9 +12,10 @@
 
 ## ⚡ Overview
 
-`aurora-rust-engine` is a standalone, lightweight, and memory-efficient AI inference engine written entirely in pure Rust using [Candle](https://github.com/huggingface/candle), native FlashAttention-2 CUDA kernels, and hardware acceleration.
+`aurora-rust-engine` is a standalone, lightweight, and memory-efficient AI inference engine written entirely in pure Rust using [Candle](https://github.com/huggingface/candle), native FlashAttention-2 CUDA kernels, and hardware acceleration (NVIDIA CUDA & AMD ROCm/HIP).
 
-👉 **Looking for full documentation? See the complete [User & Developer Guide (USER_GUIDE.md)](USER_GUIDE.md)** for SDK examples, REST API payloads, scheduler configurations, and VRAM optimization tips.
+👉 **Looking for full documentation? See the complete [User & Developer Guide (USER_GUIDE.md)](USER_GUIDE.md)** for SDK examples, REST API payloads, scheduler configurations, and VRAM optimization tips.  
+👉 **Running on AMD GPUs (e.g. `gfx1201` / RDNA 3.5 / RDNA 4)? See the [AMD ROCm 10.0 & Candle Setup Guide (docs/ROCM_SETUP.md)](docs/ROCM_SETUP.md)**.
 
 It provides a robust, zero-Python alternative for running state-of-the-art generative models across **four modalities** — image (**SDXL / Pony**, **FLUX.1 & FLUX.2**, **Z-Image Turbo**), text (**CausalLM**: Qwen / Llama / Mistral / Gemma / DeepSeek), speech (**Whisper STT**, **Parler-TTS / Kokoro**) and **music** (**ACE-Step 1.5**) — with deterministic execution, in-memory zero-overhead LoRA weight merging, and a sub-8 GB VRAM footprint.
 
@@ -65,13 +67,21 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
-- Rust 1.80+ (`cargo`)
-- NVIDIA GPU with CUDA Toolkit 12.x installed
-- MSVC Build Tools (Windows) or GCC/Clang (Linux)
+- **Rust 1.80+** (`cargo`)
+- **NVIDIA GPU**: CUDA Toolkit 12.x + MSVC Build Tools (Windows) or GCC/Clang (Linux)
+- **AMD GPU (Linux)**: ROCm 10.0+ / HIP toolchain (see [docs/ROCM_SETUP.md](docs/ROCM_SETUP.md))
 
-### 2. Build with FlashAttention-2 Acceleration
+### 2. Build
+
+**NVIDIA GPU (CUDA + FlashAttention-2):**
 ```bash
 cargo build --release --features cuda,flash-attn
+```
+
+**AMD GPU (ROCm / HIP):**
+```bash
+# Ensure ROCm environment variables are exported (see docs/ROCM_SETUP.md)
+cargo build --release --features rocm
 ```
 
 ### 3. Launch the Pure Rust Interactive Studio ([Grio](https://github.com/lecyberbill/grio) Web UI)
