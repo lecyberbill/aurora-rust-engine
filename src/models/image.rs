@@ -4,7 +4,7 @@ use candle_core::{DType, Device, Tensor};
 use image::RgbImage;
 use std::path::Path;
 use crate::error::{LuminaError, Result};
-use crate::pipelines::{FluxPipeline, StableDiffusionPipeline, StableDiffusionXLPipeline};
+use crate::pipelines::{FluxPipeline, StableDiffusionPipeline, StableDiffusionXLPipeline, ZImageTurboPipeline};
 use crate::traits::{DiffusionParams, Img2ImgParams, InpaintParams, TextToImagePipeline};
 use super::common::{AnyModel, ImageGenerationModel, ModelKind, ProgressFn};
 
@@ -14,6 +14,7 @@ pub enum DiffBackend {
     Flux(FluxPipeline),
     Sdxl(StableDiffusionXLPipeline),
     Sd15(StableDiffusionPipeline),
+    ZImageTurbo(ZImageTurboPipeline),
 }
 
 impl DiffBackend {
@@ -22,6 +23,7 @@ impl DiffBackend {
             DiffBackend::Flux(p) => &p.device,
             DiffBackend::Sdxl(_) => &Device::Cpu,
             DiffBackend::Sd15(_) => &Device::Cpu,
+            DiffBackend::ZImageTurbo(p) => &p.device,
         }
     }
     fn dtype(&self) -> DType {
@@ -29,6 +31,7 @@ impl DiffBackend {
             DiffBackend::Flux(p) => p.dtype,
             DiffBackend::Sdxl(_) => DType::F16,
             DiffBackend::Sd15(_) => DType::F32,
+            DiffBackend::ZImageTurbo(p) => p.dtype,
         }
     }
 }
@@ -48,6 +51,9 @@ impl DiffusionModel {
     }
     pub fn sd15(id: String, pipeline: StableDiffusionPipeline) -> Self {
         Self { id, family: "sd15".into(), inner: DiffBackend::Sd15(pipeline) }
+    }
+    pub fn z_image_turbo(id: String, pipeline: ZImageTurboPipeline) -> Self {
+        Self { id, family: "z-image-turbo".into(), inner: DiffBackend::ZImageTurbo(pipeline) }
     }
 
     /// Apply the fast inference knobs to a loaded SDXL pipeline: Euler scheduler and Ada-Lovelace FP8
@@ -96,6 +102,9 @@ impl ImageGenerationModel for DiffusionModel {
                 let cb = on_step;
                 p.generate(params, cb)
             }
+            DiffBackend::ZImageTurbo(p) => {
+                p.generate(&params).map(|(img, _)| img).map_err(|e| LuminaError::Candle(e))
+            }
         }
     }
 
@@ -109,6 +118,7 @@ impl ImageGenerationModel for DiffusionModel {
                 p.generate_img2img(params, cb)
             }
             DiffBackend::Sd15(_) => Err(LuminaError::UnsupportedOp("SD1.5 img2img".into())),
+            DiffBackend::ZImageTurbo(_) => Err(LuminaError::UnsupportedOp("ZImageTurbo img2img".into())),
         }
     }
 
@@ -122,6 +132,7 @@ impl ImageGenerationModel for DiffusionModel {
                 p.generate_inpaint(params, cb)
             }
             DiffBackend::Sd15(_) => Err(LuminaError::UnsupportedOp("SD1.5 inpaint".into())),
+            DiffBackend::ZImageTurbo(_) => Err(LuminaError::UnsupportedOp("ZImageTurbo inpaint".into())),
         }
     }
 
@@ -130,6 +141,7 @@ impl ImageGenerationModel for DiffusionModel {
             DiffBackend::Flux(p) => p.load_lora(path, multiplier),
             DiffBackend::Sdxl(p) => p.load_lora(path, multiplier),
             DiffBackend::Sd15(_) => Err(LuminaError::UnsupportedOp("SD1.5 LoRA".into())),
+            DiffBackend::ZImageTurbo(_) => Err(LuminaError::UnsupportedOp("ZImageTurbo LoRA".into())),
         }
     }
 
@@ -138,6 +150,7 @@ impl ImageGenerationModel for DiffusionModel {
             DiffBackend::Flux(p) => p.unload_lora(id),
             DiffBackend::Sdxl(p) => p.unload_lora(id),
             DiffBackend::Sd15(_) => Err(LuminaError::UnsupportedOp("SD1.5 LoRA".into())),
+            DiffBackend::ZImageTurbo(_) => Err(LuminaError::UnsupportedOp("ZImageTurbo LoRA".into())),
         }
     }
 

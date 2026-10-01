@@ -248,6 +248,42 @@ impl AutoModel {
 
                 Arc::new(Mutex::new(DiffusionModel::flux(desc.id.clone(), arch.slug(), pipeline)))
             }
+            Architecture::ZImageTurbo => {
+                let mut pipeline = crate::pipelines::ZImageTurboPipeline::from_aio_checkpoint(
+                    &desc.checkpoint,
+                    desc.vae.as_deref(),
+                    &device,
+                    dtype,
+                )?;
+                pipeline.enable_flash_attn();
+
+                if let Some(super::descriptor::TextEncoderSpec::Qwen3 { path }) = &desc.text_encoder {
+                    let archive: Arc<dyn crate::weights::WeightsSource> = if path.is_dir() {
+                        Arc::new(SafeTensorsArchive::open_shards_dir(path)?)
+                    } else {
+                        Arc::new(SafeTensorsArchive::open(path)?)
+                    };
+                    let enc = crate::text::Qwen3TextEncoder::from_archive(
+                        &*archive,
+                        Some(std::path::Path::new("qwen_tokenizer.json")),
+                        &device,
+                        dtype,
+                    )?;
+                    pipeline.set_text_encoder(enc);
+                }
+
+                if let Some(vae_path) = &desc.vae {
+                    let vae_archive = SafeTensorsArchive::open(vae_path)?;
+                    let vae_router = crate::weights::WeightRouter::new(&vae_archive, Device::Cpu, DType::F32);
+                    if let Ok(vae_vb) = vae_router.vae_var_builder() {
+                        if let Ok(decoder) = crate::diffusion::vae_flux::FluxVaeDecoder::new(vae_vb) {
+                            pipeline.set_vae(decoder);
+                        }
+                    }
+                }
+
+                Arc::new(Mutex::new(DiffusionModel::z_image_turbo(desc.id.clone(), pipeline)))
+            }
             Architecture::Sd15 => {
                 let pipeline = <crate::pipelines::StableDiffusionPipeline as crate::traits::TextToImagePipeline>::from_safetensors(&desc.checkpoint, &device)?;
                 Arc::new(Mutex::new(DiffusionModel::sd15(desc.id.clone(), pipeline)))
@@ -315,7 +351,17 @@ fn build_diffusion(
             pipeline.enable_flash_attn();
             Ok(DiffusionModel::flux(id, arch.slug(), pipeline))
         }
-            Architecture::Sdxl => {
+        Architecture::ZImageTurbo => {
+            let mut pipeline = crate::pipelines::ZImageTurboPipeline::from_aio_checkpoint(
+                weights,
+                None::<&Path>,
+                device,
+                dtype,
+            )?;
+            pipeline.enable_flash_attn();
+            Ok(DiffusionModel::z_image_turbo(id, pipeline))
+        }
+        Architecture::Sdxl => {
                 let pipeline = crate::pipelines::StableDiffusionXLPipeline::from_single_file(weights, device.clone())?;
                 Ok(DiffusionModel::sdxl(id, pipeline))
             }

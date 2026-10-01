@@ -42,10 +42,11 @@ impl ZImageTurboPipeline {
         println!("🚀 Loading Z-Image Turbo DiT Transformer from {:?}", p);
         let mut dit_tensors = std::collections::HashMap::new();
         for key in archive.keys() {
-            if let Some(rest) = key.strip_prefix("model.diffusion_model.") {
-                if let Ok(t) = archive.get_tensor(&key, device, dtype) {
-                    dit_tensors.insert(rest.to_string(), t);
-                }
+            let rest = key.strip_prefix("model.diffusion_model.")
+                .or_else(|| key.strip_prefix("diffusion_model."))
+                .unwrap_or(&key);
+            if let Ok(t) = archive.get_tensor(&key, device, dtype) {
+                dit_tensors.insert(rest.to_string(), t);
             }
         }
         let dit_vb = candle_nn::VarBuilder::from_tensors(dit_tensors, dtype, device);
@@ -117,6 +118,11 @@ impl ZImageTurboPipeline {
             device: device.clone(),
             dtype,
         })
+    }
+
+    /// Attach or override Qwen3 Text Encoder
+    pub fn set_text_encoder(&mut self, text_encoder: Qwen3TextEncoder) {
+        self.text_encoder = Some(text_encoder);
     }
 
     /// Attach or override VAE Decoder
