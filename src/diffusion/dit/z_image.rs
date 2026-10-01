@@ -598,26 +598,40 @@ impl ZImageCaptionEmbedder {
 }
 
 /// Final Layer of NextDiT / Z-Image:
-/// LayerNorm(elementwise_affine=False, eps=1e-6) -> AdaLN modulation (1 + scale) -> Linear(hidden_size, 64)
+/// RMSNorm/LayerNorm -> AdaLN modulation (1 + scale, shift) -> Linear(hidden_size, 64)
 #[derive(Debug, Clone)]
 pub struct ZImageFinalLayer {
+    pub norm: Option<RMSNorm>,
     pub ada_ln: Linear,
     pub linear: Linear,
 }
 
 impl ZImageFinalLayer {
     pub fn new(cfg: &ZImageConfig, vb: VarBuilder) -> Result<Self> {
-        let ada_ln = linear(cfg.time_embed_dim, cfg.hidden_size, vb.pp("adaLN_modulation.1"))
-            .or_else(|_| linear_or_no_bias(cfg.hidden_size, 2, vb.pp("modulation.lin")))
-            .or_else(|_| linear_or_no_bias(cfg.hidden_size, cfg.hidden_size, vb.pp("modulation.lin")))?;
-        let linear = linear(cfg.hidden_size, cfg.out_channels, vb.pp("linear"))
+        let norm = RMSNorm::new(cfg.hidden_size, vb.pp("norm")).ok();
+        let ada_ln = if let Ok(aln) = linear(cfg.time_embed_dim, cfg.hidden_size, vb.pp("adaLN_modulation.1")) {
+            aln
+        } else if let Ok(w) = vb.get((2, cfg.hidden_size), "modulation.lin") {
+            Linear::new(w, None)
+        } else if let Ok(aln) = linear_or_no_bias(cfg.hidden_size, 2, vb.pp("modulation.lin")) {
+            aln
+        } else if let Ok(aln) = linear_or_no_bias(cfg.hidden_size, cfg.hidden_size, vb.pp("modulation.lin")) {
+            aln
+        } else {
+            linear(cfg.time_embed_dim, cfg.hidden_size, vb.pp("adaLN_modulation.1"))?
+        };
+        let linear = linear_or_no_bias(cfg.hidden_size, cfg.out_channels, vb.pp("linear"))
             .or_else(|_| linear_or_no_bias(cfg.hidden_size, cfg.out_channels, vb.clone()))?;
-        Ok(Self { ada_ln, linear })
+        Ok(Self { norm, ada_ln, linear })
     }
 
     pub fn forward(&self, x: &Tensor, temb: &Tensor) -> Result<Tensor> {
         let orig_dtype = x.dtype();
-        let norm_x = layer_norm_no_affine(x, 1e-6)?;
+        let norm_x = if let Some(ref n) = self.norm {
+            n.forward(x)?
+        } else {
+            layer_norm_no_affine(x, 1e-6)?
+        };
         let act_t = candle_nn::ops::silu(temb)?;
         let mod_out = self.ada_ln.forward(&act_t)?;
         let modulated = if mod_out.dim(1)? == 2 {
