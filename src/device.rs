@@ -1,20 +1,33 @@
-// [WFGY] Zone: SAFE | λ: 0.15 | Fallbacks: 1 (CUDA/Metal fallback to CPU) | Action: Device selection and compute capability probing
+// [WFGY] Zone: SAFE | λ: 0.15 | Fallbacks: 1 (CUDA/ROCm/Metal fallback to CPU) | Action: Device selection and compute capability probing
 
 use candle_core::Device;
 use tracing::info;
 
 /// Probe and select the most performant available compute device.
-/// Priority: CUDA -> Metal -> CPU
+/// Priority: CUDA / ROCm -> Metal -> CPU
 pub fn auto_device() -> candle_core::Result<Device> {
     #[cfg(feature = "cuda")]
     {
         match Device::new_cuda(0) {
             Ok(device) => {
-                info!("Using GPU acceleration device via CUDA/ROCm (ordinal 0)");
+                info!("Using GPU acceleration device via CUDA (ordinal 0)");
                 return Ok(device);
             }
             Err(err) => {
-                tracing::warn!("GPU device requested but unavailable: {:?}. Falling back.", err);
+                tracing::warn!("CUDA GPU device requested but unavailable: {:?}. Falling back.", err);
+            }
+        }
+    }
+
+    #[cfg(feature = "rocm")]
+    {
+        match Device::new_rocm(0) {
+            Ok(device) => {
+                info!("Using GPU acceleration device via ROCm (ordinal 0, gfx1201)");
+                return Ok(device);
+            }
+            Err(err) => {
+                tracing::warn!("ROCm GPU device requested but unavailable: {:?}. Falling back.", err);
             }
         }
     }

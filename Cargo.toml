@@ -34,16 +34,27 @@ grio = { path = "D:/Projet/UI/crates/grio", optional = true }
 
 [features]
 default = []
-# Embedded MP3 output via LAME (LGPL-3.0). Off by default: either enable this
-# feature or convert the WAV/OGG output externally (e.g. ffmpeg).
-mp3 = ["dep:mp3lame-encoder"]
+# Mode CPU pur (Windows / dev local)
+cpu = []
+# Accélération Nvidia CUDA
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+# Accélération AMD ROCm (Linux / aurora-svc)
+rocm = ["candle-core/rocm"]
 flash-attn = ["cuda", "dep:candle-flash-attn"]
 ui = ["dep:grio"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
 mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
+# Embedded MP3 output via LAME (LGPL-3.0). Off by default: either enable this
+# feature or convert the WAV/OGG output externally (e.g. ffmpeg).
+mp3 = ["dep:mp3lame-encoder"]
+
+[patch.crates-io]
+candle-core = { git = "https://github.com/xmiksay/candle.git", branch = "feat/rocm-backend" }
+candle-nn = { git = "https://github.com/xmiksay/candle.git", branch = "feat/rocm-backend" }
+candle-transformers = { git = "https://github.com/xmiksay/candle.git", branch = "feat/rocm-backend" }
 
 [lib]
 name = "aurora_rust_engine"
 path = "src/lib.rs"
+

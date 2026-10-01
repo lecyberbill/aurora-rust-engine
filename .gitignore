@@ -34,3 +34,8 @@ Thumbs.db
 
 # Runtime caches
 .cache/
+
+#gemini.md (local context)
+gemini.md
+GEMINI.md
+.gemini.md
