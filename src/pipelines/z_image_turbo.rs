@@ -61,8 +61,13 @@ impl ZImageTurboPipeline {
             let rest = key.strip_prefix("model.diffusion_model.")
                 .or_else(|| key.strip_prefix("diffusion_model."))
                 .unwrap_or(&key);
-            if let Ok(t) = archive.get_tensor(&key, device, dtype) {
-                dit_tensors.insert(rest.to_string(), t);
+            match archive.get_tensor(&key, device, dtype) {
+                Ok(t) => {
+                    dit_tensors.insert(rest.to_string(), t);
+                }
+                Err(e) => {
+                    eprintln!("⚠️ Error loading DiT tensor {}: {}", key, e);
+                }
             }
         }
         let config = ZImageConfig::from_tensors(&dit_tensors);
@@ -105,7 +110,7 @@ impl ZImageTurboPipeline {
             let mut vae_tensors = std::collections::HashMap::new();
             let mut is_qwen_vae = false;
             for key in vae_archive.keys() {
-                if key.starts_with("decoder.conv1") || key.starts_with("decoder.head") {
+                if key.starts_with("decoder.conv1") || key.starts_with("decoder.head") || key.starts_with("decoder.conv_in") || key.starts_with("decoder.up_blocks") {
                     is_qwen_vae = true;
                 }
                 if let Ok(t) = vae_archive.get_tensor(&key, &vae_device, DType::F32) {
