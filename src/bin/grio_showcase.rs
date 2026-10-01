@@ -6,7 +6,6 @@ mod app {
     use std::sync::{Arc, Mutex};
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
-    use candle_core::Device;
     use grio::*;
     use aurora_rust_engine::{DiffusionParams, StableDiffusionXLPipeline, FastLatentPreviewer};
     use std::io::Cursor;
@@ -17,7 +16,7 @@ mod app {
         println!("🎨 Launching Aurora Pure Rust SDXL Studio powered by Grio UI...");
         println!("================================================================================\n");
 
-        let device = Device::new_cuda(0)?;
+        let device = aurora_rust_engine::auto_device()?;
         let checkpoint_path = "G:\\models\\checkpoints\\Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors";
         
         let pipeline = if Path::new(checkpoint_path).exists() {
@@ -229,8 +228,9 @@ mod app {
                 Ok(())
             });
 
-        println!("\n🌐 Aurora SDXL Studio is live at: http://127.0.0.1:7860");
-        app.launch("127.0.0.1:7860").map_err(|e| anyhow::anyhow!("{}", e))?;
+        let bind_addr = std::env::var("STUDIO_BIND").unwrap_or_else(|_| "0.0.0.0:7860".to_string());
+        println!("\n🌐 Aurora SDXL Studio is live at: http://{bind_addr}");
+        app.launch(&bind_addr).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         Ok(())
     }

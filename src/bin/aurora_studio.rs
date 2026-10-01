@@ -200,8 +200,8 @@ mod app {
     }
 
     pub async fn run() -> anyhow::Result<()> {
-        let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-        let dtype = if device.is_cuda() { DType::F16 } else { DType::F32 };
+        let device = aurora_rust_engine::auto_device().unwrap_or(Device::Cpu);
+        let dtype = if !device.is_cpu() { DType::F16 } else { DType::F32 };
 
         // Les modèles sont déclarés dans un fichier JSON (aucun chemin en dur ici) : chemin via
         // `STUDIO_CONFIG`, défaut `aurora_studio.json` dans le répertoire courant.
@@ -315,8 +315,9 @@ mod app {
                 result.map_err(|e| e.into())
             });
 
-        println!("\n🌐 Aurora Studio live: http://127.0.0.1:7860");
-        app.launch("127.0.0.1:7860").map_err(|e| anyhow::anyhow!("launch: {e}"))?;
+        let bind_addr = std::env::var("STUDIO_BIND").unwrap_or_else(|_| "0.0.0.0:7860".to_string());
+        println!("\n🌐 Aurora Studio live: http://{bind_addr}");
+        app.launch(&bind_addr).map_err(|e| anyhow::anyhow!("launch: {e}"))?;
         Ok(())
     }
 }
