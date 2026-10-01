@@ -43,10 +43,20 @@ impl Default for VisionTransformerConfig {
     }
 }
 
-/// Vision Attention Block
+/// Vision Attention Block (supports both Fused QKV and Split Q/K/V)
+#[derive(Debug, Clone)]
+pub enum VisionQkv {
+    Fused(Linear),
+    Split {
+        q_proj: Linear,
+        k_proj: Linear,
+        v_proj: Linear,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct VisionAttention {
-    qkv: Linear,
+    qkv: VisionQkv,
     proj: Linear,
     num_heads: usize,
     head_dim: usize,
@@ -54,11 +64,24 @@ pub struct VisionAttention {
 
 impl VisionAttention {
     pub fn new(embed_dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
-        let qkv = linear(embed_dim, embed_dim * 3, vb.pp("qkv"))
-            .or_else(|_| linear(embed_dim, embed_dim * 3, vb.pp("in_proj")))
-            .or_else(|_| linear(embed_dim, embed_dim * 3, vb.pp("attn_qkv")))?;
+        let qkv = if vb.contains_tensor("qkv.weight") || vb.contains_tensor("in_proj.weight") || vb.contains_tensor("attn_qkv.weight") {
+            let lin = linear(embed_dim, embed_dim * 3, vb.pp("qkv"))
+                .or_else(|_| linear(embed_dim, embed_dim * 3, vb.pp("in_proj")))
+                .or_else(|_| linear(embed_dim, embed_dim * 3, vb.pp("attn_qkv")))?;
+            VisionQkv::Fused(lin)
+        } else {
+            let q_proj = linear(embed_dim, embed_dim, vb.pp("q_proj"))
+                .or_else(|_| linear(embed_dim, embed_dim, vb.pp("self_attn.q_proj")))?;
+            let k_proj = linear(embed_dim, embed_dim, vb.pp("k_proj"))
+                .or_else(|_| linear(embed_dim, embed_dim, vb.pp("self_attn.k_proj")))?;
+            let v_proj = linear(embed_dim, embed_dim, vb.pp("v_proj"))
+                .or_else(|_| linear(embed_dim, embed_dim, vb.pp("self_attn.v_proj")))?;
+            VisionQkv::Split { q_proj, k_proj, v_proj }
+        };
+
         let proj = linear(embed_dim, embed_dim, vb.pp("proj"))
             .or_else(|_| linear(embed_dim, embed_dim, vb.pp("out_proj")))
+            .or_else(|_| linear(embed_dim, embed_dim, vb.pp("self_attn.out_proj")))
             .or_else(|_| linear(embed_dim, embed_dim, vb.pp("attn_out")))?;
         let head_dim = embed_dim / num_heads;
         Ok(Self {
@@ -71,11 +94,22 @@ impl VisionAttention {
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let (b, s, d) = x.dims3()?;
-        let qkv = self.qkv.forward(x)?;
-        let qkv = qkv.reshape((b, s, 3, self.num_heads, self.head_dim))?;
-        let q = qkv.narrow(2, 0, 1)?.squeeze(2)?.transpose(1, 2)?.contiguous()?;
-        let k = qkv.narrow(2, 1, 1)?.squeeze(2)?.transpose(1, 2)?.contiguous()?;
-        let v = qkv.narrow(2, 2, 1)?.squeeze(2)?.transpose(1, 2)?.contiguous()?;
+        let (q, k, v) = match &self.qkv {
+            VisionQkv::Fused(lin) => {
+                let qkv = lin.forward(x)?;
+                let qkv = qkv.reshape((b, s, 3, self.num_heads, self.head_dim))?;
+                let q = qkv.narrow(2, 0, 1)?.squeeze(2)?.transpose(1, 2)?.contiguous()?;
+                let k = qkv.narrow(2, 1, 1)?.squeeze(2)?.transpose(1, 2)?.contiguous()?;
+                let v = qkv.narrow(2, 2, 1)?.squeeze(2)?.transpose(1, 2)?.contiguous()?;
+                (q, k, v)
+            }
+            VisionQkv::Split { q_proj, k_proj, v_proj } => {
+                let q = q_proj.forward(x)?.reshape((b, s, self.num_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
+                let k = k_proj.forward(x)?.reshape((b, s, self.num_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
+                let v = v_proj.forward(x)?.reshape((b, s, self.num_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
+                (q, k, v)
+            }
+        };
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let attn_weights = (q.matmul(&k.transpose(2, 3)?.contiguous()?)? * scale)?;
@@ -133,11 +167,16 @@ impl VisionBlock {
             ..Default::default()
         };
         let norm1 = layer_norm(cfg.embed_dim, ln_cfg, vb.pp("norm1"))
-            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("ln1")))?;
-        let attn = VisionAttention::new(cfg.embed_dim, cfg.num_heads, vb.pp("attn"))?;
+            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("ln1")))
+            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("layer_norm1")))?;
+        let attn = VisionAttention::new(cfg.embed_dim, cfg.num_heads, vb.pp("attn"))
+            .or_else(|_| VisionAttention::new(cfg.embed_dim, cfg.num_heads, vb.pp("self_attn")))
+            .or_else(|_| VisionAttention::new(cfg.embed_dim, cfg.num_heads, vb.clone()))?;
         let norm2 = layer_norm(cfg.embed_dim, ln_cfg, vb.pp("norm2"))
-            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("ln2")))?;
-        let mlp = VisionMlp::new(cfg.embed_dim, cfg.intermediate_size, cfg.act_type, vb.pp("mlp"))?;
+            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("ln2")))
+            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("layer_norm2")))?;
+        let mlp = VisionMlp::new(cfg.embed_dim, cfg.intermediate_size, cfg.act_type, vb.pp("mlp"))
+            .or_else(|_| VisionMlp::new(cfg.embed_dim, cfg.intermediate_size, cfg.act_type, vb.clone()))?;
 
         Ok(Self {
             norm1,
@@ -160,7 +199,7 @@ pub struct VisionTransformer {
     patch_embed: Conv2d,
     pos_embed: Option<Tensor>,
     blocks: Vec<VisionBlock>,
-    post_norm: LayerNorm,
+    post_norm: Option<LayerNorm>,
     spatial_merge_size: usize,
 }
 
@@ -195,6 +234,24 @@ impl VisionTransformer {
                 conv_cfg,
                 vb.pp("patch_embed"),
             )
+        })
+        .or_else(|_| {
+            conv2d(
+                cfg.num_channels,
+                cfg.embed_dim,
+                cfg.patch_size,
+                conv_cfg,
+                vb.pp("embeddings.patch_embedding"),
+            )
+        })
+        .or_else(|_| {
+            conv2d(
+                cfg.num_channels,
+                cfg.embed_dim,
+                cfg.patch_size,
+                conv_cfg,
+                vb.pp("embeddings.patch_embedding.proj"),
+            )
         })?;
 
         let num_patches_w = cfg.image_size / cfg.patch_size;
@@ -204,6 +261,7 @@ impl VisionTransformer {
         let pos_embed = vb.get((1, num_patches, cfg.embed_dim), "pos_embed")
             .or_else(|_| vb.get((1, num_patches + 1, cfg.embed_dim), "position_embedding"))
             .or_else(|_| vb.get((1, num_patches, cfg.embed_dim), "v.position_embd.weight"))
+            .or_else(|_| vb.get((1, num_patches, cfg.embed_dim), "embeddings.position_embedding.weight"))
             .ok();
 
         let mut blocks = Vec::with_capacity(cfg.num_layers);
@@ -211,6 +269,8 @@ impl VisionTransformer {
             vb.pp("blocks")
         } else if vb.pp("v.blk").contains_tensor("0.ln1.weight") || vb.contains_tensor("v.blk.0.ln1.weight") {
             vb.pp("v.blk")
+        } else if vb.pp("encoder.layers").contains_tensor("0.layer_norm1.weight") || vb.contains_tensor("encoder.layers.0.layer_norm1.weight") {
+            vb.pp("encoder.layers")
         } else {
             vb.pp("layers")
         };
@@ -224,8 +284,11 @@ impl VisionTransformer {
         };
         let post_norm = layer_norm(cfg.embed_dim, ln_cfg, vb.pp("post_norm"))
             .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("ln_post")))
+            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("post_layernorm")))
             .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("v.post_norm")))
-            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("v.ln_post")))?;
+            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("v.ln_post")))
+            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("encoder.post_layernorm")))
+            .ok();
 
         Ok(Self {
             patch_embed,
@@ -258,7 +321,11 @@ impl VisionTransformer {
         for block in &self.blocks {
             x = block.forward(&x)?;
         }
-        let x = self.post_norm.forward(&x)?;
+        let x = if let Some(ref norm) = self.post_norm {
+            norm.forward(&x)?
+        } else {
+            x
+        };
 
         // Spatial Merging (2x2 pixel pooling if enabled)
         if self.spatial_merge_size > 1 {
@@ -275,28 +342,51 @@ impl VisionTransformer {
     }
 }
 
-/// Multimodal Projector (MLP Projector connecting ViT to Causal LLM)
+/// Multimodal Projector (supports Single Linear and 2-layer MLP Projector)
+#[derive(Debug, Clone)]
+pub enum ProjectorKind {
+    TwoLayer {
+        linear1: Linear,
+        linear2: Linear,
+    },
+    Single(Linear),
+}
+
 #[derive(Debug, Clone)]
 pub struct MultiModalProjector {
-    linear1: Linear,
-    linear2: Linear,
+    kind: ProjectorKind,
 }
 
 impl MultiModalProjector {
     pub fn new(in_features: usize, out_features: usize, vb: VarBuilder) -> Result<Self> {
-        let linear1 = linear(in_features, out_features, vb.pp("linear_1"))
-            .or_else(|_| linear(in_features, out_features, vb.pp("0")))
-            .or_else(|_| linear(in_features, out_features, vb.pp("mm.0")))?;
-        let linear2 = linear(out_features, out_features, vb.pp("linear_2"))
-            .or_else(|_| linear(out_features, out_features, vb.pp("2")))
-            .or_else(|_| linear(out_features, out_features, vb.pp("mm.2")))?;
-        Ok(Self { linear1, linear2 })
+        let load_lin = |in_d, out_d, v: VarBuilder| {
+            linear(in_d, out_d, v.clone()).or_else(|_| linear_no_bias(in_d, out_d, v))
+        };
+
+        load_lin(in_features, out_features, vb.pp("proj"))
+            .or_else(|_| load_lin(in_features, out_features, vb.pp("linear")))
+            .or_else(|_| load_lin(in_features, out_features, vb.clone()))
+            .map(|lin| Self { kind: ProjectorKind::Single(lin) })
+            .or_else(|_| {
+                let linear1 = load_lin(in_features, out_features, vb.pp("linear_1"))
+                    .or_else(|_| load_lin(in_features, out_features, vb.pp("0")))
+                    .or_else(|_| load_lin(in_features, out_features, vb.pp("mm.0")))?;
+                let linear2 = load_lin(out_features, out_features, vb.pp("linear_2"))
+                    .or_else(|_| load_lin(out_features, out_features, vb.pp("2")))
+                    .or_else(|_| load_lin(out_features, out_features, vb.pp("mm.2")))?;
+                Ok(Self { kind: ProjectorKind::TwoLayer { linear1, linear2 } })
+            })
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let h = self.linear1.forward(x)?;
-        let h = h.gelu_erf()?;
-        self.linear2.forward(&h)
+        match &self.kind {
+            ProjectorKind::Single(lin) => lin.forward(x),
+            ProjectorKind::TwoLayer { linear1, linear2 } => {
+                let h = linear1.forward(x)?;
+                let h = h.gelu_erf()?;
+                linear2.forward(&h)
+            }
+        }
     }
 }
 
@@ -346,10 +436,13 @@ pub struct VlmAttention {
 impl VlmAttention {
     pub fn new(cfg: &VlmDecoderConfig, vb: VarBuilder) -> Result<Self> {
         let head_dim = cfg.hidden_size / cfg.num_attention_heads;
-        let q_proj = linear(cfg.hidden_size, cfg.num_attention_heads * head_dim, vb.pp("q_proj"))?;
-        let k_proj = linear(cfg.hidden_size, cfg.num_key_value_heads * head_dim, vb.pp("k_proj"))?;
-        let v_proj = linear(cfg.hidden_size, cfg.num_key_value_heads * head_dim, vb.pp("v_proj"))?;
-        let o_proj = linear_no_bias(cfg.num_attention_heads * head_dim, cfg.hidden_size, vb.pp("o_proj"))?;
+        let load_lin = |in_d, out_d, v: VarBuilder| {
+            linear(in_d, out_d, v.clone()).or_else(|_| linear_no_bias(in_d, out_d, v))
+        };
+        let q_proj = load_lin(cfg.hidden_size, cfg.num_attention_heads * head_dim, vb.pp("q_proj"))?;
+        let k_proj = load_lin(cfg.hidden_size, cfg.num_key_value_heads * head_dim, vb.pp("k_proj"))?;
+        let v_proj = load_lin(cfg.hidden_size, cfg.num_key_value_heads * head_dim, vb.pp("v_proj"))?;
+        let o_proj = load_lin(cfg.num_attention_heads * head_dim, cfg.hidden_size, vb.pp("o_proj"))?;
 
         Ok(Self {
             q_proj,
@@ -481,9 +574,12 @@ pub struct VlmDecoderMlp {
 
 impl VlmDecoderMlp {
     pub fn new(cfg: &VlmDecoderConfig, vb: VarBuilder) -> Result<Self> {
-        let gate_proj = linear(cfg.hidden_size, cfg.intermediate_size, vb.pp("gate_proj"))?;
-        let up_proj = linear(cfg.hidden_size, cfg.intermediate_size, vb.pp("up_proj"))?;
-        let down_proj = linear_no_bias(cfg.intermediate_size, cfg.hidden_size, vb.pp("down_proj"))?;
+        let load_lin = |in_d, out_d, v: VarBuilder| {
+            linear(in_d, out_d, v.clone()).or_else(|_| linear_no_bias(in_d, out_d, v))
+        };
+        let gate_proj = load_lin(cfg.hidden_size, cfg.intermediate_size, vb.pp("gate_proj"))?;
+        let up_proj = load_lin(cfg.hidden_size, cfg.intermediate_size, vb.pp("up_proj"))?;
+        let down_proj = load_lin(cfg.intermediate_size, cfg.hidden_size, vb.pp("down_proj"))?;
         Ok(Self {
             gate_proj,
             up_proj,
@@ -552,6 +648,10 @@ pub struct VlmLanguageModel {
 
 impl VlmLanguageModel {
     pub fn new(cfg: &VlmDecoderConfig, vb: VarBuilder) -> Result<Self> {
+        Self::new_with_root(cfg, vb.clone(), vb)
+    }
+
+    pub fn new_with_root(cfg: &VlmDecoderConfig, vb: VarBuilder, root_vb: VarBuilder) -> Result<Self> {
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("model.embed_tokens"))
             .or_else(|_| embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens")))?;
 
@@ -568,7 +668,9 @@ impl VlmLanguageModel {
         let norm = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))
             .or_else(|_| rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm")))?;
         let lm_head = linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))
-            .or_else(|_| linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("output")))?;
+            .or_else(|_| linear_no_bias(cfg.hidden_size, cfg.vocab_size, root_vb.pp("lm_head")))
+            .or_else(|_| linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("output")))
+            .or_else(|_| linear_no_bias(cfg.hidden_size, cfg.vocab_size, root_vb.pp("output")))?;
 
         Ok(Self {
             embed_tokens,
@@ -619,7 +721,9 @@ impl VlmModel {
         vb: VarBuilder,
     ) -> Result<Self> {
         let vision_encoder = VisionTransformer::new(vision_cfg, vb.pp("vision_tower"))
-            .or_else(|_| VisionTransformer::new(vision_cfg, vb.pp("visual")))?;
+            .or_else(|_| VisionTransformer::new(vision_cfg, vb.pp("visual")))
+            .or_else(|_| VisionTransformer::new(vision_cfg, vb.pp("vision_model")))
+            .or_else(|_| VisionTransformer::new(vision_cfg, vb.pp("model.vision_model")))?;
 
         let proj_in = if vision_cfg.spatial_merge_size > 1 {
             vision_cfg.embed_dim * vision_cfg.spatial_merge_size * vision_cfg.spatial_merge_size
@@ -627,10 +731,14 @@ impl VlmModel {
             vision_cfg.embed_dim
         };
         let projector = MultiModalProjector::new(proj_in, decoder_cfg.hidden_size, vb.pp("multi_modal_projector"))
-            .or_else(|_| MultiModalProjector::new(proj_in, decoder_cfg.hidden_size, vb.pp("projector")))?;
+            .or_else(|_| MultiModalProjector::new(proj_in, decoder_cfg.hidden_size, vb.pp("projector")))
+            .or_else(|_| MultiModalProjector::new(proj_in, decoder_cfg.hidden_size, vb.pp("connector.modality_projection")))
+            .or_else(|_| MultiModalProjector::new(proj_in, decoder_cfg.hidden_size, vb.pp("model.connector.modality_projection")))?;
 
-        let language_model = VlmLanguageModel::new(decoder_cfg, vb.pp("language_model"))
-            .or_else(|_| VlmLanguageModel::new(decoder_cfg, vb))?;
+        let language_model = VlmLanguageModel::new_with_root(decoder_cfg, vb.pp("language_model"), vb.clone())
+            .or_else(|_| VlmLanguageModel::new_with_root(decoder_cfg, vb.pp("text_model"), vb.clone()))
+            .or_else(|_| VlmLanguageModel::new_with_root(decoder_cfg, vb.pp("model.text_model"), vb.clone()))
+            .or_else(|_| VlmLanguageModel::new_with_root(decoder_cfg, vb.clone(), vb.clone()))?;
 
         let kv_caches = vec![None; decoder_cfg.num_hidden_layers];
 

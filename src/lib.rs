@@ -19,9 +19,10 @@ pub use device::{auto_device, select_device, GenerationMetrics, KernelDispatchCo
 pub use error::{LuminaError, Result};
 pub use models::{
     Architecture, AutoModel, EncodeModel, GenerationModel, ImageGenerationModel, ModelDescriptor,
-    ModelKind, ModelLoadConfig, ModelRegistry, MultiModalProjector, RRDBNet, RRDBNetConfig,
-    SRVGGNetCompact, SRVGGNetCompactConfig, TextEncoderSpec, VisionActivation, VisionTransformer,
-    VisionTransformerConfig, VlmDecoderConfig, VlmModel,
+    ModelKind, ModelLoadConfig, ModelRegistry, MultiModalProjector, Qwen35HybridLayer,
+    Qwen35SsmBlock, RRDBNet, RRDBNetConfig, SRVGGNetCompact, SRVGGNetCompactConfig, SsmConfig,
+    SsmStateCache, TextEncoderSpec, VisionActivation, VisionTransformer, VisionTransformerConfig,
+    VlmDecoderConfig, VlmModel,
 };
 pub use lora::{LoRALoader, LoRAManager, LoRAMerger, LoRAPair, LoRATarget, LoadedLoRA};
 pub use traits::{ControlNetParams, DiffusionParams, Img2ImgParams, InpaintParams, TextGenerationPipeline, TextToImagePipeline};
