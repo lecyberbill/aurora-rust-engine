@@ -1,0 +1,16 @@
+{
+  "models": [
+    {
+      "id": "krea2",
+      "label": "Krea 2 Turbo (Qwen3-VL + VAE)",
+      "family": "z-image-turbo",
+      "checkpoint": "/models/comfyui/diffusion_models/krea2_turbo_fp8_scaled.safetensors",
+      "text_encoder": {
+        "kind": "qwen3",
+        "path": "/models/comfyui/text_encoders/qwen3vl_4b_fp8_scaled.safetensors"
+      },
+      "vae": "/models/comfyui/vae/qwen_image_vae.safetensors",
+      "defaults": { "steps": 4, "guidance": 1.0, "width": 512, "height": 512 }
+    }
+  ]
+}
