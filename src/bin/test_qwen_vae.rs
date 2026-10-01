@@ -3,9 +3,9 @@ use aurora_rust_engine::diffusion::vae_qwen::QwenImageVaeDecoder;
 use candle_core::{DType, Device, Tensor};
 
 fn main() -> anyhow::Result<()> {
-    let p = "/models/comfyui/vae/qwen_image_vae.safetensors";
+    let p = std::env::args().nth(1).unwrap_or_else(|| "/models/comfyui/vae/qwen_image_vae_complet.safetensors".to_string());
     println!("📂 Loading VAE from {}", p);
-    let archive = SafeTensorsArchive::open(p)?;
+    let archive = SafeTensorsArchive::open(&p)?;
     let mut vae_tensors = std::collections::HashMap::new();
     for key in archive.keys() {
         if let Ok(t) = archive.get_tensor(&key, &Device::Cpu, DType::F32) {
