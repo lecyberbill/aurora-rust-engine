@@ -592,7 +592,9 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
   - 82M parameter lightweight architecture generating voice at **> 50x realtime** on CPU/GPU.
   - Style-embedding voice conditioning (multiple predefined American & British male/female voice profiles).
   - G2P (Grapheme-to-Phoneme) and stress-accent tokenizer in pure Rust.
-- [ ] **ChatTTS Expressive Conversational Engine**:
-  - Conversational speech synthesis with natural pauses, laughter, and emotional inflections.
+- [x] **ChatTTS Expressive Conversational Engine (`src/pipelines/chattts.rs`, `src/models/chattts.rs`, `src/audio/vocos.rs`)**:
+  - Conversational speech synthesis with natural pauses, laughter, and emotional inflections (`[laugh]`, `[oral_x]`, `[break_x]`).
+  - Pure Rust GPT prosody autoregression with KV-cache, DVAE acoustic decoder, and high-fidelity Vocos neural vocoder (ISTFT).
+  - CLI runner `src/bin/test_chattts.rs` and pipeline integration with deterministic speaker embedding sampling.
 
 

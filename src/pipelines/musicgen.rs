@@ -13,6 +13,20 @@ use crate::models::{MusicgenDecoder, T5Encoder};
 
 const N_CODEBOOKS: usize = 4;
 const PAD: u32 = 2048;
+const VOCAB: usize = 2048;
+
+fn top_k_filter(logits: &Tensor, k: usize) -> candle_core::Result<Tensor> {
+    let mut vals: Vec<f32> = logits.to_vec1()?;
+    let mut sorted = vals.clone();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let cutoff = sorted[k.min(sorted.len() - 1)];
+    for v in &mut vals {
+        if *v < cutoff {
+            *v = f32::NEG_INFINITY;
+        }
+    }
+    Tensor::from_vec(vals, logits.shape(), logits.device())
+}
 
 pub struct MusicgenPipeline {
     pub t5: T5Encoder,
@@ -71,6 +85,11 @@ impl MusicgenPipeline {
         seed: u64,
     ) -> Result<WavAudio> {
         let cond = self.encode_text(prompt)?; // [1, L, 1024]
+        let uncond = if guidance_scale > 1.0 {
+            Some(self.encode_text("")?)
+        } else {
+            None
+        };
         let lmax = max_frames + N_CODEBOOKS;
 
         // delay pattern (mono, 4 codebooks): pattern[cb,s] = -1 where prediction is valid.
@@ -89,8 +108,11 @@ impl MusicgenPipeline {
 
         // generated sequence starts with column 0 (all pad), grows column by column
         let mut seq: Vec<Vec<i64>> = vec![vec![PAD as i64]; N_CODEBOOKS]; // [4][len]
-        let mut rng = crate::audio::SeededRng::new(seed);
-        let _ = (temperature, top_k, &mut rng);
+        let mut lp = candle_transformers::generation::LogitsProcessor::new(
+            seed,
+            Some(temperature.max(0.01) as f64),
+            Some(0.9),
+        );
 
         for _s in 1..lmax {
             let len = seq[0].len();
@@ -103,23 +125,29 @@ impl MusicgenPipeline {
                 }
             }
             let inp = Tensor::from_vec(data, (1, N_CODEBOOKS, len), &self.device)?;
-            // CFG: [cond; zeros]
-            let logits = if guidance_scale > 1.0 {
-                let cond2 = Tensor::cat(&[&cond, &Tensor::zeros_like(&cond)?], 0)?;
-                let inp2 = Tensor::cat(&[&inp, &inp], 0)?;
-                let out = self.decoder.forward(&inp2, &cond2)?; // [2,4,len,2048]
-                let last = out.narrow(2, len - 1, 1)?.squeeze(2)?; // [2,4,2048]
-                let pos = last.narrow(0, 0, 1)?;
-                let neg = last.narrow(0, 1, 1)?;
-                (&pos + &(&pos - &neg)?.affine(guidance_scale as f64, 0.0)?)? // [1,4,2048]
+            // CFG: [cond; uncond]
+            let logits = if let Some(ref unc) = uncond {
+                let out_cond = self.decoder.forward(&inp, &cond)?; // [1,4,len,2048]
+                let out_uncond = self.decoder.forward(&inp, unc)?;  // [1,4,len,2048]
+                let pos = out_cond.narrow(2, len - 1, 1)?.squeeze(2)?; // [1,4,2048]
+                let neg = out_uncond.narrow(2, len - 1, 1)?.squeeze(2)?; // [1,4,2048]
+                // standard CFG: neg + guidance_scale * (pos - neg)
+                (&neg + &(&pos - &neg)?.affine(guidance_scale as f64, 0.0)?)? // [1,4,2048]
             } else {
                 let out = self.decoder.forward(&inp, &cond)?; // [1,4,len,2048]
                 out.narrow(2, len - 1, 1)?.squeeze(2)?
             };
-            // greedy argmax per codebook
-            let next = logits.argmax(candle_core::D::Minus1)?.squeeze(0)?.to_dtype(DType::U32)?.to_vec1::<u32>()?;
+
+            let logits_f32 = logits.to_dtype(DType::F32)?;
             for cb in 0..N_CODEBOOKS {
-                seq[cb].push(next[cb] as i64);
+                let cb_logits = logits_f32.narrow(1, cb, 1)?.squeeze(1)?.squeeze(0)?;
+                let cb_logits = if top_k > 0 && top_k < VOCAB {
+                    top_k_filter(&cb_logits, top_k)?
+                } else {
+                    cb_logits
+                };
+                let sampled = lp.sample(&cb_logits)?;
+                seq[cb].push(sampled as i64);
             }
         }
 

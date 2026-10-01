@@ -1212,6 +1212,45 @@ println!("Synthesized {:.2}s of speech at {} Hz", audio.duration_seconds(), audi
 * **Ultra-Lightweight** : 82M parameters running at **> 50x realtime** on CPU and GPU.
 * **Natural Voice Profiles** : Multiple built-in American & British voices with expressive prosodic inflections (`af_heart`, `am_adam`, `bf_emma`).
 
+#### 3. ChatTTS (Conversational Dialogue & Expressive Prosody)
+* **Expressive Dialogue Marks** : Full support for inline conversational prosody tokens (`[laugh]`, `[oral_0..9]`, `[break_0..7]`).
+* **Multi-Stage Architecture** : Pure Rust GPT prosody autoregression with KV-cache + DVAE acoustic decoder + high-speed **Vocos** neural vocoder (ISTFT).
+* **Deterministic Speaker Sampling** : Seeded speaker embedding generation for reproducible voice timbre across dialogues.
+
+```rust
+use aurora_rust_engine::pipelines::{ChatTtsPipeline, ChatTtsParams};
+use candle_core::{DType, Device};
+use std::path::Path;
+
+let device = Device::new_cuda(0)?;
+
+let mut pipeline = ChatTtsPipeline::from_files(
+    Path::new("models/chattts/GPT.safetensors"),
+    Path::new("models/chattts/DVAE.safetensors"),
+    Path::new("models/chattts/Vocos.safetensors"),
+    Path::new("models/chattts/tokenizer.json"),
+    None,
+    device,
+    DType::F32,
+)?;
+
+let params = ChatTtsParams {
+    prompt: "Hello! [laugh] Welcome to Aurora Engine in pure Rust. [break_3] How can I help you today?".to_string(),
+    speaker_seed: Some(42),
+    temperature: 0.7,
+    max_steps: 1024,
+    seed: 42,
+};
+
+let audio = pipeline.synthesize(params)?;
+audio.save_wav("chattts_output.wav")?;
+```
+
+CLI test runner:
+```powershell
+cargo run --release --features cuda --bin test_chattts
+```
+
 ---
 
 ## 5. REST API & WebSocket Server Reference

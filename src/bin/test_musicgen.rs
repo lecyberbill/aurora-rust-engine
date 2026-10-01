@@ -26,7 +26,7 @@ fn main() -> anyhow::Result<()> {
     let t0 = std::time::Instant::now();
     let pipe = MusicgenPipeline::from_pretrained(&dir)?;
     println!("loaded ({:?}) in {:.1}s", pipe.device, t0.elapsed().as_secs_f32());
-    let audio = pipe.generate(&prompt, frames, guidance, 1.0, 50, seed)?;
+    let audio = pipe.generate(&prompt, frames, guidance, 1.0, 250, seed)?;
     if let Some(d) = std::path::Path::new(&out).parent() { std::fs::create_dir_all(d)?; }
     audio.save_auto(&out)?;
     println!("saved {out} ({:.2}s, {:.1}s total)", audio.duration_seconds(), t0.elapsed().as_secs_f32());

@@ -1,4 +1,5 @@
 pub mod audio_diffusion;
+pub mod chattts;
 pub mod flux;
 pub mod musicgen;
 pub mod sd15;
@@ -11,6 +12,7 @@ pub mod z_image_turbo;
 pub use audio_diffusion::{
     AceStepVariant, AudioDiffusionPipeline, AudioGenerationMetrics, TaskRequest, TextToMusicRequest,
 };
+pub use chattts::{ChatTtsParams, ChatTtsPipeline};
 pub use flux::FluxPipeline;
 pub use musicgen::MusicgenPipeline;
 pub use sd15::StableDiffusionPipeline;

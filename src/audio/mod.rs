@@ -5,6 +5,7 @@ pub mod encodec;
 pub mod mel;
 pub mod rng;
 pub mod vae_oobleck;
+pub mod vocos;
 pub mod wav;
 
 pub use encode::{encode_ogg, AudioFormat};
@@ -13,4 +14,5 @@ pub use rng::{seeded_randn, SeededRng};
 pub use encode::encode_mp3;
 pub use mel::{slaney_mel_filterbank, whisper_mel_filters};
 pub use vae_oobleck::{AutoencoderOobleck, OobleckConfig};
+pub use vocos::{istft_synthesis, Vocos, VocosConfig};
 pub use wav::{read_wav_pcm, write_wav_pcm16, WavAudio};
