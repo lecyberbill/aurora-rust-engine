@@ -539,18 +539,18 @@ pub struct ZImageTimestepEmbedder {
 
 impl ZImageTimestepEmbedder {
     pub fn new(time_embed_dim: usize, hidden_size: usize, vb: VarBuilder) -> Result<Self> {
-        let (mlp_0, mlp_2) = if let Ok(l0) = linear(time_embed_dim, 1024, vb.pp("mlp.0")) {
-            let l2 = linear(1024, time_embed_dim, vb.pp("mlp.2"))?;
+        let (mlp_0, mlp_2) = if let Ok(l0) = linear_or_no_bias(time_embed_dim, 1024, vb.pp("mlp.0")) {
+            let l2 = linear_or_no_bias(1024, time_embed_dim, vb.pp("mlp.2"))?;
             (l0, l2)
-        } else if let Ok(l0) = linear(time_embed_dim, hidden_size, vb.pp("0")) {
-            let l2 = linear(hidden_size, hidden_size, vb.pp("2"))
-                .or_else(|_| linear(hidden_size, time_embed_dim, vb.pp("2")))?;
+        } else if let Ok(l0) = linear_or_no_bias(time_embed_dim, hidden_size, vb.pp("0")) {
+            let l2 = linear_or_no_bias(hidden_size, hidden_size, vb.pp("2"))
+                .or_else(|_| linear_or_no_bias(hidden_size, time_embed_dim, vb.pp("2")))?;
             (l0, l2)
         } else {
-            let l0 = linear(time_embed_dim, 1024, vb.pp("0"))
-                .or_else(|_| linear(time_embed_dim, hidden_size, vb.pp("mlp.0")))?;
-            let l2 = linear(1024, time_embed_dim, vb.pp("2"))
-                .or_else(|_| linear(hidden_size, hidden_size, vb.pp("mlp.2")))?;
+            let l0 = linear_or_no_bias(time_embed_dim, 1024, vb.pp("0"))
+                .or_else(|_| linear_or_no_bias(time_embed_dim, hidden_size, vb.pp("mlp.0")))?;
+            let l2 = linear_or_no_bias(1024, time_embed_dim, vb.pp("2"))
+                .or_else(|_| linear_or_no_bias(hidden_size, hidden_size, vb.pp("mlp.2")))?;
             (l0, l2)
         };
         Ok(Self {
@@ -602,8 +602,8 @@ impl ZImageCaptionEmbedder {
     pub fn new(cfg: &ZImageConfig, vb: VarBuilder) -> Result<Self> {
         let norm = RMSNorm::new(cfg.cap_dim, vb.pp("cap_embedder.0"))
             .or_else(|_| RMSNorm::new(cfg.cap_dim, vb.pp("txtmlp.0")))?;
-        let proj = linear(cfg.cap_dim, cfg.hidden_size, vb.pp("cap_embedder.1"))
-            .or_else(|_| linear(cfg.cap_dim, cfg.hidden_size, vb.pp("txtmlp.1")))?;
+        let proj = linear_or_no_bias(cfg.cap_dim, cfg.hidden_size, vb.pp("cap_embedder.1"))
+            .or_else(|_| linear_or_no_bias(cfg.cap_dim, cfg.hidden_size, vb.pp("txtmlp.1")))?;
         Ok(Self { norm, proj })
     }
 
@@ -685,8 +685,8 @@ pub struct ZImageTransformer {
 
 impl ZImageTransformer {
     pub fn new(cfg: ZImageConfig, vb: VarBuilder) -> Result<Self> {
-        let x_embedder = linear(cfg.in_channels, cfg.hidden_size, vb.pp("x_embedder"))
-            .or_else(|_| linear(cfg.in_channels, cfg.hidden_size, vb.pp("first")))?;
+        let x_embedder = linear_or_no_bias(cfg.in_channels, cfg.hidden_size, vb.pp("x_embedder"))
+            .or_else(|_| linear_or_no_bias(cfg.in_channels, cfg.hidden_size, vb.pp("first")))?;
         let x_pad_token = vb.get((1, cfg.hidden_size), "x_pad_token")
             .unwrap_or_else(|_| Tensor::zeros((1, cfg.hidden_size), vb.dtype(), vb.device()).unwrap());
         let cap_pad_token = vb.get((1, cfg.hidden_size), "cap_pad_token")
