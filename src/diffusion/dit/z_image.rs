@@ -288,8 +288,13 @@ pub struct ZImageBlock {
 
 impl ZImageBlock {
     pub fn new(cfg: &ZImageConfig, vb: VarBuilder) -> Result<Self> {
-        let ada_ln = linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("adaLN_modulation.0"))
-            .or_else(|_| linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("attn.gate")))?;
+        let ada_ln = if let Ok(aln) = linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("adaLN_modulation.0")) {
+            aln
+        } else if let Ok(aln) = linear_or_no_bias(cfg.hidden_size, cfg.hidden_size, vb.pp("attn.gate")) {
+            aln
+        } else {
+            linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("attn.gate"))?
+        };
         let attention_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm1"))
             .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("prenorm")))?;
         let attention = ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.head_dim, vb.pp("attention"))
@@ -322,27 +327,46 @@ impl ZImageBlock {
         rotary_cos_sin: Option<(&Tensor, &Tensor)>,
     ) -> Result<Tensor> {
         let orig_dtype = x.dtype();
-        let mod_params = self.ada_ln.forward(temb)?; // [B, 15360] (z_image_modulation = True: no SiLU before adaLN)
-        let chunks = mod_params.chunk(4, 1)?;
-        // Lumina2 / ZImage exact modulation order: (scale_msa, gate_msa, scale_mlp, gate_mlp)
-        let scale_msa = chunks[0].unsqueeze(1)?;
-        let gate_msa = chunks[1].unsqueeze(1)?.tanh()?;
-        let scale_mlp = chunks[2].unsqueeze(1)?;
-        let gate_mlp = chunks[3].unsqueeze(1)?.tanh()?;
+        let mod_params = self.ada_ln.forward(temb)?; // (z_image_modulation = True: no SiLU before adaLN)
+        let (scale_msa, gate_msa, scale_mlp, gate_mlp) = if mod_params.dim(1)? == self._hidden_size * 4 {
+            let chunks = mod_params.chunk(4, 1)?;
+            (
+                Some(chunks[0].unsqueeze(1)?),
+                chunks[1].unsqueeze(1)?.tanh()?,
+                Some(chunks[2].unsqueeze(1)?),
+                chunks[3].unsqueeze(1)?.tanh()?,
+            )
+        } else {
+            // mod_params is gate_msa [B, hidden_size]
+            (
+                None,
+                mod_params.unsqueeze(1)?.tanh()?,
+                None,
+                Tensor::ones((temb.dim(0)?, 1, self._hidden_size), mod_params.dtype(), mod_params.device())?,
+            )
+        };
 
-        // Attention path: modulate(attention_norm1(x), scale_msa)
+        // Attention path
         let ones = Tensor::ones((1, 1, 1), x.dtype(), x.device())?;
         let norm_x = self.attention_norm1.forward(x)?;
-        let scale_attn_p1 = scale_msa.broadcast_add(&ones)?;
-        let modulated_x = norm_x.broadcast_mul(&scale_attn_p1)?;
+        let modulated_x = if let Some(ref scale) = scale_msa {
+            let scale_p1 = scale.broadcast_add(&ones)?;
+            norm_x.broadcast_mul(&scale_p1)?
+        } else {
+            norm_x
+        };
         let attn_out = self.attention.forward(&modulated_x, rotary_cos_sin)?;
         let norm_attn = self.attention_norm2.forward(&attn_out)?;
         let x = x.broadcast_add(&norm_attn.broadcast_mul(&gate_msa)?)?;
 
-        // FFN path: modulate(ffn_norm1(x), scale_mlp)
+        // FFN path
         let norm_x2 = self.ffn_norm1.forward(&x)?;
-        let scale_ffn_p1 = scale_mlp.broadcast_add(&ones)?;
-        let modulated_x2 = norm_x2.broadcast_mul(&scale_ffn_p1)?;
+        let modulated_x2 = if let Some(ref scale) = scale_mlp {
+            let scale_p1 = scale.broadcast_add(&ones)?;
+            norm_x2.broadcast_mul(&scale_p1)?
+        } else {
+            norm_x2
+        };
         let ffn_out = self.feed_forward.forward(&modulated_x2)?;
         let norm_ffn = self.ffn_norm2.forward(&ffn_out)?;
         let x = x.broadcast_add(&norm_ffn.broadcast_mul(&gate_mlp)?)?;
@@ -367,10 +391,13 @@ pub struct ZImageRefinerBlock {
 impl ZImageRefinerBlock {
     pub fn new(cfg: &ZImageConfig, vb: VarBuilder, has_adaln: bool) -> Result<Self> {
         let ada_ln = if has_adaln {
-            Some(
-                linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("adaLN_modulation.0"))
-                    .or_else(|_| linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("attn.gate")))?
-            )
+            if let Ok(aln) = linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("adaLN_modulation.0")) {
+                Some(aln)
+            } else if let Ok(aln) = linear_or_no_bias(cfg.hidden_size, cfg.hidden_size, vb.pp("attn.gate")) {
+                Some(aln)
+            } else {
+                Some(linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("attn.gate"))?)
+            }
         } else {
             None
         };
@@ -409,23 +436,42 @@ impl ZImageRefinerBlock {
 
         if let (Some(ref aln), Some(t)) = (&self.ada_ln, temb) {
             let mod_params = aln.forward(t)?; // (z_image_modulation = True: no SiLU before adaLN)
-            let chunks = mod_params.chunk(4, 1)?;
-            let scale_msa = chunks[0].unsqueeze(1)?;
-            let gate_msa = chunks[1].unsqueeze(1)?.tanh()?;
-            let scale_mlp = chunks[2].unsqueeze(1)?;
-            let gate_mlp = chunks[3].unsqueeze(1)?.tanh()?;
+            let (scale_msa, gate_msa, scale_mlp, gate_mlp) = if mod_params.dim(1)? == self._hidden_size * 4 {
+                let chunks = mod_params.chunk(4, 1)?;
+                (
+                    Some(chunks[0].unsqueeze(1)?),
+                    chunks[1].unsqueeze(1)?.tanh()?,
+                    Some(chunks[2].unsqueeze(1)?),
+                    chunks[3].unsqueeze(1)?.tanh()?,
+                )
+            } else {
+                (
+                    None,
+                    mod_params.unsqueeze(1)?.tanh()?,
+                    None,
+                    Tensor::ones((t.dim(0)?, 1, self._hidden_size), mod_params.dtype(), mod_params.device())?,
+                )
+            };
 
             let ones = Tensor::ones((1, 1, 1), x.dtype(), x.device())?;
             let norm_x = self.attention_norm1.forward(x)?;
-            let scale_attn_p1 = scale_msa.broadcast_add(&ones)?;
-            let modulated_x = norm_x.broadcast_mul(&scale_attn_p1)?;
+            let modulated_x = if let Some(ref scale) = scale_msa {
+                let scale_p1 = scale.broadcast_add(&ones)?;
+                norm_x.broadcast_mul(&scale_p1)?
+            } else {
+                norm_x
+            };
             let attn_out = self.attention.forward(&modulated_x, rotary_cos_sin)?;
             let norm_attn = self.attention_norm2.forward(&attn_out)?;
             let x = x.broadcast_add(&norm_attn.broadcast_mul(&gate_msa)?)?;
 
             let norm_x2 = self.ffn_norm1.forward(&x)?;
-            let scale_ffn_p1 = scale_mlp.broadcast_add(&ones)?;
-            let modulated_x2 = norm_x2.broadcast_mul(&scale_ffn_p1)?;
+            let modulated_x2 = if let Some(ref scale) = scale_mlp {
+                let scale_p1 = scale.broadcast_add(&ones)?;
+                norm_x2.broadcast_mul(&scale_p1)?
+            } else {
+                norm_x2
+            };
             let ffn_out = self.feed_forward.forward(&modulated_x2)?;
             let norm_ffn = self.ffn_norm2.forward(&ffn_out)?;
             let x = x.broadcast_add(&norm_ffn.broadcast_mul(&gate_mlp)?)?;
@@ -542,7 +588,8 @@ impl ZImageFinalLayer {
         let ada_ln = linear(cfg.time_embed_dim, cfg.hidden_size, vb.pp("adaLN_modulation.1"))
             .or_else(|_| linear_or_no_bias(cfg.hidden_size, 2, vb.pp("modulation.lin")))
             .or_else(|_| linear_or_no_bias(cfg.hidden_size, cfg.hidden_size, vb.pp("modulation.lin")))?;
-        let linear = linear(cfg.hidden_size, cfg.out_channels, vb.pp("linear"))?;
+        let linear = linear(cfg.hidden_size, cfg.out_channels, vb.pp("linear"))
+            .or_else(|_| linear_or_no_bias(cfg.hidden_size, cfg.out_channels, vb.clone()))?;
         Ok(Self { ada_ln, linear })
     }
 
@@ -550,10 +597,20 @@ impl ZImageFinalLayer {
         let orig_dtype = x.dtype();
         let norm_x = layer_norm_no_affine(x, 1e-6)?;
         let act_t = candle_nn::ops::silu(temb)?;
-        let scale = self.ada_ln.forward(&act_t)?.unsqueeze(1)?;
-        let ones = Tensor::ones((1, 1, 1), scale.dtype(), scale.device())?;
-        let scale_p1 = scale.broadcast_add(&ones)?;
-        let modulated = norm_x.broadcast_mul(&scale_p1)?;
+        let mod_out = self.ada_ln.forward(&act_t)?;
+        let modulated = if mod_out.dim(1)? == 2 {
+            let chunks = mod_out.chunk(2, 1)?;
+            let scale = chunks[0].unsqueeze(1)?;
+            let shift = chunks[1].unsqueeze(1)?;
+            let ones = Tensor::ones((1, 1, 1), scale.dtype(), scale.device())?;
+            let scale_p1 = scale.broadcast_add(&ones)?;
+            norm_x.broadcast_mul(&scale_p1)?.broadcast_add(&shift)?
+        } else {
+            let scale = mod_out.unsqueeze(1)?;
+            let ones = Tensor::ones((1, 1, 1), scale.dtype(), scale.device())?;
+            let scale_p1 = scale.broadcast_add(&ones)?;
+            norm_x.broadcast_mul(&scale_p1)?
+        };
         let out = self.linear.forward(&modulated)?;
         out.to_dtype(orig_dtype)
     }

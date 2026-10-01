@@ -147,7 +147,7 @@ impl ZImageTurboPipeline {
         let total_start = Instant::now();
         let height = params.height;
         let width = params.width;
-        let num_steps = params.num_steps.clamp(1, 8); // Z-Image Turbo is optimized for 1-4 steps
+        let num_steps = params.num_steps.clamp(1, 50); // Turbo default 8 steps
         let b = 1;
 
         println!(
