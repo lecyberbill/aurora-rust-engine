@@ -19,7 +19,8 @@ pub use device::{auto_device, select_device, GenerationMetrics, KernelDispatchCo
 pub use error::{LuminaError, Result};
 pub use models::{
     Architecture, AutoModel, EncodeModel, GenerationModel, ImageGenerationModel, ModelDescriptor,
-    ModelKind, ModelLoadConfig, ModelRegistry, TextEncoderSpec,
+    ModelKind, ModelLoadConfig, ModelRegistry, RRDBNet, RRDBNetConfig, SRVGGNetCompact,
+    SRVGGNetCompactConfig, TextEncoderSpec,
 };
 pub use lora::{LoRALoader, LoRAManager, LoRAMerger, LoRAPair, LoRATarget, LoadedLoRA};
 pub use traits::{ControlNetParams, DiffusionParams, Img2ImgParams, InpaintParams, TextGenerationPipeline, TextToImagePipeline};
@@ -37,7 +38,7 @@ pub use audio::{read_wav_pcm, write_wav_pcm16, Vocos, VocosConfig, WavAudio};
 pub use pipelines::{
     AudioDiffusionPipeline, AudioGenerationMetrics, ChatTtsParams, ChatTtsPipeline, FluxPipeline,
     StableDiffusionPipeline, StableDiffusionXLPipeline, TranscriptionResult, TtsPipeline,
-    WhisperPipeline, ZImageTurboPipeline,
+    UpscaleModel, UpscaleParams, UpscalePipeline, WhisperPipeline, ZImageTurboPipeline,
 };
 pub use text::{ClipTextEncoder, OpenClipTextEncoder, T5TextEncoder};
 

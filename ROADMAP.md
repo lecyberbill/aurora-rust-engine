@@ -597,4 +597,23 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
   - Pure Rust GPT prosody autoregression with KV-cache, DVAE acoustic decoder, and high-fidelity Vocos neural vocoder (ISTFT).
   - CLI runner `src/bin/test_chattts.rs` and pipeline integration with deterministic speaker embedding sampling.
 
+---
+
+## 🚀 Milestone 23: Super-Resolution & Neural Upscaling (Real-ESRGAN, 4x-UltraSharp & Compact VGG)
+
+**Goal.** Provide pure Rust high-fidelity image upscaling (x2, x4, x8) with texture reconstruction and bounded-memory tiled processing:
+
+- [x] **Real-ESRGAN / RRDBNet Architecture (`src/models/esrgan.rs`)**:
+  - Pure Rust implementation of Residual-in-Residual Dense Blocks (RRDB) with dense skip connections and `LeakyReLU(0.2)`.
+  - Multi-scale upsampling paths (x2, x4, x8) with nearest-neighbor interpolation and convolutional refinement.
+  - Automatic SafeTensors weight loader supporting official `RealESRGAN_x4plus`, `4x-UltraSharp`, `NMKD`, and `BSRGAN` with flexible prefix stripping (`params_ema.`, `params.`, `model.`).
+- [x] **SRVGGNetCompact Architecture (`src/models/esrgan.rs`)**:
+  - High-speed compact VGG feed-forward backbone with native Candle `PixelShuffle` (depth-to-space) tensor reshapes.
+  - Full support for `RealESRGAN_x4plus_anime_6B` and lightweight real-time upscalers.
+- [x] **Bounded-Memory Tiled Pipeline & Seam Blending (`src/pipelines/upscale.rs`)**:
+  - Configurable tile size (e.g. 512px) and overlap padding (e.g. 32px) to upscale arbitrary 4K/8K/16K resolutions without VRAM exhaustion.
+  - Dynamic RGBA alpha channel preservation with Catmull-Rom resampling for transparency.
+  - CLI runner binary `src/bin/test_upscale.rs`.
+
+
 

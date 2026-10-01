@@ -16,6 +16,7 @@ pub mod chattts;
 pub mod common;
 pub mod config;
 pub mod descriptor;
+pub mod esrgan;
 pub mod image;
 pub mod moonshine;
 pub mod musicgen;
@@ -30,6 +31,7 @@ pub use acestep::{AceStepConditionEncoder, AceStepTransformer1D, AceStepTransfor
 pub use acestep_codec::AceStepAudioCodec;
 pub use acestep_lm::AceStepLm;
 pub use chattts::{ChatTtsConfig, ChatTtsDvae, ChatTtsGpt, ChatTtsModel};
+pub use esrgan::{RRDBNet, RRDBNetConfig, SRVGGNetCompact, SRVGGNetCompactConfig};
 pub use stable_audio::{StableAudioPositionalEmbedding, StableAudioProjectionModel};
 pub use stable_audio_dit::StableAudioDit;
 pub use stable_audio_sched::CosineDpmScheduler;

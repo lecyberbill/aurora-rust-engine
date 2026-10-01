@@ -1339,6 +1339,54 @@ Aurora comes with pre-built test and benchmark executables in `src/bin/`:
 
 ---
 
+## 6. Super-Resolution & Neural Upscaling (Real-ESRGAN & 4x-UltraSharp)
+
+Aurora Engine provides high-speed, pure Rust image upscaling (x2, x4, x8) powered by **RRDBNet** (Real-ESRGAN, 4x-UltraSharp, NMKD) and **SRVGGNetCompact** (Anime-6B).
+
+### Key Features
+- **1-step deterministic feed-forward CNN** (~50–200ms inference on CUDA).
+- **Tiled inference with seam blending**: Upscale massive 4K, 8K, or 16K images without GPU Out-Of-Memory (OOM).
+- **Transparency preservation**: Automatically scales RGBA alpha channels using Catmull-Rom resampling.
+- **SafeTensors auto-detection**: Reads raw weights or prefixed weights (`params_ema.`, `model.`, `params.`).
+
+### Rust Usage Example
+
+```rust
+use std::path::Path;
+use aurora_rust_engine::{select_device, UpscaleParams, UpscalePipeline};
+use image::ImageReader;
+
+// 1. Select device (CUDA or CPU fallback)
+let device = select_device(true)?;
+
+// 2. Load model from SafeTensors
+let pipeline = UpscalePipeline::load_from_safetensors(
+    "D:/models/upscaler/4x-UltraSharp.safetensors",
+    &device,
+)?;
+
+// 3. Open input image
+let img = ImageReader::open("render_1024.png")?.decode()?;
+
+// 4. Configure tiled inference
+let params = UpscaleParams {
+    tile_size: 512, // Bounded VRAM footprint
+    tile_pad: 32,   // Overlap padding to prevent edge seams
+};
+
+// 5. Upscale image (1024x1024 -> 4096x4096 4K)
+let upscaled = pipeline.upscale_image(&img, &params)?;
+upscaled.save("render_4k.png")?;
+```
+
+### Running from CLI
+
+```bash
+cargo run --bin test_upscale -- <model.safetensors> <input.png> <output.png>
+```
+
+---
+
 ## 7. Hardware & Performance Tuning Guide
 
 ### Recommended Settings per GPU VRAM Tier

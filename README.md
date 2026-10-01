@@ -21,7 +21,8 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 
 | Modality | Models |
 |---|---|
-| **Image** | SDXL / Pony XL (all single-file checkpoints), FLUX.1 `[dev/schnell]`, FLUX.2-Klein-4B / Klein-9B / Dev, Z-Image Turbo (S3-DiT 6B) |
+| **Image (Diffusion)** | SDXL / Pony XL (all single-file checkpoints), FLUX.1 `[dev/schnell]`, FLUX.2-Klein-4B / Klein-9B / Dev, Z-Image Turbo (S3-DiT 6B) |
+| **Super-Resolution / Upscaling** | **Real-ESRGAN** (x2/x4/x8), **4x-UltraSharp**, **NMKD**, **SRVGGNetCompact** (Anime-6B) with Bounded Tiling & Seam Blending |
 | **Text (CausalLM)** | Qwen 2.5/3(.5), Llama 3, Mistral, Gemma 2/3, DeepSeek — GGUF (Q4_K_M/Q8_0) & SafeTensors |
 | **Speech-to-Text** | Whisper Large-v3 / Turbo, **Moonshine** (native Mel + encoder/decoder) |
 | **Text-to-Speech** | Parler-TTS, Kokoro-82M, **ChatTTS** (Conversational Prosody & Vocos) |
@@ -36,6 +37,7 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 - **Pure Rust Native Inference**: Zero Python dependencies, zero PyTorch overhead, compiled directly to a native standalone executable.
 - **Unified HuggingFace AutoModel Facade**: Standard `AutoModel::from_local` and `AutoModel::from_pretrained` interface supporting both generative diffusion pipelines and autoregressive text models.
 - **CausalLM Text-to-Text Generation (Pure Rust)**: Autoregressive text generation with GPU KV-Cache supporting **Llama 3 / DeepSeek**, **Qwen 2.5/3.5**, **Gemma 2/3**, and **Mistral** in both **GGUF** (quantized Q4_K_M, Q8_0) and **SafeTensors** formats.
+- **Super-Resolution & Neural Upscaling (Real-ESRGAN & 4x-UltraSharp)**: High-speed pure Rust neural upscaling (x2, x4, x8) powered by `RRDBNet` and `SRVGGNetCompact` with bounded-memory tiled processing, seam blending, and transparency preservation.
 - **Flux.1 & Flux.2 Family Full Support**: Native implementation of Multimodal Diffusion Transformers (MMDiT) for **Flux.1 [dev/schnell]**, **Flux.2-Klein-4B**, **Flux.2-Klein-9B**, and **Flux.2-Dev Scaled** with exact 3D/4D Rotary Position Embeddings (RoPE).
 - **Z-Image Turbo Realtime DiT (S3-DiT 6B)**: 100% pure Rust 4-step real-time inference with native FlashAttention-2, Qwen3-4B text conditioning, 16-channel VAE, and dynamic shift timestep scheduling.
 - **FLUX.2 Multi-Image Reference Conditioning (Mode Édition)**: Native zero-adapter reference image guidance using 4D RoPE spatial-temporal coordinates $[T, Y, X, \text{Ref}]$ and VAE latent token injection for identity preservation across scenes.
