@@ -10,11 +10,11 @@ pub fn auto_device() -> candle_core::Result<Device> {
     {
         match Device::new_cuda(0) {
             Ok(device) => {
-                info!("Using CUDA acceleration device (ordinal 0)");
+                info!("Using GPU acceleration device via CUDA/ROCm (ordinal 0)");
                 return Ok(device);
             }
             Err(err) => {
-                tracing::warn!("CUDA device requested but unavailable: {:?}. Falling back.", err);
+                tracing::warn!("GPU device requested but unavailable: {:?}. Falling back.", err);
             }
         }
     }

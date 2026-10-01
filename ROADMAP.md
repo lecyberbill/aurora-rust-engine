@@ -634,6 +634,16 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
   - Full end-to-end inference pipeline supporting Qwen2-VL, Qwen2.5-VL, Qwen3-VL, PaliGemma 2, and SmolVLM.
   - CLI runner `src/bin/test_vlm.rs` for visual Q&A and image analysis.
 
+---
 
+## 🚀 Milestone 25: Linux & AMD ROCm / HIP Acceleration (CROSS-PLATFORM DEPLOYMENT)
 
+**Goal.** Provide native, high-performance support for Linux systems and AMD Radeon GPUs via ROCm / HIP acceleration:
 
+- [x] **Universal GPU Device Dispatch (`src/device.rs`)**:
+  - Unified GPU initialization supporting both NVIDIA CUDA (`Device::new_cuda(0)`) and AMD ROCm / HIP runtimes on Linux without code modification.
+- [x] **ROCm Compilation & Build Pipeline**:
+  - Direct compatibility with `ROCM_PATH=/opt/rocm`, `HIP_PATH=/opt/rocm`, and `HSA_OVERRIDE_GFX_VERSION` for consumer RDNA2/RDNA3 GPUs (RX 6000 / 7000 / 9000 series).
+  - Validation of GGUF, SafeTensors mmap, Flash-Attn fallback, and VLM pipelines under Linux POSIX memory mapping.
+- [ ] **Automated CI/CD Cross-Compilation**:
+  - GitHub Actions matrix workflow building release binaries on `ubuntu-latest` with ROCm 6.x and CUDA 12.x toolchains.
