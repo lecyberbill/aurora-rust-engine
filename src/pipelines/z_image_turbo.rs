@@ -223,18 +223,21 @@ impl ZImageTurboPipeline {
         }
         let total_denoising_time_ms = t_denoise_start.elapsed().as_millis() as f64;
 
-        // 5. Decode Latents through VAE (on CPU to prevent VRAM spikes)
+        // 5. Decode Latents through VAE (or FastLatentPreviewer fallback)
         let t_vae_start = Instant::now();
-        let vae = self.vae.as_ref().ok_or_else(|| {
-            candle_core::Error::Msg("VAE Decoder missing for Z-Image Turbo pipeline".into())
-        })?;
-
-        let cpu_latents = latents.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
-        let decoded = vae.decode(&cpu_latents)?;
+        let rgb_img = if let Some(ref vae) = self.vae {
+            let cpu_latents = latents.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+            if let Ok(decoded) = vae.decode(&cpu_latents) {
+                crate::diffusion::vae::tensor_to_rgb_image(&decoded)?
+            } else {
+                crate::diffusion::vae::FastLatentPreviewer::preview_latent(&latents)
+                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?
+            }
+        } else {
+            crate::diffusion::vae::FastLatentPreviewer::preview_latent(&latents)
+                .map_err(|e| candle_core::Error::Msg(e.to_string()))?
+        };
         let vae_decode_time_ms = t_vae_start.elapsed().as_millis() as f64;
-
-        // 6. Convert decoded tensor to RGB Image
-        let rgb_img = crate::diffusion::vae::tensor_to_rgb_image(&decoded)?;
         let total_time_ms = total_start.elapsed().as_millis() as f64;
 
         let metrics = GenerationMetrics {
