@@ -11,6 +11,9 @@ fn main() -> anyhow::Result<()> {
         Ok(enc) => {
             println!("✅ Qwen3TextEncoder loaded successfully!");
             println!("   Tokenizer status: present={}", enc.has_tokenizer());
+            let prompt = "a majestic white wolf on a snowy cliff at golden hour, photorealistic, 8k";
+            let ctx = enc.encode_last_hidden(prompt, 0)?;
+            println!("   Prompt encoded shape: {:?} (dtype: {:?})", ctx.dims(), ctx.dtype());
         }
         Err(e) => {
             println!("❌ Qwen3TextEncoder::from_archive failed: {:?}", e);

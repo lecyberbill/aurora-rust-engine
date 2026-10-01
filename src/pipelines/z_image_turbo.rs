@@ -159,10 +159,13 @@ impl ZImageTurboPipeline {
         let t_encode_start = Instant::now();
         let max_seq_len = 0; // 0 = dynamic exact prompt length (no noise padding)
         let context = if let Some(ref enc) = self.text_encoder {
-            enc.encode_last_hidden(params.prompt, max_seq_len)?
+            let ctx = enc.encode_last_hidden(params.prompt, max_seq_len)?
                 .to_device(&self.device)?
-                .to_dtype(self.dtype)?
+                .to_dtype(self.dtype)?;
+            println!("🧠 Prompt encoded successfully: shape={:?}", ctx.dims());
+            ctx
         } else {
+            println!("⚠️ No text encoder attached! Using dummy zeros context.");
             Tensor::zeros((1, 1, 2560), self.dtype, &self.device)?
         };
         let text_encoding_time_ms = t_encode_start.elapsed().as_millis() as f64;

@@ -106,6 +106,11 @@ impl ZImageConfig {
             }
         }
 
+        if cfg.num_layers == 28 {
+            // Krea 2 Turbo: rope_theta = 1000.0
+            cfg.theta = 1000.0;
+        }
+
         cfg
     }
 }
@@ -782,7 +787,7 @@ impl ZImageTransformer {
         };
         let total_text_tokens = text_feat.dim(1)?;
 
-        let theta = 256.0f64;
+        let theta = self.config.theta;
         let axes_dim = [32, 48, 48];
 
         // 3a. Context RoPE for context_refiner: pos_ids = [1.0 + i, 0, 0]
