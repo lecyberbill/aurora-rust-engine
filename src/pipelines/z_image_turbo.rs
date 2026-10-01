@@ -224,12 +224,8 @@ impl ZImageTurboPipeline {
             let pred_v = self.transformer.forward(&latents, &t_tensor, &context)?;
             let v_std = pred_v.to_dtype(DType::F32)?.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
 
-            // Negate velocity for Flow Matching Euler ODE step:
-            // Official diffusers pipeline_z_image: noise_pred = -noise_pred; scheduler.step(noise_pred, ...)
-            let noise_pred = pred_v.neg()?;
-
-            // Step scheduler
-            latents = self.scheduler.step(&noise_pred, t, &latents)?;
+            // Step scheduler: Flow-Matching Euler ODE step (dt < 0 steps toward signal)
+            latents = self.scheduler.step(&pred_v, t, &latents)?;
             let lat_std = latents.to_dtype(DType::F32)?.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
 
             println!(
