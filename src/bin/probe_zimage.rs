@@ -82,8 +82,15 @@ fn main() -> anyhow::Result<()> {
         let rest = key.strip_prefix("model.diffusion_model.")
             .or_else(|| key.strip_prefix("diffusion_model."))
             .unwrap_or(&key);
-        if let Ok(t) = archive.get_tensor(&key, &device, dtype) {
-            dit_tensors.insert(rest.to_string(), t);
+        match archive.get_tensor(&key, &device, dtype) {
+            Ok(t) => {
+                dit_tensors.insert(rest.to_string(), t);
+            }
+            Err(e) => {
+                if dit_tensors.len() < 10 || key.contains("tmlp") || key.contains("mlp") {
+                    println!("   ⚠️ Failed loading tensor '{}': {:?}", key, e);
+                }
+            }
         }
     }
     println!("   Found {} DiT tensors in archive", dit_tensors.len());
