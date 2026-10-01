@@ -71,16 +71,16 @@ impl VisionAttention {
         let (b, s, d) = x.dims3()?;
         let qkv = self.qkv.forward(x)?;
         let qkv = qkv.reshape((b, s, 3, self.num_heads, self.head_dim))?;
-        let q = qkv.narrow(2, 0, 1)?.squeeze(2)?.transpose(1, 2)?;
-        let k = qkv.narrow(2, 1, 1)?.squeeze(2)?.transpose(1, 2)?;
-        let v = qkv.narrow(2, 2, 1)?.squeeze(2)?.transpose(1, 2)?;
+        let q = qkv.narrow(2, 0, 1)?.squeeze(2)?.transpose(1, 2)?.contiguous()?;
+        let k = qkv.narrow(2, 1, 1)?.squeeze(2)?.transpose(1, 2)?.contiguous()?;
+        let v = qkv.narrow(2, 2, 1)?.squeeze(2)?.transpose(1, 2)?.contiguous()?;
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+        let attn_weights = (q.matmul(&k.transpose(2, 3)?.contiguous()?)? * scale)?;
         let attn_probs = candle_nn::ops::softmax(&attn_weights, candle_core::D::Minus1)?;
         let context = attn_probs.matmul(&v)?;
 
-        let context = context.transpose(1, 2)?.reshape((b, s, d))?;
+        let context = context.transpose(1, 2)?.contiguous()?.reshape((b, s, d))?;
         self.proj.forward(&context)
     }
 }
@@ -215,7 +215,7 @@ impl VisionTransformer {
         let (_, embed_dim, grid_h, grid_w) = patches.dims4()?;
 
         // Flatten spatial patches to sequence [B, S, D]
-        let mut x = patches.permute((0, 2, 3, 1))?.reshape((b, grid_h * grid_w, embed_dim))?;
+        let mut x = patches.permute((0, 2, 3, 1))?.contiguous()?.reshape((b, grid_h * grid_w, embed_dim))?;
 
         if let Some(ref pos) = self.pos_embed {
             let (_, pos_len, _) = pos.dims3()?;
@@ -239,7 +239,7 @@ impl VisionTransformer {
             let merged_h = grid_h / m;
             let merged_w = grid_w / m;
             let x = x.reshape((b, merged_h, m, merged_w, m, embed_dim))?;
-            let x = x.permute((0, 1, 3, 2, 4, 5))?;
+            let x = x.permute((0, 1, 3, 2, 4, 5))?.contiguous()?;
             let x = x.reshape((b, merged_h * merged_w, m * m * embed_dim))?;
             Ok(x)
         } else {
@@ -374,9 +374,9 @@ impl VlmAttention {
         let k = self.k_proj.forward(x)?;
         let v = self.v_proj.forward(x)?;
 
-        let mut q = q.reshape((b, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?;
-        let mut k = k.reshape((b, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
-        let v = v.reshape((b, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
+        let mut q = q.reshape((b, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
+        let mut k = k.reshape((b, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
+        let v = v.reshape((b, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
 
         q = self.apply_rope(&q, pos)?;
         k = self.apply_rope(&k, pos)?;
@@ -400,7 +400,7 @@ impl VlmAttention {
         let v_all = self.repeat_kv(v_all)?;
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let attn_weights = (q.matmul(&k_all.transpose(2, 3)?)? * scale)?;
+        let attn_weights = (q.matmul(&k_all.transpose(2, 3)?.contiguous()?)? * scale)?;
 
         // Apply causal mask if seq_len > 1
         let total_kv_len = k_all.dim(2)?;
@@ -413,7 +413,7 @@ impl VlmAttention {
 
         let attn_probs = candle_nn::ops::softmax(&attn_weights, candle_core::D::Minus1)?;
         let context = attn_probs.matmul(&v_all)?;
-        let context = context.transpose(1, 2)?.reshape((b, seq_len, self.num_heads * self.head_dim))?;
+        let context = context.transpose(1, 2)?.contiguous()?.reshape((b, seq_len, self.num_heads * self.head_dim))?;
 
         self.o_proj.forward(&context)
     }
@@ -424,7 +424,7 @@ impl VlmAttention {
             return Ok(x);
         }
         let (b, n_kv_heads, seq_len, head_dim) = x.dims4()?;
-        let x = x.unsqueeze(2)?.expand((b, n_kv_heads, n_rep, seq_len, head_dim))?;
+        let x = x.unsqueeze(2)?.expand((b, n_kv_heads, n_rep, seq_len, head_dim))?.contiguous()?;
         x.reshape((b, n_kv_heads * n_rep, seq_len, head_dim))
     }
 
@@ -550,7 +550,12 @@ impl VlmLanguageModel {
     }
 
     pub fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
-        self.embed_tokens.forward(input_ids)
+        let input_ids = if input_ids.dtype() != DType::U32 {
+            input_ids.to_dtype(DType::U32)?
+        } else {
+            input_ids.clone()
+        };
+        self.embed_tokens.forward(&input_ids)
     }
 
     pub fn forward_with_embeds(
