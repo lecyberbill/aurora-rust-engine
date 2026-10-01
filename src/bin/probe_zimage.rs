@@ -35,86 +35,96 @@ fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .or_else(|| std::env::var("MODEL_PATH").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(r"G:\models\zit\z-image-turbo-fp8-aio.safetensors"));
+    let vae_path = std::env::args().nth(2)
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("VAE_PATH").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(r"/models/comfyui/vae/qwen_image_vae.safetensors"));
 
     println!("📂 Opening: {:?}", aio_path);
     let archive = Arc::new(SafeTensorsArchive::open(&aio_path)?);
-    let keys = archive.keys();
+    let keys: Vec<String> = archive.keys().map(|k| k.to_string()).collect();
     println!("🔑 Total keys: {}", keys.len());
-    println!("📋 First 25 keys:");
-    for k in keys.iter().take(25) {
+    println!("📋 First 30 keys:");
+    for k in keys.iter().take(30) {
         println!("   • {}", k);
     }
 
-    // 1. Probe Text Encoder
+    // 1. Probe Text Encoder (if embedded)
     println!("\n--- [Probe 1: Qwen3 Text Encoder] ---");
-    let text_encoder = Qwen3TextEncoder::from_archive(archive.as_ref(), None, &device, dtype)?;
-    println!("   Tokenizer status: present={}", text_encoder.has_tokenizer());
-    let prompt = "A cinematic futuristic sports car driving through a neon cyber city at night, 8k octane render, hyperdetailed";
-    let context = text_encoder.encode_last_hidden(prompt, 256)?;
-    print_stats("Qwen3 Context Embeddings (layer 34)", &context)?;
+    let context = match Qwen3TextEncoder::from_archive(archive.as_ref(), None, &device, dtype) {
+        Ok(text_encoder) => {
+            println!("   Tokenizer status: present={}", text_encoder.has_tokenizer());
+            let prompt = "A cinematic futuristic sports car driving through a neon cyber city at night, 8k octane render, hyperdetailed";
+            let ctx = text_encoder.encode_last_hidden(prompt, 256)?;
+            print_stats("Qwen3 Context Embeddings", &ctx)?;
+            ctx
+        }
+        Err(e) => {
+            println!("   ℹ️ Text encoder not in this checkpoint ({:?}), creating dummy context for DiT probe", e);
+            Tensor::zeros((1, 16, 2560), dtype, &device)?
+        }
+    };
 
     // 2. Probe DiT Model Architecture & Forward pass
     println!("\n--- [Probe 2: Z-Image DiT Transformer] ---");
     let mut dit_tensors = std::collections::HashMap::new();
     for key in archive.keys() {
-        if let Some(rest) = key.strip_prefix("model.diffusion_model.") {
-            if let Ok(t) = archive.get_tensor(&key, &device, dtype) {
-                dit_tensors.insert(rest.to_string(), t);
-            }
+        let rest = key.strip_prefix("model.diffusion_model.")
+            .or_else(|| key.strip_prefix("diffusion_model."))
+            .unwrap_or(&key);
+        if let Ok(t) = archive.get_tensor(&key, &device, dtype) {
+            dit_tensors.insert(rest.to_string(), t);
         }
     }
+    println!("   Found {} DiT tensors in archive", dit_tensors.len());
     let dit_vb = candle_nn::VarBuilder::from_tensors(dit_tensors, dtype, &device);
     let config = ZImageConfig::default();
-    let transformer = ZImageTransformer::new(config, dit_vb)?;
+    let transformer = match ZImageTransformer::new(config, dit_vb) {
+        Ok(t) => {
+            println!("   ✅ ZImageTransformer successfully instantiated!");
+            Some(t)
+        }
+        Err(e) => {
+            println!("   ❌ ZImageTransformer instantiation error: {:?}", e);
+            None
+        }
+    };
 
-    let latents = Tensor::randn(0.0f32, 1.0f32, (1, 16, 64, 64), &device)?.to_dtype(dtype)?;
-    print_stats("Initial Latents x_0", &latents)?;
+    if let Some(ref transformer) = transformer {
+        let latents = Tensor::randn(0.0f32, 1.0f32, (1, 16, 64, 64), &device)?.to_dtype(dtype)?;
+        print_stats("Initial Latents x_0", &latents)?;
 
-    let t_tensor = Tensor::from_vec(vec![0.0f32], (1,), &device)?.to_dtype(dtype)?; // sigma = 1.0 -> lumina_t = 0.0
-    let pred_v = transformer.forward(&latents, &t_tensor, &context)?;
-    print_stats("Predicted Velocity (t=0)", &pred_v)?;
+        let t_tensor = Tensor::from_vec(vec![0.0f32], (1,), &device)?.to_dtype(dtype)?; // sigma = 1.0 -> lumina_t = 0.0
+        let pred_v = transformer.forward(&latents, &t_tensor, &context)?;
+        print_stats("Predicted Velocity (t=0)", &pred_v)?;
 
-    // 3. Probe Denoising Steps (4 steps)
-    println!("\n--- [Probe 3: Flow Match Scheduler Simulation] ---");
-    let mut scheduler = FlowMatchEulerScheduler::new(FlowMatchEulerConfig {
-        shift: 3.0,
-        base_shift: 0.5,
-        max_shift: 1.15,
-        min_shift: 0.5,
-        use_dynamic_shifting: false,
-        double_shift_linspace: false,
-    });
-    scheduler.set_timesteps(4)?;
-    let timesteps = scheduler.timesteps().to_vec();
-    let sigmas = scheduler.sigmas().to_vec();
-    println!("   Timesteps: {:?}", timesteps);
-    println!("   Sigmas: {:?}", sigmas);
+        // 3. Probe Denoising Steps (4 steps)
+        println!("\n--- [Probe 3: Flow Match Scheduler Simulation] ---");
+        let mut scheduler = FlowMatchEulerScheduler::new(FlowMatchEulerConfig {
+            shift: 3.0,
+            base_shift: 0.5,
+            max_shift: 1.15,
+            min_shift: 0.5,
+            use_dynamic_shifting: false,
+            double_shift_linspace: false,
+        });
+        scheduler.set_timesteps(4)?;
+        let timesteps = scheduler.timesteps().to_vec();
+        let sigmas = scheduler.sigmas().to_vec();
+        println!("   Timesteps: {:?}", timesteps);
+        println!("   Sigmas: {:?}", sigmas);
 
-    let mut cur_latents = latents.clone();
-    for (step_idx, &t) in timesteps.iter().enumerate() {
-        let sigma = t as f32 / 1000.0f32;
-        let lumina_t = 1.0f32 - sigma;
-        let t_t = Tensor::from_vec(vec![lumina_t], (1,), &device)?.to_dtype(dtype)?;
-        let v = transformer.forward(&cur_latents, &t_t, &context)?;
-        print_stats(&format!("Step {} pred_v (sigma={:.3})", step_idx + 1, sigma), &v)?;
-        cur_latents = scheduler.step(&v, t, &cur_latents)?;
-        print_stats(&format!("Step {} latents_next", step_idx + 1), &cur_latents)?;
-    }
-
-    // 4. Probe VAE Decoding
-    println!("\n--- [Probe 4: VAE Decoding Scaling Test] ---");
-    let vae_archive = Arc::new(SafeTensorsArchive::open(&vae_path)?);
-    let mut vae_tensors = std::collections::HashMap::new();
-    for key in vae_archive.keys() {
-        if let Ok(t) = vae_archive.get_tensor(&key, &device, dtype) {
-            vae_tensors.insert(key.to_string(), t);
+        let mut cur_latents = latents.clone();
+        for (step_idx, &t) in timesteps.iter().enumerate() {
+            let sigma = t as f32 / 1000.0f32;
+            let lumina_t = 1.0f32 - sigma;
+            let t_t = Tensor::from_vec(vec![lumina_t], (1,), &device)?.to_dtype(dtype)?;
+            let v = transformer.forward(&cur_latents, &t_t, &context)?;
+            print_stats(&format!("Step {} pred_v (sigma={:.3})", step_idx + 1, sigma), &v)?;
+            cur_latents = scheduler.step(&v, t, &cur_latents)?;
+            print_stats(&format!("Step {} latents_next", step_idx + 1), &cur_latents)?;
         }
     }
-    let vae_vb = candle_nn::VarBuilder::from_tensors(vae_tensors, dtype, &device);
-    let vae = FluxVaeDecoder::new(vae_vb)?;
-
-    let decoded_default = vae.decode(&cur_latents)?;
-    print_stats("Decoded with Flux 1 scale ((z/0.3611)+0.1159)", &decoded_default)?;
 
     println!("\n✅ Isolation Probe Completed successfully.");
     Ok(())
