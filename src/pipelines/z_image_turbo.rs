@@ -186,11 +186,11 @@ impl ZImageTurboPipeline {
             params.prompt, num_steps, width, height
         );
 
-        // 1. Text Encoding (Qwen3 -> context [1, seq_len, 2560])
+        // 1. Text Encoding (Qwen3 12-Layer Taps for Krea 2 -> context [1, 12, seq_len, 2560])
         let t_encode_start = Instant::now();
         let max_seq_len = 0; // 0 = dynamic exact prompt length (no noise padding)
         let context = if let Some(ref enc) = self.text_encoder {
-            let ctx = enc.encode_last_hidden(params.prompt, max_seq_len)?
+            let ctx = enc.encode_krea2_12_layers(params.prompt, max_seq_len)?
                 .to_device(&self.device)?
                 .to_dtype(self.dtype)?;
             println!("🧠 Prompt encoded successfully: shape={:?}", ctx.dims());

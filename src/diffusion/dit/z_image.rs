@@ -677,6 +677,7 @@ pub struct ZImageTransformer {
     pub cap_pad_token: Tensor,
     pub t_embedder: ZImageTimestepEmbedder,
     pub cap_embedder: ZImageCaptionEmbedder,
+    pub txtfusion_projector: Option<Tensor>,
     pub context_refiner: Vec<ZImageRefinerBlock>,
     pub layers: Vec<ZImageBlock>,
     pub noise_refiner: Vec<ZImageRefinerBlock>,
@@ -694,6 +695,10 @@ impl ZImageTransformer {
         let t_embedder = ZImageTimestepEmbedder::new(cfg.time_embed_dim, cfg.hidden_size, vb.pp("t_embedder"))
             .or_else(|_| ZImageTimestepEmbedder::new(cfg.time_embed_dim, cfg.hidden_size, vb.pp("tmlp")))?;
         let cap_embedder = ZImageCaptionEmbedder::new(&cfg, vb.clone())?;
+
+        let txtfusion_projector = vb.pp("txtfusion.projector").get((1, 12), "weight")
+            .or_else(|_| vb.get((1, 12), "txtfusion.projector.weight"))
+            .ok();
 
         let mut context_refiner = Vec::with_capacity(2);
         for i in 0..2 {
@@ -728,6 +733,7 @@ impl ZImageTransformer {
             cap_pad_token,
             t_embedder,
             cap_embedder,
+            txtfusion_projector,
             context_refiner,
             layers,
             noise_refiner,
@@ -735,7 +741,7 @@ impl ZImageTransformer {
         })
     }
 
-    /// Forward pass: input latents [B, C, H, W], timestep [B] (normalized sigma), text context [B, L, D]
+    /// Forward pass: input latents [B, C, H, W], timestep [B] (normalized sigma), text context [B, L, D] or [B, 12, L, D]
     pub fn forward(
         &self,
         latents: &Tensor,
@@ -771,8 +777,20 @@ impl ZImageTransformer {
         // 2. Timestep embedding (Lumina: t = (1.0 - sigma) * 1000.0)
         let temb = self.t_embedder.forward(timestep)?;
 
-        // 3. Caption context embedding & padding to multiple of 32
-        let raw_text_feat = self.cap_embedder.forward(context)?;
+        // 3. Caption context projection (from 12 taps if 4D) and embedding & padding to multiple of 32
+        let context_3d = if context.rank() == 4 {
+            let (_b, num_taps, _seq_len, _feat_dim) = context.dims4()?;
+            if let Some(ref proj) = self.txtfusion_projector {
+                let proj_4d = proj.to_dtype(context.dtype())?.to_device(context.device())?.reshape((1, num_taps, 1, 1))?;
+                context.broadcast_mul(&proj_4d)?.sum(1)?
+            } else {
+                context.mean(1)?
+            }
+        } else {
+            context.clone()
+        };
+
+        let raw_text_feat = self.cap_embedder.forward(&context_3d)?;
         let cap_feats_len = raw_text_feat.dim(1)?;
         let cap_pad_extra = (pad_multiple - (cap_feats_len % pad_multiple)) % pad_multiple;
         let mut text_feat = if cap_pad_extra > 0 {

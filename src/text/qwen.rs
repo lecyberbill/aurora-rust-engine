@@ -550,15 +550,64 @@ impl Qwen3TextEncoder {
         Tensor::cat(&parts, 2)
     }
 
+    /// Encode prompt for Krea 2 Turbo:
+    /// Extracts 12 specific hidden layers (taps: [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35])
+    /// using the official Krea 2 system chat template:
+    /// `<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n`
+    /// Returns stacked tensor [1, 12, seq_len, 2560]
+    pub fn encode_krea2_12_layers(&self, prompt: &str, max_len: usize) -> Result<Tensor> {
+        let pad_id = self.pad_id;
+        let token_ids = if let Some(ref tok) = self.tokenizer {
+            let formatted_prompt = format!(
+                "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                prompt
+            );
+            let enc = tok.encode(formatted_prompt.as_str(), true)
+                .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+            let mut ids = enc.get_ids().to_vec();
+            if max_len > 0 {
+                ids.truncate(max_len);
+                while ids.len() < max_len {
+                    ids.push(pad_id);
+                }
+            }
+            ids
+        } else {
+            let len = if max_len > 0 { max_len } else { 1 };
+            vec![pad_id; len]
+        };
+
+        let seq_len = token_ids.len();
+        let ids_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
+        let mut h = self.embed_tokens.forward(&ids_tensor)?;
+
+        let target_layers = [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35];
+        let mut taps: Vec<Tensor> = Vec::with_capacity(12);
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            h = layer.forward(&h)?;
+            if target_layers.contains(&i) {
+                taps.push(h.clone());
+            }
+        }
+
+        while taps.len() < 12 {
+            taps.push(h.clone());
+        }
+
+        // Stack taps into [1, 12, seq_len, hidden_dim]
+        Tensor::stack(&taps, 1)
+    }
+
     /// Encode prompt for Z-Image / Lumina2:
     /// ZImageTEModel extracts the penultimate layer (layer_idx = -2, i.e. 34th layer for 36-layer Qwen3-4B)
     /// without applying final LayerNorm (layer_norm_hidden_state=False).
-    /// Prompt template: `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`
+    /// Prompt template: `<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n`
     pub fn encode_last_hidden(&self, prompt: &str, max_len: usize) -> Result<Tensor> {
         let pad_id = self.pad_id;
         let token_ids = if let Some(ref tok) = self.tokenizer {
             let formatted_prompt = format!(
-                "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
                 prompt
             );
             let enc = tok.encode(formatted_prompt.as_str(), true)
