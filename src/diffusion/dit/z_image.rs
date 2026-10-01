@@ -454,15 +454,25 @@ pub struct ZImageTimestepEmbedder {
 }
 
 impl ZImageTimestepEmbedder {
-    pub fn new(vb: VarBuilder) -> Result<Self> {
-        let mlp_0 = linear(256, 1024, vb.pp("mlp.0"))
-            .or_else(|_| linear(256, 1024, vb.pp("0")))?;
-        let mlp_2 = linear(1024, 256, vb.pp("mlp.2"))
-            .or_else(|_| linear(1024, 256, vb.pp("2")))?;
+    pub fn new(time_embed_dim: usize, hidden_size: usize, vb: VarBuilder) -> Result<Self> {
+        let (mlp_0, mlp_2) = if let Ok(l0) = linear(time_embed_dim, 1024, vb.pp("mlp.0")) {
+            let l2 = linear(1024, time_embed_dim, vb.pp("mlp.2"))?;
+            (l0, l2)
+        } else if let Ok(l0) = linear(time_embed_dim, hidden_size, vb.pp("0")) {
+            let l2 = linear(hidden_size, hidden_size, vb.pp("2"))
+                .or_else(|_| linear(hidden_size, time_embed_dim, vb.pp("2")))?;
+            (l0, l2)
+        } else {
+            let l0 = linear(time_embed_dim, 1024, vb.pp("0"))
+                .or_else(|_| linear(time_embed_dim, hidden_size, vb.pp("mlp.0")))?;
+            let l2 = linear(1024, time_embed_dim, vb.pp("2"))
+                .or_else(|_| linear(hidden_size, hidden_size, vb.pp("mlp.2")))?;
+            (l0, l2)
+        };
         Ok(Self {
             mlp_0,
             mlp_2,
-            frequency_embedding_size: 256,
+            frequency_embedding_size: time_embed_dim,
         })
     }
 
@@ -530,7 +540,8 @@ pub struct ZImageFinalLayer {
 impl ZImageFinalLayer {
     pub fn new(cfg: &ZImageConfig, vb: VarBuilder) -> Result<Self> {
         let ada_ln = linear(cfg.time_embed_dim, cfg.hidden_size, vb.pp("adaLN_modulation.1"))
-            .or_else(|_| linear(cfg.time_embed_dim, cfg.hidden_size, vb.pp("modulation.lin")))?;
+            .or_else(|_| linear_or_no_bias(cfg.hidden_size, 2, vb.pp("modulation.lin")))
+            .or_else(|_| linear_or_no_bias(cfg.hidden_size, cfg.hidden_size, vb.pp("modulation.lin")))?;
         let linear = linear(cfg.hidden_size, cfg.out_channels, vb.pp("linear"))?;
         Ok(Self { ada_ln, linear })
     }
@@ -571,8 +582,8 @@ impl ZImageTransformer {
             .unwrap_or_else(|_| Tensor::zeros((1, cfg.hidden_size), vb.dtype(), vb.device()).unwrap());
         let cap_pad_token = vb.get((1, cfg.hidden_size), "cap_pad_token")
             .unwrap_or_else(|_| Tensor::zeros((1, cfg.hidden_size), vb.dtype(), vb.device()).unwrap());
-        let t_embedder = ZImageTimestepEmbedder::new(vb.pp("t_embedder"))
-            .or_else(|_| ZImageTimestepEmbedder::new(vb.pp("tmlp")))?;
+        let t_embedder = ZImageTimestepEmbedder::new(cfg.time_embed_dim, cfg.hidden_size, vb.pp("t_embedder"))
+            .or_else(|_| ZImageTimestepEmbedder::new(cfg.time_embed_dim, cfg.hidden_size, vb.pp("tmlp")))?;
         let cap_embedder = ZImageCaptionEmbedder::new(&cfg, vb.clone())?;
 
         let mut context_refiner = Vec::with_capacity(2);
