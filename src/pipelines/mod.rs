@@ -7,6 +7,7 @@ pub mod sdxl;
 pub mod stable_audio;
 pub mod tts;
 pub mod upscale;
+pub mod vlm;
 pub mod whisper;
 pub mod z_image_turbo;
 
@@ -21,6 +22,7 @@ pub use sdxl::StableDiffusionXLPipeline;
 pub use stable_audio::StableAudioPipeline;
 pub use tts::TtsPipeline;
 pub use upscale::{UpscaleModel, UpscaleParams, UpscalePipeline};
+pub use vlm::{VlmParams, VlmPipeline};
 pub use whisper::{TranscriptionResult, WhisperPipeline};
 pub use z_image_turbo::ZImageTurboPipeline;
 

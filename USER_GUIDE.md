@@ -1387,7 +1387,54 @@ cargo run --bin test_upscale -- <model.safetensors> <input.png> <output.png>
 
 ---
 
-## 7. Hardware & Performance Tuning Guide
+## 7. Vision-Language Models (VLM) & Multimodal Understanding
+
+Aurora Engine embeds pure Rust Multimodal Vision-Language capabilities supporting **Qwen2-VL**, **Qwen2.5-VL**, **Qwen3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, and **SmolVLM**.
+
+### Architecture
+- **Vision Transformer Backbone**: SigLIP / ViT patch encoder with $2\times 2$ spatial token merging.
+- **Multimodal MLP Projector**: Seamless alignment of visual embeddings with LLM token embedding dimensions.
+- **Causal Decoder with KV-Cache**: Streaming autoregressive generation with nucleus top-p/top-k sampling.
+
+### Rust Usage Example
+
+```rust
+use aurora_rust_engine::{select_device, VlmParams, VlmPipeline};
+use image::ImageReader;
+
+// 1. Select device (CUDA or CPU)
+let device = select_device(true)?;
+
+// 2. Load model from directory (containing model.safetensors + tokenizer.json)
+let mut pipeline = VlmPipeline::from_pretrained("D:/models/vlm/Qwen2.5-VL-3B", &device)?;
+
+// 3. Load image
+let img = ImageReader::open("photo.jpg")?.decode()?;
+
+// 4. Configure sampling parameters
+let params = VlmParams {
+    max_tokens: 256,
+    temperature: 0.7,
+    top_p: 0.9,
+    top_k: 40,
+    ..Default::default()
+};
+
+// 5. Generate visual description / VQA
+let prompt = "Describe the objects, colors, and layout in this image.";
+let response = pipeline.generate(Some(&img), prompt, &params)?;
+println!("VLM: {}", response);
+```
+
+### Running from CLI
+
+```bash
+cargo run --bin test_vlm -- <model_dir> [image.png] [prompt]
+```
+
+---
+
+## 8. Hardware & Performance Tuning Guide
 
 ### Recommended Settings per GPU VRAM Tier
 

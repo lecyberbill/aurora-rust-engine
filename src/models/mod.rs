@@ -26,6 +26,7 @@ pub mod stable_audio_dit;
 pub mod stable_audio_sched;
 pub mod t5;
 pub mod text;
+pub mod vlm;
 
 pub use acestep::{AceStepConditionEncoder, AceStepTransformer1D, AceStepTransformerConfig, FlowMatchConfig};
 pub use acestep_codec::AceStepAudioCodec;
@@ -36,6 +37,7 @@ pub use stable_audio::{StableAudioPositionalEmbedding, StableAudioProjectionMode
 pub use stable_audio_dit::StableAudioDit;
 pub use stable_audio_sched::CosineDpmScheduler;
 pub use t5::T5Encoder;
+pub use vlm::{MultiModalProjector, VisionActivation, VisionTransformer, VisionTransformerConfig, VlmDecoderConfig, VlmModel};
 pub use auto::{AutoModel, BoxedModel, ModelLoadConfig};
 pub use common::{downcast_model, AnyModel, EncodeModel, GenerationModel, ImageGenerationModel, ModelKind};
 pub use config::{detect_architecture, Architecture};

@@ -611,9 +611,29 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
   - High-speed compact VGG feed-forward backbone with native Candle `PixelShuffle` (depth-to-space) tensor reshapes.
   - Full support for `RealESRGAN_x4plus_anime_6B` and lightweight real-time upscalers.
 - [x] **Bounded-Memory Tiled Pipeline & Seam Blending (`src/pipelines/upscale.rs`)**:
-  - Configurable tile size (e.g. 512px) and overlap padding (e.g. 32px) to upscale arbitrary 4K/8K/16K resolutions without VRAM exhaustion.
+  - Configurable tile size (e.g. 256px) and overlap padding (e.g. 16px) to upscale arbitrary 4K/8K/16K resolutions without VRAM exhaustion.
   - Dynamic RGBA alpha channel preservation with Catmull-Rom resampling for transparency.
   - CLI runner binary `src/bin/test_upscale.rs`.
+
+---
+
+## 🚀 Milestone 24: Vision-Language Models (VLM) & Multimodal Understanding (Qwen-VL, PaliGemma 2, Gemma-3 & SmolVLM)
+
+**Goal.** Equip Aurora Engine with multimodal visual understanding, Visual Question Answering (VQA), and dense image captioning in pure Rust:
+
+- [x] **Pure Rust Vision Transformer Backbone (`src/models/vlm.rs`)**:
+  - ViT / SigLIP visual encoder supporting configurable patch sizes (14/16px) and spatial patch embedding.
+  - Native 2D spatial merging ($2\times 2$ pixel pooling) for high-efficiency visual token compression.
+  - Multi-activation support (`QuickGelu`, `Gelu`, `SwiGLU`) and layer norm variants.
+- [x] **Multimodal Projector (`src/models/vlm.rs`)**:
+  - Multi-layer MLP projection bridge aligning visual patch tokens with Causal LLM hidden dimensions.
+- [x] **Causal Decoder & KV-Cache Integration (`src/models/vlm.rs`)**:
+  - Full Rotary Position Embedding (RoPE) and Grouped-Query Attention (GQA) with dynamic KV-caching.
+  - Dynamic image token replacement splicing projected visual embeddings into text token prompt streams.
+- [x] **VLM Pipeline & CLI (`src/pipelines/vlm.rs`, `src/bin/test_vlm.rs`)**:
+  - Full end-to-end inference pipeline supporting Qwen2-VL, Qwen2.5-VL, Qwen3-VL, PaliGemma 2, and SmolVLM.
+  - CLI runner `src/bin/test_vlm.rs` for visual Q&A and image analysis.
+
 
 
 
