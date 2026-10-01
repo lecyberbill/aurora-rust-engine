@@ -232,24 +232,37 @@ impl ZImageAttention {
         let mut k = self.k_norm.forward(&k_raw)?;
         let mut v = v_raw;
 
-        // Apply RoPE if provided
+        // Apply RoPE if provided (3D RoPE rotate_half per axis)
         if let Some((cos, sin)) = rotary_cos_sin {
-            let half = self.head_dim / 2;
             let cos_f32 = cos.to_dtype(DType::F32)?;
             let sin_f32 = sin.to_dtype(DType::F32)?;
-            let apply_rope = |t: &Tensor, heads: usize| -> Result<Tensor> {
+            let apply_rope = |t: &Tensor| -> Result<Tensor> {
                 let t_f32 = t.to_dtype(DType::F32)?;
-                let t_pairs = t_f32.reshape((b, seq_len, heads, half, 2))?;
-                let t0 = t_pairs.narrow(4, 0, 1)?.squeeze(4)?;
-                let t1 = t_pairs.narrow(4, 1, 1)?.squeeze(4)?;
-                let neg_t1 = (t1 * -1.0)?.unsqueeze(4)?;
-                let pos_t0 = t0.unsqueeze(4)?;
-                let rotated = Tensor::cat(&[&neg_t1, &pos_t0], 4)?.reshape((b, seq_len, heads, self.head_dim))?;
+                let rotated = if self.head_dim == 128 {
+                    // Axis 0: dim 32 (split 16, 16)
+                    let t0 = t_f32.narrow(3, 0, 32)?;
+                    let rot0 = Tensor::cat(&[&(t0.narrow(3, 16, 16)? * -1.0)?, &t0.narrow(3, 0, 16)?], 3)?;
+
+                    // Axis 1: dim 48 (split 24, 24)
+                    let t1 = t_f32.narrow(3, 32, 48)?;
+                    let rot1 = Tensor::cat(&[&(t1.narrow(3, 24, 24)? * -1.0)?, &t1.narrow(3, 0, 24)?], 3)?;
+
+                    // Axis 2: dim 48 (split 24, 24)
+                    let t2 = t_f32.narrow(3, 80, 48)?;
+                    let rot2 = Tensor::cat(&[&(t2.narrow(3, 24, 24)? * -1.0)?, &t2.narrow(3, 0, 24)?], 3)?;
+
+                    Tensor::cat(&[&rot0, &rot1, &rot2], 3)?
+                } else {
+                    let half = self.head_dim / 2;
+                    let t1 = t_f32.narrow(3, 0, half)?;
+                    let t2 = t_f32.narrow(3, half, half)?;
+                    Tensor::cat(&[&(t2 * -1.0)?, &t1], 3)?
+                };
                 let out = (t_f32.broadcast_mul(&cos_f32)? + rotated.broadcast_mul(&sin_f32)?)?;
                 out.to_dtype(orig_dtype)
             };
-            q = apply_rope(&q, self.num_heads)?;
-            k = apply_rope(&k, self.num_kv_heads)?;
+            q = apply_rope(&q)?;
+            k = apply_rope(&k)?;
         }
 
         // Expand KV heads for GQA if num_kv_heads < num_heads
@@ -817,28 +830,27 @@ impl ZImageTransformer {
         }
 
         let compute_rope = |t_coords: &[f32], r_coords: &[f32], c_coords: &[f32], seq_len: usize| -> Result<(Tensor, Tensor)> {
-            let compute_axis = |coords: &[f32], dim: usize| -> Result<Tensor> {
+            let compute_axis = |coords: &[f32], dim: usize| -> Result<(Tensor, Tensor)> {
                 let half = dim / 2;
                 let inv_freq: Vec<f32> = (0..half)
                     .map(|i| 1.0 / (theta.powf((i * 2) as f64 / dim as f64) as f32))
                     .collect();
                 let inv_freq_t = Tensor::from_vec(inv_freq, (half,), latents.device())?;
                 let coords_t = Tensor::from_vec(coords.to_vec(), (seq_len, 1), latents.device())?;
-                coords_t.matmul(&inv_freq_t.unsqueeze(0)?)
+                let freqs = coords_t.matmul(&inv_freq_t.unsqueeze(0)?)?; // [seq_len, half]
+                let cos_half = freqs.cos()?;
+                let sin_half = freqs.sin()?;
+                let cos_axis = Tensor::cat(&[&cos_half, &cos_half], 1)?; // [seq_len, dim]
+                let sin_axis = Tensor::cat(&[&sin_half, &sin_half], 1)?; // [seq_len, dim]
+                Ok((cos_axis, sin_axis))
             };
-            let f0 = compute_axis(t_coords, axes_dim[0])?;
-            let f1 = compute_axis(r_coords, axes_dim[1])?;
-            let f2 = compute_axis(c_coords, axes_dim[2])?;
-            let full = Tensor::cat(&[&f0, &f1, &f2], 1)?; // [seq_len, 64]
-            let cos_half = full.cos()?;
-            let sin_half = full.sin()?;
-            // Interleaved complex representation for pairs (x0, x1) -> cos_half on both x0 and x1
-            let cos = Tensor::cat(&[&cos_half.unsqueeze(2)?, &cos_half.unsqueeze(2)?], 2)?
-                .reshape((1, seq_len, 1, 128))?
-                .to_dtype(latents.dtype())?;
-            let sin = Tensor::cat(&[&sin_half.unsqueeze(2)?, &sin_half.unsqueeze(2)?], 2)?
-                .reshape((1, seq_len, 1, 128))?
-                .to_dtype(latents.dtype())?;
+            let (cos0, sin0) = compute_axis(t_coords, axes_dim[0])?;
+            let (cos1, sin1) = compute_axis(r_coords, axes_dim[1])?;
+            let (cos2, sin2) = compute_axis(c_coords, axes_dim[2])?;
+            let cos_full = Tensor::cat(&[&cos0, &cos1, &cos2], 1)?; // [seq_len, 128]
+            let sin_full = Tensor::cat(&[&sin0, &sin1, &sin2], 1)?; // [seq_len, 128]
+            let cos = cos_full.reshape((1, seq_len, 1, 128))?.to_dtype(latents.dtype())?;
+            let sin = sin_full.reshape((1, seq_len, 1, 128))?.to_dtype(latents.dtype())?;
             Ok((cos, sin))
         };
 
