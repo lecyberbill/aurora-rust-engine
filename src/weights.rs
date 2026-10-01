@@ -127,6 +127,71 @@ impl SafeTensorsArchive {
             .ok_or_else(|| LuminaError::Config(format!("Shard index {} not present", shard_idx)))?;
         let raw_data = shard.as_ptr();
         let slice = unsafe { std::slice::from_raw_parts(raw_data.add(*offset), *len) };
+
+        // 1. Check for scale tensor key (e.g. Scaled FP8 checkpoints)
+        let scale_key = if let Some(base_name) = name.strip_suffix(".weight") {
+            let scale_key_1 = format!("{}.weight_scale", base_name);
+            let scale_key_2 = format!("{}.scale_weight", base_name);
+            let scale_key_3 = format!("{}_scale", name);
+            if self.tensors.contains_key(&scale_key_1) {
+                Some(scale_key_1)
+            } else if self.tensors.contains_key(&scale_key_2) {
+                Some(scale_key_2)
+            } else if self.tensors.contains_key(&scale_key_3) {
+                Some(scale_key_3)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 2. High-speed CPU dequantization & scaling for FP8 to eliminate GPU VRAM spikes
+        if *st_dtype == safetensors::Dtype::F8_E4M3 || *st_dtype == safetensors::Dtype::F8_E5M2 {
+            let lut = if *st_dtype == safetensors::Dtype::F8_E4M3 {
+                get_fp8_e4m3_lut()
+            } else {
+                get_fp8_e5m2_lut()
+            };
+            let data: &[u8] = slice;
+            let mut f32_data: Vec<f32> = data.iter().map(|&b| lut[b as usize].to_f32()).collect();
+
+            if let Some(sk) = scale_key {
+                let (s_dtype, _s_shape, s_shard_idx, s_offset, s_len) = &self.tensors[&sk];
+                let s_shard = self._mmaps.get(*s_shard_idx).ok_or_else(|| LuminaError::Config("shard missing".into()))?;
+                let s_slice = unsafe { std::slice::from_raw_parts(s_shard.as_ptr().add(*s_offset), *s_len) };
+                let scale_factor: f32 = match s_dtype {
+                    safetensors::Dtype::F32 => {
+                        let d: &[f32] = bytemuck_cast_slice(s_slice);
+                        d.first().copied().unwrap_or(1.0)
+                    }
+                    safetensors::Dtype::F16 => {
+                        let d: &[f16] = bytemuck_cast_slice(s_slice);
+                        d.first().map(|x| x.to_f32()).unwrap_or(1.0)
+                    }
+                    safetensors::Dtype::BF16 => {
+                        let d: &[bf16] = bytemuck_cast_slice(s_slice);
+                        d.first().map(|x| x.to_f32()).unwrap_or(1.0)
+                    }
+                    _ => 1.0,
+                };
+                if (scale_factor - 1.0).abs() > 1e-6 {
+                    for x in f32_data.iter_mut() {
+                        *x *= scale_factor;
+                    }
+                }
+            }
+
+            let tensor_cpu = Tensor::from_vec(f32_data, shape.as_slice(), &Device::Cpu)?;
+            let tensor_target = if dtype == DType::F32 {
+                tensor_cpu.to_device(device)?
+            } else {
+                tensor_cpu.to_dtype(dtype)?.to_device(device)?
+            };
+            return Ok(tensor_target);
+        }
+
+        // Standard dtypes:
         let tensor = match st_dtype {
             safetensors::Dtype::F32 => {
                 let data: &[f32] = bytemuck_cast_slice(slice);
@@ -157,28 +222,6 @@ impl SafeTensorsArchive {
                 let data: &[u8] = slice;
                 Tensor::from_slice(data, shape.as_slice(), device)?
             }
-            safetensors::Dtype::F8_E4M3 => {
-                let data: &[u8] = slice;
-                let lut = get_fp8_e4m3_lut();
-                let f16_data: Vec<half::f16> = data.iter().map(|&b| lut[b as usize]).collect();
-                let raw_tensor = Tensor::from_vec(f16_data, shape.as_slice(), device)?;
-                if dtype == DType::F16 {
-                    raw_tensor
-                } else {
-                    raw_tensor.to_dtype(dtype)?
-                }
-            }
-            safetensors::Dtype::F8_E5M2 => {
-                let data: &[u8] = slice;
-                let lut = get_fp8_e5m2_lut();
-                let f16_data: Vec<half::f16> = data.iter().map(|&b| lut[b as usize]).collect();
-                let raw_tensor = Tensor::from_vec(f16_data, shape.as_slice(), device)?;
-                if dtype == DType::F16 {
-                    raw_tensor
-                } else {
-                    raw_tensor.to_dtype(dtype)?
-                }
-            }
             other => {
                 return Err(LuminaError::Config(format!(
                     "Unsupported SafeTensors dtype {:?} for tensor {}",
@@ -187,57 +230,12 @@ impl SafeTensorsArchive {
             }
         };
 
-        // Support Scaled FP8 checkpoints (e.g. Klein-9B and Flux2-Dev scaled FP8):
-        // If a weight has a corresponding `{name}_scale` or `{name}.weight_scale` or `{name}.scale_weight`
-        let scaled_tensor = if let Some(base_name) = name.strip_suffix(".weight") {
-            let scale_key_1 = format!("{}.weight_scale", base_name);
-            let scale_key_2 = format!("{}.scale_weight", base_name);
-            let scale_key_3 = format!("{}_scale", name);
-            let found_scale = if self.tensors.contains_key(&scale_key_1) {
-                Some(scale_key_1)
-            } else if self.tensors.contains_key(&scale_key_2) {
-                Some(scale_key_2)
-            } else if self.tensors.contains_key(&scale_key_3) {
-                Some(scale_key_3)
-            } else {
-                None
-            };
-
-            if let Some(scale_key) = found_scale {
-                let (s_dtype, s_shape, s_shard_idx, s_offset, s_len) = &self.tensors[&scale_key];
-                let s_shard = self._mmaps.get(*s_shard_idx).ok_or_else(|| LuminaError::Config("shard missing".into()))?;
-                let s_slice = unsafe { std::slice::from_raw_parts(s_shard.as_ptr().add(*s_offset), *s_len) };
-                let scale_val = match s_dtype {
-                    safetensors::Dtype::F32 => {
-                        let data: &[f32] = bytemuck_cast_slice(s_slice);
-                        Tensor::from_slice(data, s_shape.as_slice(), device)?
-                    }
-                    safetensors::Dtype::F16 => {
-                        let data: &[f16] = bytemuck_cast_slice(s_slice);
-                        Tensor::from_slice(data, s_shape.as_slice(), device)?.to_dtype(DType::F32)?
-                    }
-                    safetensors::Dtype::BF16 => {
-                        let data: &[bf16] = bytemuck_cast_slice(s_slice);
-                        Tensor::from_slice(data, s_shape.as_slice(), device)?.to_dtype(DType::F32)?
-                    }
-                    _ => Tensor::ones((1,), DType::F32, device)?,
-                };
-                let tensor_f32 = tensor.to_dtype(DType::F32)?;
-                let scaled = tensor_f32.broadcast_mul(&scale_val)?;
-                scaled.to_dtype(dtype)?
-            } else {
-                tensor
-            }
-        } else {
-            tensor
-        };
-
-        if (scaled_tensor.dtype() == DType::F32 || scaled_tensor.dtype() == DType::F16 || scaled_tensor.dtype() == DType::BF16)
-            && scaled_tensor.dtype() != dtype
+        if (tensor.dtype() == DType::F32 || tensor.dtype() == DType::F16 || tensor.dtype() == DType::BF16)
+            && tensor.dtype() != dtype
         {
-            Ok(scaled_tensor.to_dtype(dtype)?)
+            Ok(tensor.to_dtype(dtype)?)
         } else {
-            Ok(scaled_tensor)
+            Ok(tensor)
         }
     }
 
