@@ -55,9 +55,11 @@ pub struct VisionAttention {
 impl VisionAttention {
     pub fn new(embed_dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
         let qkv = linear(embed_dim, embed_dim * 3, vb.pp("qkv"))
-            .or_else(|_| linear(embed_dim, embed_dim * 3, vb.pp("in_proj")))?;
+            .or_else(|_| linear(embed_dim, embed_dim * 3, vb.pp("in_proj")))
+            .or_else(|_| linear(embed_dim, embed_dim * 3, vb.pp("attn_qkv")))?;
         let proj = linear(embed_dim, embed_dim, vb.pp("proj"))
-            .or_else(|_| linear(embed_dim, embed_dim, vb.pp("out_proj")))?;
+            .or_else(|_| linear(embed_dim, embed_dim, vb.pp("out_proj")))
+            .or_else(|_| linear(embed_dim, embed_dim, vb.pp("attn_out")))?;
         let head_dim = embed_dim / num_heads;
         Ok(Self {
             qkv,
@@ -96,9 +98,11 @@ pub struct VisionMlp {
 impl VisionMlp {
     pub fn new(embed_dim: usize, intermediate_size: usize, act_type: VisionActivation, vb: VarBuilder) -> Result<Self> {
         let fc1 = linear(embed_dim, intermediate_size, vb.pp("fc1"))
-            .or_else(|_| linear(embed_dim, intermediate_size, vb.pp("mlp.0")))?;
+            .or_else(|_| linear(embed_dim, intermediate_size, vb.pp("mlp.0")))
+            .or_else(|_| linear(embed_dim, intermediate_size, vb.pp("ffn_up")))?;
         let fc2 = linear(intermediate_size, embed_dim, vb.pp("fc2"))
-            .or_else(|_| linear(intermediate_size, embed_dim, vb.pp("mlp.2")))?;
+            .or_else(|_| linear(intermediate_size, embed_dim, vb.pp("mlp.2")))
+            .or_else(|_| linear(intermediate_size, embed_dim, vb.pp("ffn_down")))?;
         Ok(Self { fc1, fc2, act_type })
     }
 
@@ -173,7 +177,25 @@ impl VisionTransformer {
             cfg.patch_size,
             conv_cfg,
             vb.pp("patch_embed").pp("proj"),
-        )?;
+        )
+        .or_else(|_| {
+            conv2d(
+                cfg.num_channels,
+                cfg.embed_dim,
+                cfg.patch_size,
+                conv_cfg,
+                vb.pp("v.patch_embd"),
+            )
+        })
+        .or_else(|_| {
+            conv2d(
+                cfg.num_channels,
+                cfg.embed_dim,
+                cfg.patch_size,
+                conv_cfg,
+                vb.pp("patch_embed"),
+            )
+        })?;
 
         let num_patches_w = cfg.image_size / cfg.patch_size;
         let num_patches_h = cfg.image_size / cfg.patch_size;
@@ -181,11 +203,14 @@ impl VisionTransformer {
 
         let pos_embed = vb.get((1, num_patches, cfg.embed_dim), "pos_embed")
             .or_else(|_| vb.get((1, num_patches + 1, cfg.embed_dim), "position_embedding"))
+            .or_else(|_| vb.get((1, num_patches, cfg.embed_dim), "v.position_embd.weight"))
             .ok();
 
         let mut blocks = Vec::with_capacity(cfg.num_layers);
         let blocks_vb = if vb.pp("blocks").contains_tensor("0.norm1.weight") || vb.pp("blocks.0").contains_tensor("norm1.weight") {
             vb.pp("blocks")
+        } else if vb.pp("v.blk").contains_tensor("0.ln1.weight") || vb.contains_tensor("v.blk.0.ln1.weight") {
+            vb.pp("v.blk")
         } else {
             vb.pp("layers")
         };
@@ -198,7 +223,9 @@ impl VisionTransformer {
             ..Default::default()
         };
         let post_norm = layer_norm(cfg.embed_dim, ln_cfg, vb.pp("post_norm"))
-            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("ln_post")))?;
+            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("ln_post")))
+            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("v.post_norm")))
+            .or_else(|_| layer_norm(cfg.embed_dim, ln_cfg, vb.pp("v.ln_post")))?;
 
         Ok(Self {
             patch_embed,
@@ -258,9 +285,11 @@ pub struct MultiModalProjector {
 impl MultiModalProjector {
     pub fn new(in_features: usize, out_features: usize, vb: VarBuilder) -> Result<Self> {
         let linear1 = linear(in_features, out_features, vb.pp("linear_1"))
-            .or_else(|_| linear(in_features, out_features, vb.pp("0")))?;
+            .or_else(|_| linear(in_features, out_features, vb.pp("0")))
+            .or_else(|_| linear(in_features, out_features, vb.pp("mm.0")))?;
         let linear2 = linear(out_features, out_features, vb.pp("linear_2"))
-            .or_else(|_| linear(out_features, out_features, vb.pp("2")))?;
+            .or_else(|_| linear(out_features, out_features, vb.pp("2")))
+            .or_else(|_| linear(out_features, out_features, vb.pp("mm.2")))?;
         Ok(Self { linear1, linear2 })
     }
 
