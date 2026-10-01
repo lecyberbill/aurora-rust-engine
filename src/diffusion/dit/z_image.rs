@@ -162,6 +162,17 @@ impl SwiGLU {
     }
 }
 
+pub fn robust_sigmoid(x: &Tensor) -> Result<Tensor> {
+    // Numerically stable fallback for ROCm/HIP: 1 / (1 + exp(-x))
+    candle_nn::ops::sigmoid(x)
+        .or_else(|_| {
+            let neg_x = (x * -1.0)?;
+            let exp = neg_x.exp()?;
+            let denom = (exp + 1.0)?;
+            denom.recip()
+        })
+}
+
 /// Attention with QK-Norm, 3D RoPE, Sigmoid-Gated Output & GQA
 #[derive(Debug, Clone)]
 pub struct KreaAttention {
@@ -197,7 +208,8 @@ impl KreaAttention {
         let q_raw = self.wq.forward(x)?.reshape((b, l, self.heads, self.head_dim))?.transpose(1, 2)?.contiguous()?; // [B, H, L, D]
         let k_raw = self.wk.forward(x)?.reshape((b, l, self.kv_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
         let v_raw = self.wv.forward(x)?.reshape((b, l, self.kv_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
-        let gate = candle_nn::ops::sigmoid(&self.gate.forward(x)?)?; // [B, L, D]
+        let gate_raw = self.gate.forward(x)?;
+        let gate = robust_sigmoid(&gate_raw)?; // [B, L, D]
 
         let (mut q, mut k) = self.qknorm.forward(&q_raw, &k_raw)?;
 
