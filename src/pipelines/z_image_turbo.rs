@@ -49,8 +49,10 @@ impl ZImageTurboPipeline {
                 dit_tensors.insert(rest.to_string(), t);
             }
         }
+        let config = ZImageConfig::from_tensors(&dit_tensors);
+        println!("⚙️ DiT Architecture: hidden={}, heads={}, layers={}, interm={}, in_ch={}",
+            config.hidden_size, config.num_heads, config.num_layers, config.intermediate_dim, config.in_channels);
         let dit_vb = candle_nn::VarBuilder::from_tensors(dit_tensors, dtype, device);
-        let config = ZImageConfig::default();
         let transformer = ZImageTransformer::new(config, dit_vb)?;
 
         // 2. Build Qwen3 Text Encoder from same AIO checkpoint

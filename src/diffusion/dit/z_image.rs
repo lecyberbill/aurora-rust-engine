@@ -36,6 +36,68 @@ impl Default for ZImageConfig {
     }
 }
 
+impl ZImageConfig {
+    pub fn from_tensors(tensors: &std::collections::HashMap<String, Tensor>) -> Self {
+        let mut cfg = Self::default();
+
+        // 1. Detect hidden size & in_channels from first.weight or x_embedder.weight
+        if let Some(t) = tensors.get("first.weight").or_else(|| tensors.get("x_embedder.weight")) {
+            let dims = t.dims();
+            if dims.len() >= 2 {
+                cfg.hidden_size = dims[0];
+                cfg.in_channels = dims[1];
+                cfg.out_channels = dims[1];
+                cfg.num_heads = cfg.hidden_size / cfg.head_dim;
+            }
+        }
+
+        // 2. Detect intermediate_dim from mlp.gate.weight or feed_forward.w1.weight
+        if let Some(t) = tensors.get("blocks.0.mlp.gate.weight")
+            .or_else(|| tensors.get("layers.0.feed_forward.w1.weight"))
+            .or_else(|| tensors.get("blocks.0.mlp.up.weight")) {
+            let dims = t.dims();
+            if dims.len() >= 2 {
+                cfg.intermediate_dim = dims[0];
+            }
+        }
+
+        // 3. Detect num_layers
+        let mut max_layer = 0;
+        for k in tensors.keys() {
+            if let Some(rest) = k.strip_prefix("blocks.") {
+                if let Some(idx_str) = rest.split('.').next() {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        if idx + 1 > max_layer {
+                            max_layer = idx + 1;
+                        }
+                    }
+                }
+            } else if let Some(rest) = k.strip_prefix("layers.") {
+                if let Some(idx_str) = rest.split('.').next() {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        if idx + 1 > max_layer {
+                            max_layer = idx + 1;
+                        }
+                    }
+                }
+            }
+        }
+        if max_layer > 0 {
+            cfg.num_layers = max_layer;
+        }
+
+        // 4. Detect cap_dim (Qwen3 text encoder hidden dim) from txtmlp / cap_embedder
+        if let Some(t) = tensors.get("txtmlp.1.weight").or_else(|| tensors.get("cap_embedder.1.weight")) {
+            let dims = t.dims();
+            if dims.len() >= 2 {
+                cfg.cap_dim = dims[1];
+            }
+        }
+
+        cfg
+    }
+}
+
 fn linear_or_no_bias(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Linear> {
     linear(in_dim, out_dim, vb.clone())
         .or_else(|_| candle_nn::linear_no_bias(in_dim, out_dim, vb))

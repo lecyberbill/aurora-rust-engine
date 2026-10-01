@@ -77,8 +77,10 @@ fn main() -> anyhow::Result<()> {
         }
     }
     println!("   Found {} DiT tensors in archive", dit_tensors.len());
+    let config = ZImageConfig::from_tensors(&dit_tensors);
+    println!("   Detected DiT Config: hidden={}, heads={}, layers={}, interm={}, in_ch={}",
+        config.hidden_size, config.num_heads, config.num_layers, config.intermediate_dim, config.in_channels);
     let dit_vb = candle_nn::VarBuilder::from_tensors(dit_tensors, dtype, &device);
-    let config = ZImageConfig::default();
     let transformer = match ZImageTransformer::new(config, dit_vb) {
         Ok(t) => {
             println!("   ✅ ZImageTransformer successfully instantiated!");
