@@ -10,7 +10,12 @@
         "path": "/models/comfyui/text_encoders/qwen3vl_4b_fp8_scaled.safetensors"
       },
       "vae": "/models/comfyui/vae/qwen_image_vae.safetensors",
-      "defaults": { "steps": 4, "guidance": 1.0, "width": 512, "height": 512 }
+      "defaults": {
+        "steps": 8,
+        "guidance": 1.0,
+        "width": 1024,
+        "height": 1024
+      }
     }
   ]
 }
