@@ -175,7 +175,7 @@ impl CrossAttention {
         // Scaled dot-product attention: pre-scale Q to avoid scaling the huge [B, H, seq_len, context_len] matrix
         let q_scaled = (q * self.scale)?;
         let attn_scores = q_scaled.matmul(&k_t)?;
-        let attn_probs = candle_nn::ops::softmax_last_dim(&attn_scores)?;
+        let attn_probs = crate::device::softmax_last_dim(&attn_scores)?;
 
         // Attention output: [b_size, heads, seq_len, head_dim]
         let out = attn_probs.matmul(&v)?;

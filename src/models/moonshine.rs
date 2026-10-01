@@ -122,7 +122,7 @@ impl Attn {
         if self.is_causal {
             scores = scores.broadcast_add(&causal_mask(l, ls, scores.device(), scores.dtype())?)?;
         }
-        let attn = candle_nn::ops::softmax_last_dim(&scores)?;
+        let attn = crate::device::softmax_last_dim(&scores)?;
         let ctx = attn.matmul(&v.contiguous()?)?;
         let ctx = ctx.transpose(1, 2)?.reshape((b, l, HEADS * HEAD_DIM))?;
         self.o.forward(&ctx)

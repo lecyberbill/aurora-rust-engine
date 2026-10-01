@@ -401,7 +401,7 @@ impl DoubleStreamBlock {
 
         let k_t = k_f32.transpose(2, 3)?.contiguous()?;
         let scores = q_f32.matmul(&k_t)?;
-        let probs = candle_nn::ops::softmax_last_dim(&scores)?;
+        let probs = crate::device::softmax_last_dim(&scores)?;
         let ctx = probs.matmul(&v_f32)?;
 
         ctx.transpose(1, 2)?.contiguous()?.to_dtype(orig_dtype)?.reshape((b, seq, h, d))
@@ -565,7 +565,7 @@ impl SingleStreamBlock {
 
         let k_t = k_f32.transpose(2, 3)?.contiguous()?;
         let scores = q_f32.matmul(&k_t)?;
-        let probs = candle_nn::ops::softmax_last_dim(&scores)?;
+        let probs = crate::device::softmax_last_dim(&scores)?;
         let ctx = probs.matmul(&v_f32)?;
 
         ctx.transpose(1, 2)?.contiguous()?.to_dtype(orig_dtype)?.reshape((b, seq, h, d))

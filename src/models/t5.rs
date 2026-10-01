@@ -155,7 +155,7 @@ impl T5Attention {
             let m = m.reshape((b, 1, 1, l))?;
             scores = scores.broadcast_add(&m)?;
         }
-        let attn = candle_nn::ops::softmax_last_dim(&scores)?;
+        let attn = crate::device::softmax_last_dim(&scores)?;
         let ctx = attn.matmul(&v)?; // [B,H,L,D_KV]
         let ctx = ctx.transpose(1, 2)?.reshape((b, l, NUM_HEADS * D_KV))?;
         let o = self.o.forward(&ctx)?;

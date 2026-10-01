@@ -119,7 +119,7 @@ impl VaeAttentionBlock {
         // Self-Attention computation
         let q_f16 = (q * self.scale)?;
         let attn_weights = q_f16.matmul(&k.transpose(1, 2)?)?;
-        let probs = candle_nn::ops::softmax_last_dim(&attn_weights.to_dtype(DType::F32)?)?.to_dtype(orig_dtype)?;
+        let probs = crate::device::softmax_last_dim(&attn_weights.to_dtype(DType::F32)?)?.to_dtype(orig_dtype)?;
         let out = probs.matmul(&v)?;
         let out = self.to_out.forward(&out)?;
 

@@ -240,7 +240,7 @@ impl MistralAttention {
         let mask = Tensor::from_vec(mask_vec, (1, 1, seq, seq), x.device())?;
         scores = scores.broadcast_add(&mask)?;
 
-        let probs = candle_nn::ops::softmax_last_dim(&scores)?;
+        let probs = crate::device::softmax_last_dim(&scores)?;
         let attn_out = probs.matmul(&v_f32)?.to_dtype(orig_dtype)?;
 
         let attn_out = attn_out.transpose(1, 2)?.contiguous()?.reshape((b, seq, self.num_heads * self.head_dim))?;

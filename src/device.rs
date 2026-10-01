@@ -110,3 +110,16 @@ impl Default for KernelDispatchConfig {
         }
     }
 }
+
+/// Universal Softmax along last dimension that works deterministically across
+/// CPU, CUDA, ROCm (HIP), and Metal without backend kernel dispatch crashes.
+pub fn softmax_last_dim(x: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
+    candle_nn::ops::softmax(x, candle_core::D::Minus1)
+        .or_else(|_| {
+            let max = x.max_keepdim(candle_core::D::Minus1)?;
+            let exp = x.broadcast_sub(&max)?.exp()?;
+            let sum = exp.sum_keepdim(candle_core::D::Minus1)?;
+            exp.broadcast_div(&sum)
+        })
+}
+

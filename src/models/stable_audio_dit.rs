@@ -169,7 +169,7 @@ impl DitAttention {
         let q = q.contiguous()?;
         let k = k.contiguous()?;
         let scores = q.matmul(&k.transpose(2, 3)?.contiguous()?)?.affine(scale, 0.0)?;
-        let attn = candle_nn::ops::softmax_last_dim(&scores)?;
+        let attn = crate::device::softmax_last_dim(&scores)?;
         let ctx = attn.matmul(&v.contiguous()?)?; // [B,H,L,HEAD_DIM]
         let ctx = ctx.transpose(1, 2)?.reshape((b, l, HEADS * HEAD_DIM))?;
         self.to_out.forward(&ctx)

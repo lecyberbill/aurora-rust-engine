@@ -151,7 +151,7 @@ impl ChatTtsAttention {
             attn_weights
         };
 
-        let attn_probs = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+        let attn_probs = crate::device::softmax_last_dim(&attn_weights)?;
         let output = attn_probs.matmul(&v)?; // [B, num_heads, seq_len, head_dim]
         let output = output.transpose(1, 2)?.reshape((b, seq_len, self.num_heads * self.head_dim))?;
         self.out_proj.forward(&output)

@@ -309,7 +309,7 @@ impl QwenAttention {
         let mask = Tensor::from_vec(mask_vec, (1, 1, seq_len, seq_len), x.device())?;
         scores = scores.broadcast_add(&mask)?;
 
-        let probs = candle_nn::ops::softmax_last_dim(&scores)?;
+        let probs = crate::device::softmax_last_dim(&scores)?;
         let ctx = probs.matmul(&v_t)?;
 
         let ctx = ctx.transpose(1, 2)?.contiguous()?.to_dtype(orig_dtype)?;

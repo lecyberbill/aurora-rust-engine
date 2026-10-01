@@ -642,7 +642,7 @@ impl CausalLMPipeline {
             att
         };
 
-        let att = candle_nn::ops::softmax_last_dim(&att).map_err(LuminaError::Candle)?;
+        let att = crate::device::softmax_last_dim(&att).map_err(LuminaError::Candle)?;
         let out = att.matmul(&v).map_err(LuminaError::Candle)?;
         let out = out.transpose(1, 2)?.reshape((b_sz, seq_len, self.config.hidden_size))?;
         let attn_out = Self::matmul_linear(&out, &o_w)?;

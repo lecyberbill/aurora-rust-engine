@@ -15,7 +15,7 @@ pub mod text;
 pub mod traits;
 pub mod weights;
 
-pub use device::{auto_device, select_device, GenerationMetrics, KernelDispatchConfig};
+pub use device::{auto_device, select_device, softmax_last_dim, GenerationMetrics, KernelDispatchConfig};
 pub use error::{LuminaError, Result};
 pub use models::{
     Architecture, AutoModel, EncodeModel, GenerationModel, ImageGenerationModel, ModelDescriptor,
