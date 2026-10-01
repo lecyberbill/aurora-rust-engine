@@ -276,13 +276,13 @@ impl ZImageAttention {
             }
         }
 
-        // Standard scaled dot product attention fallback (F32)
-        let q_t = (q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)? * self.scale)?;
-        let k_t = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-        let v_t = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+        // Standard scaled dot product attention fallback
+        let q_t = (q.transpose(1, 2)?.contiguous()? * self.scale)?;
+        let k_t = k.transpose(1, 2)?.contiguous()?;
+        let v_t = v.transpose(1, 2)?.contiguous()?;
 
         let attn_scores = q_t.matmul(&k_t.transpose(2, 3)?)?;
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_scores)?;
+        let attn_weights = robust_softmax_last_dim(&attn_scores)?;
         let attn_out = attn_weights.matmul(&v_t)?;
 
         let out = attn_out
@@ -293,6 +293,17 @@ impl ZImageAttention {
 
         self.out.forward(&out)
     }
+}
+
+fn robust_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
+    candle_nn::ops::softmax(x, candle_core::D::Minus1)
+        .or_else(|_| candle_nn::ops::softmax_last_dim(x))
+        .or_else(|_| {
+            let max = x.max_keepdim(candle_core::D::Minus1)?;
+            let exp = x.broadcast_sub(&max)?.exp()?;
+            let sum = exp.sum_keepdim(candle_core::D::Minus1)?;
+            exp.broadcast_div(&sum)
+        })
 }
 
 /// Z-Image DiT Transformer Layer (AdaLN-4 Modulation + Attention + SwiGLU FFN)
