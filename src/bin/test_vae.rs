@@ -11,9 +11,11 @@ fn main() -> anyhow::Result<()> {
     let archive = SafeTensorsArchive::open(&path)?;
     let keys: Vec<String> = archive.keys().map(|k| k.to_string()).collect();
     println!("🔑 Total keys: {}", keys.len());
-    for k in keys.iter().take(20) {
+    let mut decoder_keys: Vec<_> = keys.iter().filter(|k| k.starts_with("decoder.")).collect();
+    decoder_keys.sort();
+    for k in decoder_keys {
         if let Ok(t) = archive.get_tensor(k, &Device::Cpu, DType::F32) {
-            println!("   • {:<45} shape={:?}", k, t.dims());
+            println!("   • {:<50} shape={:?}", k, t.dims());
         }
     }
 
