@@ -31,10 +31,19 @@ fn main() -> anyhow::Result<()> {
     let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
     println!("🎮 Device: {:?} | DType: {:?}", device, dtype);
 
-    let aio_path = PathBuf::from(r"G:\models\zit\z-image-turbo-fp8-aio.safetensors");
-    let vae_path = PathBuf::from(r"G:\models\zit\zImageTurbo_vae.safetensors");
+    let aio_path = std::env::args().nth(1)
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("MODEL_PATH").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(r"G:\models\zit\z-image-turbo-fp8-aio.safetensors"));
 
+    println!("📂 Opening: {:?}", aio_path);
     let archive = Arc::new(SafeTensorsArchive::open(&aio_path)?);
+    let keys = archive.keys();
+    println!("🔑 Total keys: {}", keys.len());
+    println!("📋 First 25 keys:");
+    for k in keys.iter().take(25) {
+        println!("   • {}", k);
+    }
 
     // 1. Probe Text Encoder
     println!("\n--- [Probe 1: Qwen3 Text Encoder] ---");
