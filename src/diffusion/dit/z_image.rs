@@ -11,6 +11,7 @@ pub struct ZImageConfig {
     pub out_channels: usize,
     pub hidden_size: usize,
     pub num_heads: usize,
+    pub num_kv_heads: usize,
     pub head_dim: usize,
     pub num_layers: usize,
     pub intermediate_dim: usize,
@@ -26,6 +27,7 @@ impl Default for ZImageConfig {
             out_channels: 64,
             hidden_size: 3840,
             num_heads: 30,
+            num_kv_heads: 30,
             head_dim: 128, // 30 * 128 = 3840
             num_layers: 30,
             intermediate_dim: 10240,
@@ -48,6 +50,16 @@ impl ZImageConfig {
                 cfg.in_channels = dims[1];
                 cfg.out_channels = dims[1];
                 cfg.num_heads = cfg.hidden_size / cfg.head_dim;
+                cfg.num_kv_heads = cfg.num_heads;
+            }
+        }
+
+        // 1b. Detect num_kv_heads for Grouped-Query Attention (GQA) from wk.weight
+        if let Some(t) = tensors.get("blocks.0.attn.wk.weight")
+            .or_else(|| tensors.get("layers.0.attention.wk.weight")) {
+            let dims = t.dims();
+            if dims.len() >= 2 {
+                cfg.num_kv_heads = dims[0] / cfg.head_dim;
             }
         }
 
@@ -137,7 +149,7 @@ pub enum ZImageQkv {
     Separate { wq: Linear, wk: Linear, wv: Linear },
 }
 
-/// Self-Attention with QK-Norm & RoPE for Z-Image / Krea2
+/// Self-Attention with QK-Norm, RoPE & GQA for Z-Image / Krea2
 #[derive(Debug, Clone)]
 pub struct ZImageAttention {
     qkv: ZImageQkv,
@@ -145,18 +157,19 @@ pub struct ZImageAttention {
     q_norm: RMSNorm,
     k_norm: RMSNorm,
     num_heads: usize,
+    num_kv_heads: usize,
     head_dim: usize,
     scale: f64,
 }
 
 impl ZImageAttention {
-    pub fn new(hidden_size: usize, num_heads: usize, head_dim: usize, vb: VarBuilder) -> Result<Self> {
+    pub fn new(hidden_size: usize, num_heads: usize, num_kv_heads: usize, head_dim: usize, vb: VarBuilder) -> Result<Self> {
         let qkv = if let Ok(merged) = linear_or_no_bias(hidden_size, hidden_size * 3, vb.pp("qkv")) {
             ZImageQkv::Merged(merged)
         } else {
-            let wq = linear_or_no_bias(hidden_size, hidden_size, vb.pp("wq"))?;
-            let wk = linear_or_no_bias(hidden_size, hidden_size, vb.pp("wk"))?;
-            let wv = linear_or_no_bias(hidden_size, hidden_size, vb.pp("wv"))?;
+            let wq = linear_or_no_bias(hidden_size, num_heads * head_dim, vb.pp("wq"))?;
+            let wk = linear_or_no_bias(hidden_size, num_kv_heads * head_dim, vb.pp("wk"))?;
+            let wv = linear_or_no_bias(hidden_size, num_kv_heads * head_dim, vb.pp("wv"))?;
             ZImageQkv::Separate { wq, wk, wv }
         };
 
@@ -174,6 +187,7 @@ impl ZImageAttention {
             q_norm,
             k_norm,
             num_heads,
+            num_kv_heads,
             head_dim,
             scale,
         })
@@ -187,7 +201,7 @@ impl ZImageAttention {
         let (b, seq_len, _hidden) = x.dims3()?;
         let orig_dtype = x.dtype();
 
-        let (q_raw, k_raw, v) = match &self.qkv {
+        let (q_raw, k_raw, v_raw) = match &self.qkv {
             ZImageQkv::Merged(linear) => {
                 let qkv = linear.forward(x)?;
                 let chunks = qkv.chunk(3, 2)?;
@@ -203,33 +217,41 @@ impl ZImageAttention {
                 let v_proj = wv.forward(x)?;
                 (
                     q_proj.reshape((b, seq_len, self.num_heads, self.head_dim))?,
-                    k_proj.reshape((b, seq_len, self.num_heads, self.head_dim))?,
-                    v_proj.reshape((b, seq_len, self.num_heads, self.head_dim))?,
+                    k_proj.reshape((b, seq_len, self.num_kv_heads, self.head_dim))?,
+                    v_proj.reshape((b, seq_len, self.num_kv_heads, self.head_dim))?,
                 )
             }
         };
 
         let mut q = self.q_norm.forward(&q_raw)?;
         let mut k = self.k_norm.forward(&k_raw)?;
+        let mut v = v_raw;
 
         // Apply RoPE if provided
         if let Some((cos, sin)) = rotary_cos_sin {
             let half = self.head_dim / 2;
             let cos_f32 = cos.to_dtype(DType::F32)?;
             let sin_f32 = sin.to_dtype(DType::F32)?;
-            let apply_rope = |t: &Tensor| -> Result<Tensor> {
+            let apply_rope = |t: &Tensor, heads: usize| -> Result<Tensor> {
                 let t_f32 = t.to_dtype(DType::F32)?;
-                let t_pairs = t_f32.reshape((b, seq_len, self.num_heads, half, 2))?;
-                let t0 = t_pairs.narrow(4, 0, 1)?.squeeze(4)?; // [b, seq_len, heads, half]
-                let t1 = t_pairs.narrow(4, 1, 1)?.squeeze(4)?; // [b, seq_len, heads, half]
+                let t_pairs = t_f32.reshape((b, seq_len, heads, half, 2))?;
+                let t0 = t_pairs.narrow(4, 0, 1)?.squeeze(4)?;
+                let t1 = t_pairs.narrow(4, 1, 1)?.squeeze(4)?;
                 let neg_t1 = (t1 * -1.0)?.unsqueeze(4)?;
                 let pos_t0 = t0.unsqueeze(4)?;
-                let rotated = Tensor::cat(&[&neg_t1, &pos_t0], 4)?.reshape((b, seq_len, self.num_heads, self.head_dim))?;
+                let rotated = Tensor::cat(&[&neg_t1, &pos_t0], 4)?.reshape((b, seq_len, heads, self.head_dim))?;
                 let out = (t_f32.broadcast_mul(&cos_f32)? + rotated.broadcast_mul(&sin_f32)?)?;
                 out.to_dtype(orig_dtype)
             };
-            q = apply_rope(&q)?;
-            k = apply_rope(&k)?;
+            q = apply_rope(&q, self.num_heads)?;
+            k = apply_rope(&k, self.num_kv_heads)?;
+        }
+
+        // Expand KV heads for GQA if num_kv_heads < num_heads
+        if self.num_kv_heads < self.num_heads {
+            let n_rep = self.num_heads / self.num_kv_heads;
+            k = k.unsqueeze(3)?.repeat((1, 1, 1, n_rep, 1))?.reshape((b, seq_len, self.num_heads, self.head_dim))?;
+            v = v.unsqueeze(3)?.repeat((1, 1, 1, n_rep, 1))?.reshape((b, seq_len, self.num_heads, self.head_dim))?;
         }
 
         // Fast-path: FlashAttention-2 if feature enabled and activated (F16/BF16 on CUDA)
@@ -297,8 +319,8 @@ impl ZImageBlock {
         };
         let attention_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm1"))
             .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("prenorm")))?;
-        let attention = ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.head_dim, vb.pp("attention"))
-            .or_else(|_| ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.head_dim, vb.pp("attn")))?;
+        let attention = ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim, vb.pp("attention"))
+            .or_else(|_| ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim, vb.pp("attn")))?;
         let attention_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm2"))
             .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("postnorm")))?;
         let ffn_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm1"))
@@ -403,8 +425,8 @@ impl ZImageRefinerBlock {
         };
         let attention_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm1"))
             .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("prenorm")))?;
-        let attention = ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.head_dim, vb.pp("attention"))
-            .or_else(|_| ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.head_dim, vb.pp("attn")))?;
+        let attention = ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim, vb.pp("attention"))
+            .or_else(|_| ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim, vb.pp("attn")))?;
         let attention_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm2"))
             .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("postnorm")))?;
         let ffn_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm1"))

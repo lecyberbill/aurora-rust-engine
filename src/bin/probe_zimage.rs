@@ -28,7 +28,7 @@ fn main() -> anyhow::Result<()> {
     println!("================================================================================");
 
     let device = auto_device()?;
-    let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
+    let dtype = if !device.is_cpu() { DType::BF16 } else { DType::F32 };
     println!("🎮 Device: {:?} | DType: {:?}", device, dtype);
 
     let aio_path = std::env::args().nth(1)
