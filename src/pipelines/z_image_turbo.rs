@@ -10,16 +10,32 @@ use crate::device::GenerationMetrics;
 use crate::diffusion::dit::z_image::{ZImageConfig, ZImageTransformer};
 use crate::diffusion::schedulers::{FlowMatchEulerConfig, FlowMatchEulerScheduler, Scheduler};
 use crate::diffusion::vae_flux::FluxVaeDecoder;
+use crate::diffusion::vae_qwen::QwenImageVaeDecoder;
 use crate::text::Qwen3TextEncoder;
 use crate::traits::DiffusionParams;
 use crate::weights::SafeTensorsArchive;
+
+#[derive(Clone)]
+pub enum ZImageVaeDecoder {
+    Flux(FluxVaeDecoder),
+    Qwen(QwenImageVaeDecoder),
+}
+
+impl ZImageVaeDecoder {
+    pub fn decode(&self, latents: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Flux(v) => v.decode(latents),
+            Self::Qwen(v) => v.decode(latents),
+        }
+    }
+}
 
 /// Pipeline for Z-Image Turbo Realtime DiT Model
 pub struct ZImageTurboPipeline {
     pub transformer: ZImageTransformer,
     pub scheduler: FlowMatchEulerScheduler,
     pub text_encoder: Option<Qwen3TextEncoder>,
-    pub vae: Option<FluxVaeDecoder>,
+    pub vae: Option<ZImageVaeDecoder>,
     pub device: Device,
     pub dtype: DType,
 }
@@ -87,13 +103,23 @@ impl ZImageTurboPipeline {
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?
             );
             let mut vae_tensors = std::collections::HashMap::new();
+            let mut is_qwen_vae = false;
             for key in vae_archive.keys() {
+                if key.starts_with("decoder.conv1") || key.starts_with("decoder.head") {
+                    is_qwen_vae = true;
+                }
                 if let Ok(t) = vae_archive.get_tensor(&key, &vae_device, DType::F32) {
                     vae_tensors.insert(key.to_string(), t);
                 }
             }
             let vae_vb = candle_nn::VarBuilder::from_tensors(vae_tensors, DType::F32, &vae_device);
-            FluxVaeDecoder::new(vae_vb).ok()
+            if is_qwen_vae {
+                println!("🌈 Loading AutoencoderKLQwenImage 3D Causal VAE Decoder on CPU");
+                QwenImageVaeDecoder::new(vae_vb).ok().map(ZImageVaeDecoder::Qwen)
+            } else {
+                println!("🌈 Loading Flux 2D VAE Decoder on CPU");
+                FluxVaeDecoder::new(vae_vb).ok().map(ZImageVaeDecoder::Flux)
+            }
         } else {
             // Check if VAE is embedded in the AIO archive
             let mut vae_tensors = std::collections::HashMap::new();
@@ -106,7 +132,7 @@ impl ZImageTurboPipeline {
             }
             if !vae_tensors.is_empty() {
                 let vae_vb = candle_nn::VarBuilder::from_tensors(vae_tensors, DType::F32, &vae_device);
-                FluxVaeDecoder::new(vae_vb).ok()
+                FluxVaeDecoder::new(vae_vb).ok().map(ZImageVaeDecoder::Flux)
             } else {
                 None
             }
@@ -128,7 +154,7 @@ impl ZImageTurboPipeline {
     }
 
     /// Attach or override VAE Decoder
-    pub fn set_vae(&mut self, vae: FluxVaeDecoder) {
+    pub fn set_vae(&mut self, vae: ZImageVaeDecoder) {
         self.vae = Some(vae);
     }
 

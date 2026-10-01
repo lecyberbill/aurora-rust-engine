@@ -7,6 +7,7 @@ pub mod schedulers;
 pub mod unet_2d;
 pub mod vae;
 pub mod vae_flux;
+pub mod vae_qwen;
 
 pub use attention::{CrossAttention, SpatialTransformer};
 pub use controlnet::{ControlNetModel, MultiControlNet, compute_canny_edge_map};
@@ -15,3 +16,4 @@ pub use schedulers::{DDIMScheduler, EulerDiscreteScheduler, FlowMatchEulerSchedu
 pub use unet_2d::UNetConditionModel;
 pub use vae::{FastLatentPreviewer, VaeDecoder, tensor_to_rgb_image};
 pub use vae_flux::{FluxVaeDecoder, FluxVaeEncoder};
+pub use vae_qwen::QwenImageVaeDecoder;

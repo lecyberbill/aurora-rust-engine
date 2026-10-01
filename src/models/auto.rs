@@ -275,11 +275,25 @@ impl AutoModel {
 
                 if let Some(vae_path) = &desc.vae {
                     let vae_archive = SafeTensorsArchive::open(vae_path)?;
-                    let vae_router = crate::weights::WeightRouter::new(&vae_archive, Device::Cpu, DType::F32);
-                    if let Ok(vae_vb) = vae_router.vae_var_builder() {
-                        if let Ok(decoder) = crate::diffusion::vae_flux::FluxVaeDecoder::new(vae_vb) {
-                            pipeline.set_vae(decoder);
+                    let mut vae_tensors = std::collections::HashMap::new();
+                    let mut is_qwen = false;
+                    for key in vae_archive.keys() {
+                        if key.starts_with("decoder.conv1") || key.starts_with("decoder.head") {
+                            is_qwen = true;
                         }
+                        if let Ok(t) = vae_archive.get_tensor(&key, &Device::Cpu, DType::F32) {
+                            vae_tensors.insert(key.to_string(), t);
+                        }
+                    }
+                    let vae_vb = candle_nn::VarBuilder::from_tensors(vae_tensors, DType::F32, &Device::Cpu);
+                    if is_qwen {
+                        if let Ok(decoder) = crate::diffusion::vae_qwen::QwenImageVaeDecoder::new(vae_vb) {
+                            println!("🌈 AutoModel: Loaded QwenImageVaeDecoder for ZImageTurbo");
+                            pipeline.set_vae(crate::pipelines::z_image_turbo::ZImageVaeDecoder::Qwen(decoder));
+                        }
+                    } else if let Ok(decoder) = crate::diffusion::vae_flux::FluxVaeDecoder::new(vae_vb) {
+                        println!("🌈 AutoModel: Loaded FluxVaeDecoder for ZImageTurbo");
+                        pipeline.set_vae(crate::pipelines::z_image_turbo::ZImageVaeDecoder::Flux(decoder));
                     }
                 }
 
