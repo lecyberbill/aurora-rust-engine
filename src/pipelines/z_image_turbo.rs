@@ -160,6 +160,8 @@ impl ZImageTurboPipeline {
         let max_seq_len = 0; // 0 = dynamic exact prompt length (no noise padding)
         let context = if let Some(ref enc) = self.text_encoder {
             enc.encode_last_hidden(params.prompt, max_seq_len)?
+                .to_device(&self.device)?
+                .to_dtype(self.dtype)?
         } else {
             Tensor::zeros((1, 1, 2560), self.dtype, &self.device)?
         };

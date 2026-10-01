@@ -201,7 +201,7 @@ mod app {
 
     pub async fn run() -> anyhow::Result<()> {
         let device = aurora_rust_engine::auto_device().unwrap_or(Device::Cpu);
-        let dtype = if !device.is_cpu() { DType::F16 } else { DType::F32 };
+        let dtype = if !device.is_cpu() { DType::BF16 } else { DType::F32 };
 
         // Les modèles sont déclarés dans un fichier JSON (aucun chemin en dur ici) : chemin via
         // `STUDIO_CONFIG`, défaut `aurora_studio.json` dans le répertoire courant.

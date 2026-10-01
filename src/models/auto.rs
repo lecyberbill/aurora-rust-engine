@@ -263,11 +263,12 @@ impl AutoModel {
                     } else {
                         Arc::new(SafeTensorsArchive::open(path)?)
                     };
+                    // Run Qwen3 text encoder on CPU to preserve full 16GB GPU VRAM for the 13GB DiT model
                     let enc = crate::text::Qwen3TextEncoder::from_archive(
                         &*archive,
                         Some(std::path::Path::new("qwen_tokenizer.json")),
-                        &device,
-                        dtype,
+                        &Device::Cpu,
+                        DType::F32,
                     )?;
                     pipeline.set_text_encoder(enc);
                 }
