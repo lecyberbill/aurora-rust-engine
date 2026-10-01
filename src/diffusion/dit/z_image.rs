@@ -222,8 +222,8 @@ impl KreaAttention {
                 let t_f32 = t.to_dtype(DType::F32)?.reshape((tb, th, tl, td / 2, 2))?;
                 let x0 = t_f32.narrow(4, 0, 1)?.squeeze(4)?; // [B, H, L, D/2]
                 let x1 = t_f32.narrow(4, 1, 1)?.squeeze(4)?;
-                let out0 = ((&x0 * &cos_f32)? - (&x1 * &sin_f32)?)?.unsqueeze(4)?;
-                let out1 = ((&x0 * &sin_f32)? + (&x1 * &cos_f32)?)?.unsqueeze(4)?;
+                let out0 = (x0.broadcast_mul(&cos_f32)? - x1.broadcast_mul(&sin_f32)?)?.unsqueeze(4)?;
+                let out1 = (x0.broadcast_mul(&sin_f32)? + x1.broadcast_mul(&cos_f32)?)?.unsqueeze(4)?;
                 let out = Tensor::cat(&[&out0, &out1], 4)?.reshape((tb, th, tl, td))?;
                 out.to_dtype(orig_dtype)
             };
