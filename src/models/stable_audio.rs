@@ -83,7 +83,9 @@ pub struct StableAudioProjectionOutput {
 pub struct StableAudioProjectionModel {
     start_number_conditioner: StableAudioNumberConditioner,
     end_number_conditioner: StableAudioNumberConditioner,
+    #[allow(dead_code)]
     min_value: f32,
+    #[allow(dead_code)]
     max_value: f32,
 }
 

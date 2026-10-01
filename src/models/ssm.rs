@@ -1,6 +1,6 @@
 // [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Pure Rust Qwen 3.5 SSM / Mamba State Space Recurrent Layer
 
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Tensor};
 use candle_nn::{linear_no_bias, Linear, Module, RmsNorm, VarBuilder};
 use crate::error::{LuminaError, Result};
 
@@ -54,6 +54,7 @@ impl Default for SsmConfig {
 /// Qwen 3.5 State Space Model (SSM) Block
 #[derive(Debug, Clone)]
 pub struct Qwen35SsmBlock {
+    #[allow(dead_code)]
     conv1d_weight: Tensor,
     ssm_alpha: Linear,
     ssm_beta: Linear,
@@ -61,7 +62,9 @@ pub struct Qwen35SsmBlock {
     norm: RmsNorm,
     state_size: usize,
     num_groups: usize,
+    #[allow(dead_code)]
     conv_kernel: usize,
+    #[allow(dead_code)] 
     hidden_size: usize,
 }
 

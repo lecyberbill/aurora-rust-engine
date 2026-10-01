@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
     let dev = Device::new_cuda(0).unwrap_or(Device::Cpu);
     let dtype = if dev.is_cuda() { DType::F32 } else { DType::F32 };
 
-    let mut wav = WavAudio::load_wav(&wav_path)?.resample(16_000);
+    let wav = WavAudio::load_wav(&wav_path)?.resample(16_000);
     let mono: Vec<f32> = if wav.channels == 2 {
         wav.samples.chunks_exact(2).map(|c| (c[0] + c[1]) * 0.5).collect()
     } else {

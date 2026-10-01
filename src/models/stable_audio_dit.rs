@@ -97,7 +97,7 @@ impl DitAttention {
     }
 
     fn rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> candle_core::Result<Tensor> {
-        let (b, h, l, hd) = x.dims4()?;
+        let (b, h, _, hd) = x.dims4()?;
         let rot = cos.dim(1)?;
         let half = rot / 2;
         let x_rot = x.narrow(3, 0, rot)?;

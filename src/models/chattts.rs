@@ -222,6 +222,7 @@ pub struct ChatTtsGpt {
     spk_proj: Linear,
     blocks: Vec<ChatTtsBlock>,
     final_norm: LayerNorm,
+    #[allow(dead_code)]
     lm_head: Linear,
     code_head: Linear,
     rope: ChatTtsRoPE,

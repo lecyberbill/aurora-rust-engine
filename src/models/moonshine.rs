@@ -6,8 +6,7 @@
 use anyhow::Result;
 use candle_core::{D, DType, Device, Module, Tensor};
 use candle_nn::{
-    conv1d, conv1d_no_bias, layer_norm, linear, linear_no_bias, Conv1d, Conv1dConfig, LayerNorm,
-    LayerNormConfig, Linear, VarBuilder,
+    conv1d, conv1d_no_bias, linear, linear_no_bias, Conv1d, Conv1dConfig, Linear, VarBuilder,
 };
 use std::path::Path;
 

@@ -3,7 +3,7 @@
 use aurora_rust_engine::audio::{seeded_randn, WavAudio};
 use aurora_rust_engine::models::acestep_tasks;
 use aurora_rust_engine::pipelines::AudioDiffusionPipeline;
-use candle_core::{DType, Device, Tensor};
+use candle_core::Tensor;
 
 fn main() -> anyhow::Result<()> {
     let argv: Vec<String> = std::env::args().collect();
