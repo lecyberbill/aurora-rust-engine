@@ -1,10 +1,9 @@
-// [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Pure Rust Z-Image Turbo DiT Architecture (30 Layers + Refiners)
+// [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: Official ComfyUI / Diffusers Pure Rust Krea 2 Turbo Single-Stream MMDiT Architecture
 
 use candle_core::{DType, Module, Result, Tensor};
 use candle_nn::{linear, Linear, VarBuilder};
-use crate::diffusion::dit::blocks::RMSNorm;
 
-/// Z-Image Turbo Transformer Configuration
+/// Krea 2 Turbo Transformer Configuration
 #[derive(Debug, Clone)]
 pub struct ZImageConfig {
     pub in_channels: usize,
@@ -25,15 +24,15 @@ impl Default for ZImageConfig {
         Self {
             in_channels: 64, // 16 VAE channels * 2x2 patchify
             out_channels: 64,
-            hidden_size: 3840,
-            num_heads: 30,
-            num_kv_heads: 30,
-            head_dim: 128, // 30 * 128 = 3840
-            num_layers: 30,
-            intermediate_dim: 10240,
-            cap_dim: 2560, // Qwen3-4B hidden size
+            hidden_size: 6144,
+            num_heads: 48,
+            num_kv_heads: 12,
+            head_dim: 128, // 48 * 128 = 6144
+            num_layers: 28,
+            intermediate_dim: 16384,
+            cap_dim: 2560, // Qwen3-VL-4B hidden size
             time_embed_dim: 256,
-            theta: 10000.0,
+            theta: 1000.0,
         }
     }
 }
@@ -42,49 +41,33 @@ impl ZImageConfig {
     pub fn from_tensors(tensors: &std::collections::HashMap<String, Tensor>) -> Self {
         let mut cfg = Self::default();
 
-        // 1. Detect hidden size & in_channels from first.weight or x_embedder.weight
-        if let Some(t) = tensors.get("first.weight").or_else(|| tensors.get("x_embedder.weight")) {
+        if let Some(t) = tensors.get("first.weight") {
             let dims = t.dims();
             if dims.len() >= 2 {
                 cfg.hidden_size = dims[0];
                 cfg.in_channels = dims[1];
                 cfg.out_channels = dims[1];
                 cfg.num_heads = cfg.hidden_size / cfg.head_dim;
-                cfg.num_kv_heads = cfg.num_heads;
             }
         }
 
-        // 1b. Detect num_kv_heads for Grouped-Query Attention (GQA) from wk.weight
-        if let Some(t) = tensors.get("blocks.0.attn.wk.weight")
-            .or_else(|| tensors.get("layers.0.attention.wk.weight")) {
+        if let Some(t) = tensors.get("blocks.0.attn.wk.weight") {
             let dims = t.dims();
             if dims.len() >= 2 {
                 cfg.num_kv_heads = dims[0] / cfg.head_dim;
             }
         }
 
-        // 2. Detect intermediate_dim from mlp.gate.weight or feed_forward.w1.weight
-        if let Some(t) = tensors.get("blocks.0.mlp.gate.weight")
-            .or_else(|| tensors.get("layers.0.feed_forward.w1.weight"))
-            .or_else(|| tensors.get("blocks.0.mlp.up.weight")) {
+        if let Some(t) = tensors.get("blocks.0.mlp.gate.weight") {
             let dims = t.dims();
             if dims.len() >= 2 {
                 cfg.intermediate_dim = dims[0];
             }
         }
 
-        // 3. Detect num_layers
         let mut max_layer = 0;
         for k in tensors.keys() {
             if let Some(rest) = k.strip_prefix("blocks.") {
-                if let Some(idx_str) = rest.split('.').next() {
-                    if let Ok(idx) = idx_str.parse::<usize>() {
-                        if idx + 1 > max_layer {
-                            max_layer = idx + 1;
-                        }
-                    }
-                }
-            } else if let Some(rest) = k.strip_prefix("layers.") {
                 if let Some(idx_str) = rest.split('.').next() {
                     if let Ok(idx) = idx_str.parse::<usize>() {
                         if idx + 1 > max_layer {
@@ -98,663 +81,489 @@ impl ZImageConfig {
             cfg.num_layers = max_layer;
         }
 
-        // 4. Detect cap_dim (Qwen3 text encoder hidden dim) from txtmlp / cap_embedder
-        if let Some(t) = tensors.get("txtmlp.1.weight").or_else(|| tensors.get("cap_embedder.1.weight")) {
+        if let Some(t) = tensors.get("txtmlp.1.weight") {
             let dims = t.dims();
             if dims.len() >= 2 {
                 cfg.cap_dim = dims[1];
             }
         }
 
-        if cfg.num_layers == 28 {
-            // Krea 2 Turbo: rope_theta = 1000.0
-            cfg.theta = 1000.0;
-        }
-
         cfg
     }
 }
 
-fn linear_or_no_bias(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Linear> {
-    linear(in_dim, out_dim, vb.clone())
-        .or_else(|_| candle_nn::linear_no_bias(in_dim, out_dim, vb))
-}
-
-/// SwiGLU Feed-Forward Network for Z-Image / Krea2
+/// RMS Normalization with (1 + scale) zero-centered reference weight convention
 #[derive(Debug, Clone)]
-pub struct ZImageFeedForward {
-    w1: Linear,
-    w2: Linear,
-    w3: Linear,
+pub struct KreaRMSNorm {
+    scale: Tensor,
+    eps: f64,
 }
 
-impl ZImageFeedForward {
-    pub fn new(hidden_size: usize, intermediate_dim: usize, vb: VarBuilder) -> Result<Self> {
-        let w1 = linear_or_no_bias(hidden_size, intermediate_dim, vb.pp("w1"))
-            .or_else(|_| linear_or_no_bias(hidden_size, intermediate_dim, vb.pp("gate")))?;
-        let w2 = linear_or_no_bias(intermediate_dim, hidden_size, vb.pp("w2"))
-            .or_else(|_| linear_or_no_bias(intermediate_dim, hidden_size, vb.pp("down")))?;
-        let w3 = linear_or_no_bias(hidden_size, intermediate_dim, vb.pp("w3"))
-            .or_else(|_| linear_or_no_bias(hidden_size, intermediate_dim, vb.pp("up")))?;
-        Ok(Self { w1, w2, w3 })
+impl KreaRMSNorm {
+    pub fn new(features: usize, vb: VarBuilder) -> Result<Self> {
+        let scale = vb.get(features, "scale")
+            .or_else(|_| vb.get((features,), "scale"))
+            .or_else(|_| vb.get(features, "weight"))?;
+        Ok(Self { scale, eps: 1e-5 })
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x1 = self.w1.forward(x)?;
-        let x3 = self.w3.forward(x)?;
-        let gate = candle_nn::ops::silu(&x1)?;
-        let activated = (gate * x3)?;
-        self.w2.forward(&activated)
+        let orig_dtype = x.dtype();
+        let x_f32 = x.to_dtype(DType::F32)?;
+        let mean_sq = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+        let rms = (mean_sq + self.eps)?.sqrt()?;
+        let norm = x_f32.broadcast_div(&rms)?;
+        let weight = (self.scale.to_dtype(DType::F32)? + 1.0)?;
+        let out = norm.broadcast_mul(&weight)?;
+        out.to_dtype(orig_dtype)
     }
 }
 
+/// Per-head QK Normalization with KreaRMSNorm
 #[derive(Debug, Clone)]
-pub enum ZImageQkv {
-    Merged(Linear),
-    Separate { wq: Linear, wk: Linear, wv: Linear },
+pub struct QKNorm {
+    qnorm: KreaRMSNorm,
+    knorm: KreaRMSNorm,
 }
 
-/// Self-Attention with QK-Norm, RoPE & GQA for Z-Image / Krea2
+impl QKNorm {
+    pub fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
+        let qnorm = KreaRMSNorm::new(dim, vb.pp("qnorm"))?;
+        let knorm = KreaRMSNorm::new(dim, vb.pp("knorm"))?;
+        Ok(Self { qnorm, knorm })
+    }
+
+    pub fn forward(&self, q: &Tensor, k: &Tensor) -> Result<(Tensor, Tensor)> {
+        Ok((self.qnorm.forward(q)?, self.knorm.forward(k)?))
+    }
+}
+
+/// SwiGLU Feed-Forward Network: down(silu(gate(x)) * up(x))
 #[derive(Debug, Clone)]
-pub struct ZImageAttention {
-    qkv: ZImageQkv,
-    out: Linear,
-    q_norm: RMSNorm,
-    k_norm: RMSNorm,
-    num_heads: usize,
-    num_kv_heads: usize,
+pub struct SwiGLU {
+    gate: Linear,
+    up: Linear,
+    down: Linear,
+}
+
+impl SwiGLU {
+    pub fn new(features: usize, mlp_dim: usize, bias: bool, vb: VarBuilder) -> Result<Self> {
+        let gate = if bias { linear(features, mlp_dim, vb.pp("gate"))? } else { candle_nn::linear_no_bias(features, mlp_dim, vb.pp("gate"))? };
+        let up = if bias { linear(features, mlp_dim, vb.pp("up"))? } else { candle_nn::linear_no_bias(features, mlp_dim, vb.pp("up"))? };
+        let down = if bias { linear(mlp_dim, features, vb.pp("down"))? } else { candle_nn::linear_no_bias(mlp_dim, features, vb.pp("down"))? };
+        Ok(Self { gate, up, down })
+    }
+
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let g = candle_nn::ops::silu(&self.gate.forward(x)?)?;
+        let u = self.up.forward(x)?;
+        let gu = (g * u)?;
+        self.down.forward(&gu)
+    }
+}
+
+/// Attention with QK-Norm, 3D RoPE, Sigmoid-Gated Output & GQA
+#[derive(Debug, Clone)]
+pub struct KreaAttention {
+    wq: Linear,
+    wk: Linear,
+    wv: Linear,
+    gate: Linear,
+    qknorm: QKNorm,
+    wo: Linear,
+    heads: usize,
+    kv_heads: usize,
     head_dim: usize,
     scale: f64,
 }
 
-impl ZImageAttention {
-    pub fn new(hidden_size: usize, num_heads: usize, num_kv_heads: usize, head_dim: usize, vb: VarBuilder) -> Result<Self> {
-        let qkv = if let Ok(merged) = linear_or_no_bias(hidden_size, hidden_size * 3, vb.pp("qkv")) {
-            ZImageQkv::Merged(merged)
-        } else {
-            let wq = linear_or_no_bias(hidden_size, num_heads * head_dim, vb.pp("wq"))?;
-            let wk = linear_or_no_bias(hidden_size, num_kv_heads * head_dim, vb.pp("wk"))?;
-            let wv = linear_or_no_bias(hidden_size, num_kv_heads * head_dim, vb.pp("wv"))?;
-            ZImageQkv::Separate { wq, wk, wv }
-        };
-
-        let out = linear_or_no_bias(hidden_size, hidden_size, vb.pp("out"))
-            .or_else(|_| linear_or_no_bias(hidden_size, hidden_size, vb.pp("wo")))?;
-        let q_norm = RMSNorm::new(head_dim, vb.pp("q_norm"))
-            .or_else(|_| RMSNorm::new(head_dim, vb.pp("qknorm.qnorm")))?;
-        let k_norm = RMSNorm::new(head_dim, vb.pp("k_norm"))
-            .or_else(|_| RMSNorm::new(head_dim, vb.pp("qknorm.knorm")))?;
+impl KreaAttention {
+    pub fn new(dim: usize, heads: usize, kv_heads: usize, bias: bool, vb: VarBuilder) -> Result<Self> {
+        let head_dim = dim / heads;
+        let wq = if bias { linear(dim, heads * head_dim, vb.pp("wq"))? } else { candle_nn::linear_no_bias(dim, heads * head_dim, vb.pp("wq"))? };
+        let wk = if bias { linear(dim, kv_heads * head_dim, vb.pp("wk"))? } else { candle_nn::linear_no_bias(dim, kv_heads * head_dim, vb.pp("wk"))? };
+        let wv = if bias { linear(dim, kv_heads * head_dim, vb.pp("wv"))? } else { candle_nn::linear_no_bias(dim, kv_heads * head_dim, vb.pp("wv"))? };
+        let gate = if bias { linear(dim, dim, vb.pp("gate"))? } else { candle_nn::linear_no_bias(dim, dim, vb.pp("gate"))? };
+        let qknorm = QKNorm::new(head_dim, vb.pp("qknorm"))?;
+        let wo = if bias { linear(dim, dim, vb.pp("wo"))? } else { candle_nn::linear_no_bias(dim, dim, vb.pp("wo"))? };
         let scale = 1.0 / (head_dim as f64).sqrt();
-
-        Ok(Self {
-            qkv,
-            out,
-            q_norm,
-            k_norm,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-            scale,
-        })
+        Ok(Self { wq, wk, wv, gate, qknorm, wo, heads, kv_heads, head_dim, scale })
     }
 
-    pub fn forward(
-        &self,
-        x: &Tensor,
-        rotary_cos_sin: Option<(&Tensor, &Tensor)>,
-    ) -> Result<Tensor> {
-        let (b, seq_len, _hidden) = x.dims3()?;
+    pub fn forward(&self, x: &Tensor, rotary_freqs: Option<(&Tensor, &Tensor)>) -> Result<Tensor> {
+        let (b, l, _d) = x.dims3()?;
         let orig_dtype = x.dtype();
 
-        let (q_raw, k_raw, v_raw) = match &self.qkv {
-            ZImageQkv::Merged(linear) => {
-                let qkv = linear.forward(x)?;
-                let chunks = qkv.chunk(3, 2)?;
-                (
-                    chunks[0].reshape((b, seq_len, self.num_heads, self.head_dim))?,
-                    chunks[1].reshape((b, seq_len, self.num_heads, self.head_dim))?,
-                    chunks[2].reshape((b, seq_len, self.num_heads, self.head_dim))?,
-                )
-            }
-            ZImageQkv::Separate { wq, wk, wv } => {
-                let q_proj = wq.forward(x)?;
-                let k_proj = wk.forward(x)?;
-                let v_proj = wv.forward(x)?;
-                (
-                    q_proj.reshape((b, seq_len, self.num_heads, self.head_dim))?,
-                    k_proj.reshape((b, seq_len, self.num_kv_heads, self.head_dim))?,
-                    v_proj.reshape((b, seq_len, self.num_kv_heads, self.head_dim))?,
-                )
-            }
-        };
+        let q_raw = self.wq.forward(x)?.reshape((b, l, self.heads, self.head_dim))?.transpose(1, 2)?.contiguous()?; // [B, H, L, D]
+        let k_raw = self.wk.forward(x)?.reshape((b, l, self.kv_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
+        let v_raw = self.wv.forward(x)?.reshape((b, l, self.kv_heads, self.head_dim))?.transpose(1, 2)?.contiguous()?;
+        let gate = candle_nn::ops::sigmoid(&self.gate.forward(x)?)?; // [B, L, D]
 
-        let mut q = self.q_norm.forward(&q_raw)?;
-        let mut k = self.k_norm.forward(&k_raw)?;
-        let mut v = v_raw;
+        let (mut q, mut k) = self.qknorm.forward(&q_raw, &k_raw)?;
 
-        // Apply RoPE if provided (3D RoPE rotate_half per axis)
-        if let Some((cos, sin)) = rotary_cos_sin {
+        if let Some((cos, sin)) = rotary_freqs {
+            // Exact Flux / Krea2 RoPE on [B, H, L, 64, 2]
             let cos_f32 = cos.to_dtype(DType::F32)?;
             let sin_f32 = sin.to_dtype(DType::F32)?;
             let apply_rope = |t: &Tensor| -> Result<Tensor> {
-                let t_f32 = t.to_dtype(DType::F32)?;
-                let rotated = if self.head_dim == 128 {
-                    // Axis 0: dim 32 (split 16, 16)
-                    let t0 = t_f32.narrow(3, 0, 32)?;
-                    let rot0 = Tensor::cat(&[&(t0.narrow(3, 16, 16)? * -1.0)?, &t0.narrow(3, 0, 16)?], 3)?;
-
-                    // Axis 1: dim 48 (split 24, 24)
-                    let t1 = t_f32.narrow(3, 32, 48)?;
-                    let rot1 = Tensor::cat(&[&(t1.narrow(3, 24, 24)? * -1.0)?, &t1.narrow(3, 0, 24)?], 3)?;
-
-                    // Axis 2: dim 48 (split 24, 24)
-                    let t2 = t_f32.narrow(3, 80, 48)?;
-                    let rot2 = Tensor::cat(&[&(t2.narrow(3, 24, 24)? * -1.0)?, &t2.narrow(3, 0, 24)?], 3)?;
-
-                    Tensor::cat(&[&rot0, &rot1, &rot2], 3)?
-                } else {
-                    let half = self.head_dim / 2;
-                    let t1 = t_f32.narrow(3, 0, half)?;
-                    let t2 = t_f32.narrow(3, half, half)?;
-                    Tensor::cat(&[&(t2 * -1.0)?, &t1], 3)?
-                };
-                let out = (t_f32.broadcast_mul(&cos_f32)? + rotated.broadcast_mul(&sin_f32)?)?;
+                let (tb, th, tl, td) = t.dims4()?;
+                let t_f32 = t.to_dtype(DType::F32)?.reshape((tb, th, tl, td / 2, 2))?;
+                let x0 = t_f32.narrow(4, 0, 1)?.squeeze(4)?; // [B, H, L, D/2]
+                let x1 = t_f32.narrow(4, 1, 1)?.squeeze(4)?;
+                let out0 = ((&x0 * &cos_f32)? - (&x1 * &sin_f32)?)?.unsqueeze(4)?;
+                let out1 = ((&x0 * &sin_f32)? + (&x1 * &cos_f32)?)?.unsqueeze(4)?;
+                let out = Tensor::cat(&[&out0, &out1], 4)?.reshape((tb, th, tl, td))?;
                 out.to_dtype(orig_dtype)
             };
             q = apply_rope(&q)?;
             k = apply_rope(&k)?;
         }
 
-        // Expand KV heads for GQA if num_kv_heads < num_heads
-        if self.num_kv_heads < self.num_heads {
-            let n_rep = self.num_heads / self.num_kv_heads;
-            k = k.unsqueeze(3)?.repeat((1, 1, 1, n_rep, 1))?.reshape((b, seq_len, self.num_heads, self.head_dim))?;
-            v = v.unsqueeze(3)?.repeat((1, 1, 1, n_rep, 1))?.reshape((b, seq_len, self.num_heads, self.head_dim))?;
-        }
+        let mut v = v_raw;
+        let k = if self.kv_heads != self.heads {
+            let rep = self.heads / self.kv_heads;
+            k.unsqueeze(2)?.repeat((1, 1, rep, 1, 1))?.reshape((b, self.heads, l, self.head_dim))?
+        } else {
+            k
+        };
+        let v = if self.kv_heads != self.heads {
+            let rep = self.heads / self.kv_heads;
+            v.unsqueeze(2)?.repeat((1, 1, rep, 1, 1))?.reshape((b, self.heads, l, self.head_dim))?
+        } else {
+            v
+        };
 
-        // Fast-path: FlashAttention-2 if feature enabled and activated (F16/BF16 on CUDA)
+        // Fast-path: FlashAttention-2 if enabled
         #[cfg(feature = "flash-attn")]
         {
-            let use_flash = std::env::var("AURORA_FLASH_ATTN")
-                .or_else(|_| std::env::var("FLUX_FLASH_ATTN"))
-                .or_else(|_| std::env::var("ZIMAGE_FLASH_ATTN"))
-                .ok()
-                .map(|s| s == "1")
-                .unwrap_or(false);
+            let use_flash = std::env::var("AURORA_FLASH_ATTN").ok().map(|s| s == "1").unwrap_or(false);
             if use_flash && q.device().is_cuda() && (q.dtype() == DType::F16 || q.dtype() == DType::BF16) {
-                let q_c = q.contiguous()?;
-                let k_c = k.contiguous()?;
-                let v_c = v.contiguous()?;
+                let q_c = q.transpose(1, 2)?.contiguous()?;
+                let k_c = k.transpose(1, 2)?.contiguous()?;
+                let v_c = v.transpose(1, 2)?.contiguous()?;
                 if let Ok(attn_out) = candle_flash_attn::flash_attn(&q_c, &k_c, &v_c, self.scale as f32, false) {
-                    let out = attn_out
-                        .reshape((b, seq_len, self.num_heads * self.head_dim))?
-                        .to_dtype(orig_dtype)?;
-                    return self.out.forward(&out);
+                    let out_seq = attn_out.reshape((b, l, self.heads * self.head_dim))?.to_dtype(orig_dtype)?;
+                    let gated_out = (out_seq * gate)?;
+                    return self.wo.forward(&gated_out);
                 }
             }
         }
 
-        // Standard scaled dot product attention fallback
-        let q_t = (q.transpose(1, 2)?.contiguous()? * self.scale)?;
-        let k_t = k.transpose(1, 2)?.contiguous()?;
-        let v_t = v.transpose(1, 2)?.contiguous()?;
-
-        let attn_scores = q_t.matmul(&k_t.transpose(2, 3)?)?;
-        let attn_weights = robust_softmax_last_dim(&attn_scores)?;
-        let attn_out = attn_weights.matmul(&v_t)?;
-
-        let out = attn_out
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape((b, seq_len, self.num_heads * self.head_dim))?
-            .to_dtype(orig_dtype)?;
-
-        self.out.forward(&out)
+        // Scaled dot-product attention
+        let q_scaled = (q * self.scale)?;
+        let scores = q_scaled.matmul(&k.transpose(2, 3)?)?;
+        let weights = candle_nn::ops::softmax_last_dim(&scores)?;
+        let attn_out = weights.matmul(&v)?; // [B, H, L, D]
+        let out_seq = attn_out.transpose(1, 2)?.contiguous()?.reshape((b, l, self.heads * self.head_dim))?;
+        let gated_out = (out_seq * gate)?;
+        self.wo.forward(&gated_out)
     }
 }
 
-fn robust_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
-    candle_nn::ops::softmax(x, candle_core::D::Minus1)
-        .or_else(|_| candle_nn::ops::softmax_last_dim(x))
-        .or_else(|_| {
-            let max = x.max_keepdim(candle_core::D::Minus1)?;
-            let exp = x.broadcast_sub(&max)?.exp()?;
-            let sum = exp.sum_keepdim(candle_core::D::Minus1)?;
-            exp.broadcast_div(&sum)
-        })
-}
-
-/// Z-Image DiT Transformer Layer (AdaLN-4 Modulation + Attention + SwiGLU FFN)
+/// Double Shared Modulation (6 * dim)
 #[derive(Debug, Clone)]
-pub struct ZImageBlock {
-    pub ada_ln: Linear,
-    attention_norm1: RMSNorm,
-    attention: ZImageAttention,
-    attention_norm2: RMSNorm,
-    ffn_norm1: RMSNorm,
-    feed_forward: ZImageFeedForward,
-    ffn_norm2: RMSNorm,
-    _hidden_size: usize,
+pub struct DoubleSharedModulation {
+    lin: Tensor,
 }
 
-impl ZImageBlock {
-    pub fn new(cfg: &ZImageConfig, vb: VarBuilder) -> Result<Self> {
-        let ada_ln = if let Ok(aln) = linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("adaLN_modulation.0")) {
-            aln
-        } else if let Ok(aln) = linear_or_no_bias(cfg.hidden_size, cfg.hidden_size, vb.pp("attn.gate")) {
-            aln
-        } else {
-            linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("attn.gate"))?
-        };
-        let attention_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm1"))
-            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("prenorm")))?;
-        let attention = ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim, vb.pp("attention"))
-            .or_else(|_| ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim, vb.pp("attn")))?;
-        let attention_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm2"))
-            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("postnorm")))?;
-        let ffn_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm1"))
-            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("prenorm")))?;
-        let feed_forward = ZImageFeedForward::new(cfg.hidden_size, cfg.intermediate_dim, vb.pp("feed_forward"))
-            .or_else(|_| ZImageFeedForward::new(cfg.hidden_size, cfg.intermediate_dim, vb.pp("mlp")))?;
-        let ffn_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm2"))
-            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("postnorm")))?;
-
-        Ok(Self {
-            ada_ln,
-            attention_norm1,
-            attention,
-            attention_norm2,
-            ffn_norm1,
-            feed_forward,
-            ffn_norm2,
-            _hidden_size: cfg.hidden_size,
-        })
+impl DoubleSharedModulation {
+    pub fn new(features: usize, vb: VarBuilder) -> Result<Self> {
+        let lin = vb.get(6 * features, "lin")
+            .or_else(|_| vb.get((6 * features,), "lin"))?;
+        Ok(Self { lin })
     }
 
-    pub fn forward(
-        &self,
-        x: &Tensor,
-        temb: &Tensor,
-        rotary_cos_sin: Option<(&Tensor, &Tensor)>,
-    ) -> Result<Tensor> {
-        let orig_dtype = x.dtype();
-        let mod_params = self.ada_ln.forward(temb)?; // (z_image_modulation = True: no SiLU before adaLN)
-        let (scale_msa, gate_msa, scale_mlp, gate_mlp) = if mod_params.dim(1)? == self._hidden_size * 4 {
-            let chunks = mod_params.chunk(4, 1)?;
-            (
-                Some(chunks[0].unsqueeze(1)?),
-                chunks[1].unsqueeze(1)?.tanh()?,
-                Some(chunks[2].unsqueeze(1)?),
-                chunks[3].unsqueeze(1)?.tanh()?,
-            )
-        } else {
-            // mod_params is gate_msa [B, hidden_size]
-            (
-                None,
-                mod_params.unsqueeze(1)?.tanh()?,
-                None,
-                Tensor::ones((temb.dim(0)?, 1, self._hidden_size), mod_params.dtype(), mod_params.device())?,
-            )
-        };
+    pub fn forward(&self, vec: &Tensor) -> Result<Vec<Tensor>> {
+        let mod_val = vec.broadcast_add(&self.lin.to_dtype(vec.dtype())?)?;
+        mod_val.chunk(6, candle_core::D::Minus1)
+    }
+}
 
-        // Attention path
+/// Single-Stream Transformer Block for Krea 2
+#[derive(Debug, Clone)]
+pub struct SingleStreamBlock {
+    mod_layer: DoubleSharedModulation,
+    prenorm: KreaRMSNorm,
+    postnorm: KreaRMSNorm,
+    attn: KreaAttention,
+    mlp: SwiGLU,
+}
+
+impl SingleStreamBlock {
+    pub fn new(features: usize, heads: usize, kv_heads: usize, mlp_dim: usize, bias: bool, vb: VarBuilder) -> Result<Self> {
+        let mod_layer = DoubleSharedModulation::new(features, vb.pp("mod"))?;
+        let prenorm = KreaRMSNorm::new(features, vb.pp("prenorm"))?;
+        let postnorm = KreaRMSNorm::new(features, vb.pp("postnorm"))?;
+        let attn = KreaAttention::new(features, heads, kv_heads, bias, vb.pp("attn"))?;
+        let mlp = SwiGLU::new(features, mlp_dim, bias, vb.pp("mlp"))?;
+        Ok(Self { mod_layer, prenorm, postnorm, attn, mlp })
+    }
+
+    pub fn forward(&self, x: &Tensor, tvec: &Tensor, rotary_freqs: Option<(&Tensor, &Tensor)>) -> Result<Tensor> {
+        let mods = self.mod_layer.forward(tvec)?;
+        let prescale = &mods[0];
+        let preshift = &mods[1];
+        let pregate = &mods[2];
+        let postscale = &mods[3];
+        let postshift = &mods[4];
+        let postgate = &mods[5];
+
+        // Attention branch: x = x + pregate * attn((1 + prescale) * prenorm(x) + preshift)
+        let norm_x = self.prenorm.forward(x)?;
         let ones = Tensor::ones((1, 1, 1), x.dtype(), x.device())?;
-        let norm_x = self.attention_norm1.forward(x)?;
-        let modulated_x = if let Some(ref scale) = scale_msa {
-            let scale_p1 = scale.broadcast_add(&ones)?;
-            norm_x.broadcast_mul(&scale_p1)?
-        } else {
-            norm_x
-        };
-        let attn_out = self.attention.forward(&modulated_x, rotary_cos_sin)?;
-        let norm_attn = self.attention_norm2.forward(&attn_out)?;
-        let x = x.broadcast_add(&norm_attn.broadcast_mul(&gate_msa)?)?;
+        let scale_p1 = prescale.unsqueeze(1)?.broadcast_add(&ones)?;
+        let attn_in = norm_x.broadcast_mul(&scale_p1)?.broadcast_add(&preshift.unsqueeze(1)?)?;
+        let attn_out = self.attn.forward(&attn_in, rotary_freqs)?;
+        let x = x.broadcast_add(&attn_out.broadcast_mul(&pregate.unsqueeze(1)?)?)?;
 
-        // FFN path
-        let norm_x2 = self.ffn_norm1.forward(&x)?;
-        let modulated_x2 = if let Some(ref scale) = scale_mlp {
-            let scale_p1 = scale.broadcast_add(&ones)?;
-            norm_x2.broadcast_mul(&scale_p1)?
-        } else {
-            norm_x2
-        };
-        let ffn_out = self.feed_forward.forward(&modulated_x2)?;
-        let norm_ffn = self.ffn_norm2.forward(&ffn_out)?;
-        let x = x.broadcast_add(&norm_ffn.broadcast_mul(&gate_mlp)?)?;
+        // MLP branch: x = x + postgate * mlp((1 + postscale) * postnorm(x) + postshift)
+        let norm_x2 = self.postnorm.forward(&x)?;
+        let scale2_p1 = postscale.unsqueeze(1)?.broadcast_add(&ones)?;
+        let mlp_in = norm_x2.broadcast_mul(&scale2_p1)?.broadcast_add(&postshift.unsqueeze(1)?)?;
+        let mlp_out = self.mlp.forward(&mlp_in)?;
+        let x = x.broadcast_add(&mlp_out.broadcast_mul(&postgate.unsqueeze(1)?)?)?;
 
-        x.to_dtype(orig_dtype)
+        Ok(x)
     }
 }
 
-/// Z-Image Refiner Layer (Context Refiner & Noise Refiner)
+/// Text Fusion Block for Qwen3-VL 12-layer adapter
 #[derive(Debug, Clone)]
-pub struct ZImageRefinerBlock {
-    ada_ln: Option<Linear>,
-    attention_norm1: RMSNorm,
-    attention: ZImageAttention,
-    attention_norm2: RMSNorm,
-    ffn_norm1: RMSNorm,
-    feed_forward: ZImageFeedForward,
-    ffn_norm2: RMSNorm,
-    _hidden_size: usize,
+pub struct TextFusionBlock {
+    prenorm: KreaRMSNorm,
+    postnorm: KreaRMSNorm,
+    attn: KreaAttention,
+    mlp: SwiGLU,
 }
 
-impl ZImageRefinerBlock {
-    pub fn new(cfg: &ZImageConfig, vb: VarBuilder, has_adaln: bool) -> Result<Self> {
-        let ada_ln = if has_adaln {
-            if let Ok(aln) = linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("adaLN_modulation.0")) {
-                Some(aln)
-            } else if let Ok(aln) = linear_or_no_bias(cfg.hidden_size, cfg.hidden_size, vb.pp("attn.gate")) {
-                Some(aln)
-            } else {
-                Some(linear(cfg.time_embed_dim, cfg.hidden_size * 4, vb.pp("attn.gate"))?)
-            }
-        } else {
-            None
-        };
-        let attention_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm1"))
-            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("prenorm")))?;
-        let attention = ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim, vb.pp("attention"))
-            .or_else(|_| ZImageAttention::new(cfg.hidden_size, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim, vb.pp("attn")))?;
-        let attention_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("attention_norm2"))
-            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("postnorm")))?;
-        let ffn_norm1 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm1"))
-            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("prenorm")))?;
-        let feed_forward = ZImageFeedForward::new(cfg.hidden_size, cfg.intermediate_dim, vb.pp("feed_forward"))
-            .or_else(|_| ZImageFeedForward::new(cfg.hidden_size, cfg.intermediate_dim, vb.pp("mlp")))?;
-        let ffn_norm2 = RMSNorm::new(cfg.hidden_size, vb.pp("ffn_norm2"))
-            .or_else(|_| RMSNorm::new(cfg.hidden_size, vb.pp("postnorm")))?;
-
-        Ok(Self {
-            ada_ln,
-            attention_norm1,
-            attention,
-            attention_norm2,
-            ffn_norm1,
-            feed_forward,
-            ffn_norm2,
-            _hidden_size: cfg.hidden_size,
-        })
+impl TextFusionBlock {
+    pub fn new(txt_dim: usize, heads: usize, kv_heads: usize, mlp_dim: usize, bias: bool, vb: VarBuilder) -> Result<Self> {
+        let prenorm = KreaRMSNorm::new(txt_dim, vb.pp("prenorm"))?;
+        let postnorm = KreaRMSNorm::new(txt_dim, vb.pp("postnorm"))?;
+        let attn = KreaAttention::new(txt_dim, heads, kv_heads, bias, vb.pp("attn"))?;
+        let mlp = SwiGLU::new(txt_dim, mlp_dim, bias, vb.pp("mlp"))?;
+        Ok(Self { prenorm, postnorm, attn, mlp })
     }
 
-    pub fn forward(
-        &self,
-        x: &Tensor,
-        temb: Option<&Tensor>,
-        rotary_cos_sin: Option<(&Tensor, &Tensor)>,
-    ) -> Result<Tensor> {
-        let orig_dtype = x.dtype();
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let norm_x = self.prenorm.forward(x)?;
+        let attn_out = self.attn.forward(&norm_x, None)?;
+        let x = (x + attn_out)?;
+        let norm_x2 = self.postnorm.forward(&x)?;
+        let mlp_out = self.mlp.forward(&norm_x2)?;
+        x + mlp_out
+    }
+}
 
-        if let (Some(ref aln), Some(t)) = (&self.ada_ln, temb) {
-            let mod_params = aln.forward(t)?; // (z_image_modulation = True: no SiLU before adaLN)
-            let (scale_msa, gate_msa, scale_mlp, gate_mlp) = if mod_params.dim(1)? == self._hidden_size * 4 {
-                let chunks = mod_params.chunk(4, 1)?;
-                (
-                    Some(chunks[0].unsqueeze(1)?),
-                    chunks[1].unsqueeze(1)?.tanh()?,
-                    Some(chunks[2].unsqueeze(1)?),
-                    chunks[3].unsqueeze(1)?.tanh()?,
-                )
-            } else {
-                (
-                    None,
-                    mod_params.unsqueeze(1)?.tanh()?,
-                    None,
-                    Tensor::ones((t.dim(0)?, 1, self._hidden_size), mod_params.dtype(), mod_params.device())?,
-                )
-            };
+/// Text Fusion Transformer (12-layer adapter)
+#[derive(Debug, Clone)]
+pub struct TextFusionTransformer {
+    layerwise_blocks: Vec<TextFusionBlock>,
+    projector: Linear,
+    refiner_blocks: Vec<TextFusionBlock>,
+}
 
-            let ones = Tensor::ones((1, 1, 1), x.dtype(), x.device())?;
-            let norm_x = self.attention_norm1.forward(x)?;
-            let modulated_x = if let Some(ref scale) = scale_msa {
-                let scale_p1 = scale.broadcast_add(&ones)?;
-                norm_x.broadcast_mul(&scale_p1)?
-            } else {
-                norm_x
-            };
-            let attn_out = self.attention.forward(&modulated_x, rotary_cos_sin)?;
-            let norm_attn = self.attention_norm2.forward(&attn_out)?;
-            let x = x.broadcast_add(&norm_attn.broadcast_mul(&gate_msa)?)?;
-
-            let norm_x2 = self.ffn_norm1.forward(&x)?;
-            let modulated_x2 = if let Some(ref scale) = scale_mlp {
-                let scale_p1 = scale.broadcast_add(&ones)?;
-                norm_x2.broadcast_mul(&scale_p1)?
-            } else {
-                norm_x2
-            };
-            let ffn_out = self.feed_forward.forward(&modulated_x2)?;
-            let norm_ffn = self.ffn_norm2.forward(&ffn_out)?;
-            let x = x.broadcast_add(&norm_ffn.broadcast_mul(&gate_mlp)?)?;
-            x.to_dtype(orig_dtype)
-        } else {
-            let norm_x = self.attention_norm1.forward(x)?;
-            let attn_out = self.attention.forward(&norm_x, rotary_cos_sin)?;
-            let norm_attn = self.attention_norm2.forward(&attn_out)?;
-            let x = (x + norm_attn)?;
-
-            let norm_x2 = self.ffn_norm1.forward(&x)?;
-            let ffn_out = self.feed_forward.forward(&norm_x2)?;
-            let norm_ffn = self.ffn_norm2.forward(&ffn_out)?;
-            let x = (x + norm_ffn)?;
-            x.to_dtype(orig_dtype)
+impl TextFusionTransformer {
+    pub fn new(txt_layers: usize, txt_dim: usize, txt_heads: usize, txt_kv_heads: usize, mlp_dim: usize, bias: bool, vb: VarBuilder) -> Result<Self> {
+        let mut layerwise_blocks = Vec::with_capacity(2);
+        for i in 0..2 {
+            layerwise_blocks.push(TextFusionBlock::new(txt_dim, txt_heads, txt_kv_heads, mlp_dim, bias, vb.pp(format!("layerwise_blocks.{}", i)))?);
         }
+        let projector = candle_nn::linear_no_bias(txt_layers, 1, vb.pp("projector"))?;
+        let mut refiner_blocks = Vec::with_capacity(2);
+        for i in 0..2 {
+            refiner_blocks.push(TextFusionBlock::new(txt_dim, txt_heads, txt_kv_heads, mlp_dim, bias, vb.pp(format!("refiner_blocks.{}", i)))?);
+        }
+        Ok(Self { layerwise_blocks, projector, refiner_blocks })
+    }
+
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // x: [B, num_taps=12, seq_len, 2560]
+        let (b, l_taps, seq, d) = x.dims4()?;
+        // Reshape to [B * seq, 12, 2560]: self-attention over the 12 layer taps per token
+        let x_perm = x.permute((0, 2, 1, 3))?.contiguous()?.reshape((b * seq, l_taps, d))?;
+        let mut h = x_perm;
+        for block in &self.layerwise_blocks {
+            h = block.forward(&h)?;
+        }
+        // Project 12 -> 1: rearrange [B, seq, 2560, 12] -> projector -> squeeze(-1) -> [B, seq, 2560]
+        let h_proj_in = h.reshape((b, seq, l_taps, d))?.permute((0, 1, 3, 2))?.contiguous()?; // [B, seq, 2560, 12]
+        let h_proj = self.projector.forward(&h_proj_in)?.squeeze(3)?; // [B, seq, 2560]
+        let mut out = h_proj;
+        for block in &self.refiner_blocks {
+            out = block.forward(&out)?;
+        }
+        Ok(out)
     }
 }
 
-/// Timestep Embedder for Z-Image
+/// Last Layer for Krea 2
 #[derive(Debug, Clone)]
-pub struct ZImageTimestepEmbedder {
-    pub mlp_0: Linear,
-    pub mlp_2: Linear,
-    pub frequency_embedding_size: usize,
+pub struct LastLayer {
+    norm: KreaRMSNorm,
+    linear: Linear,
+    modulation_lin: Tensor,
 }
 
-impl ZImageTimestepEmbedder {
-    pub fn new(time_embed_dim: usize, hidden_size: usize, vb: VarBuilder) -> Result<Self> {
-        let (mlp_0, mlp_2) = if let Ok(l0) = linear_or_no_bias(time_embed_dim, 1024, vb.pp("mlp.0")) {
-            let l2 = linear_or_no_bias(1024, time_embed_dim, vb.pp("mlp.2"))?;
-            (l0, l2)
-        } else if let Ok(l0) = linear_or_no_bias(time_embed_dim, hidden_size, vb.pp("0")) {
-            let l2 = linear_or_no_bias(hidden_size, hidden_size, vb.pp("2"))
-                .or_else(|_| linear_or_no_bias(hidden_size, time_embed_dim, vb.pp("2")))?;
-            (l0, l2)
-        } else {
-            let l0 = linear_or_no_bias(time_embed_dim, 1024, vb.pp("0"))
-                .or_else(|_| linear_or_no_bias(time_embed_dim, hidden_size, vb.pp("mlp.0")))?;
-            let l2 = linear_or_no_bias(1024, time_embed_dim, vb.pp("2"))
-                .or_else(|_| linear_or_no_bias(hidden_size, hidden_size, vb.pp("mlp.2")))?;
-            (l0, l2)
-        };
-        Ok(Self {
-            mlp_0,
-            mlp_2,
-            frequency_embedding_size: time_embed_dim,
-        })
+impl LastLayer {
+    pub fn new(features: usize, out_channels: usize, vb: VarBuilder) -> Result<Self> {
+        let norm = KreaRMSNorm::new(features, vb.pp("norm"))?;
+        let linear = linear(features, out_channels, vb.pp("linear"))?;
+        let modulation_lin = vb.pp("modulation").get((2, features), "lin")
+            .or_else(|_| vb.get((2, features), "modulation.lin"))?;
+        Ok(Self { norm, linear, modulation_lin })
     }
 
-    pub fn forward(&self, t: &Tensor) -> Result<Tensor> {
-        let orig_dtype = t.dtype();
-        let half = self.frequency_embedding_size / 2;
-        let max_period = 10000.0f32;
-        let freqs: Vec<f32> = (0..half)
-            .map(|i| (-max_period.ln() * (i as f32) / (half as f32)).exp())
-            .collect();
-        let freqs_t = Tensor::from_vec(freqs, (1, half), t.device())?;
-        let t_2d = t.to_dtype(DType::F32)?.reshape((t.dims()[0], 1))?;
-        let args = t_2d.matmul(&freqs_t)?;
-        let sin = args.sin()?;
-        let cos = args.cos()?;
-        let emb = Tensor::cat(&[&cos, &sin], 1)?.to_dtype(orig_dtype)?;
+    pub fn forward(&self, x: &Tensor, tvec: &Tensor) -> Result<Tensor> {
+        let lin = self.modulation_lin.to_dtype(tvec.dtype())?;
+        let lin_scale = lin.narrow(0, 0, 1)?.squeeze(0)?; // [features]
+        let lin_shift = lin.narrow(0, 1, 1)?.squeeze(0)?; // [features]
+        let scale = tvec.broadcast_add(&lin_scale)?; // [B, features]
+        let shift = tvec.broadcast_add(&lin_shift)?; // [B, features]
 
-        let x = candle_nn::ops::silu(&self.mlp_0.forward(&emb)?)?;
-        self.mlp_2.forward(&x)
+        let norm_x = self.norm.forward(x)?;
+        let ones = Tensor::ones((1, 1, 1), x.dtype(), x.device())?;
+        let scale_p1 = scale.unsqueeze(1)?.broadcast_add(&ones)?;
+        let mod_x = norm_x.broadcast_mul(&scale_p1)?.broadcast_add(&shift.unsqueeze(1)?)?;
+        self.linear.forward(&mod_x)
     }
 }
 
-/// LayerNorm without learned affine weights (elementwise_affine=False, eps=1e-6)
-fn layer_norm_no_affine(x: &Tensor, eps: f64) -> Result<Tensor> {
-    let orig_dtype = x.dtype();
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let mean = x_f32.mean_keepdim(candle_core::D::Minus1)?;
-    let x_sub_mean = x_f32.broadcast_sub(&mean)?;
-    let var = x_sub_mean.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
-    let std = (var + eps)?.sqrt()?;
-    let norm = x_sub_mean.broadcast_div(&std)?;
-    norm.to_dtype(orig_dtype)
-}
+/// Compute 3D RoPE (Flux / Krea2 EmbedND format)
+pub fn compute_krea_rope(
+    pos: &Tensor, // [B, L, 3] where text is [0, 0, 0] and img is [0, r, c]
+    theta: f64,   // 1000.0
+) -> Result<(Tensor, Tensor)> {
+    let axes = [32usize, 48usize, 48usize];
+    let mut cos_all = Vec::with_capacity(3);
+    let mut sin_all = Vec::with_capacity(3);
 
-/// Caption Embedder (Qwen3 -> DiT Hidden Dim Projection)
-#[derive(Debug, Clone)]
-pub struct ZImageCaptionEmbedder {
-    norm: RMSNorm,
-    proj: Linear,
-}
-
-impl ZImageCaptionEmbedder {
-    pub fn new(cfg: &ZImageConfig, vb: VarBuilder) -> Result<Self> {
-        let norm = RMSNorm::new(cfg.cap_dim, vb.pp("cap_embedder.0"))
-            .or_else(|_| RMSNorm::new(cfg.cap_dim, vb.pp("txtmlp.0")))?;
-        let proj = linear_or_no_bias(cfg.cap_dim, cfg.hidden_size, vb.pp("cap_embedder.1"))
-            .or_else(|_| linear_or_no_bias(cfg.cap_dim, cfg.hidden_size, vb.pp("txtmlp.1")))?;
-        Ok(Self { norm, proj })
+    for (axis_idx, &axis_dim) in axes.iter().enumerate() {
+        let half = axis_dim / 2;
+        let mut omega_vec = Vec::with_capacity(half);
+        for step in 0..half {
+            let scale_val = if half > 1 {
+                (step as f64) * ((axis_dim - 2) as f64 / axis_dim as f64) / ((half - 1) as f64)
+            } else {
+                0.0
+            };
+            let omega = 1.0 / theta.powf(scale_val);
+            omega_vec.push(omega as f32);
+        }
+        let omega_t = Tensor::from_vec(omega_vec, (1, 1, half), pos.device())?;
+        let pos_axis = pos.narrow(2, axis_idx, 1)?; // [B, L, 1]
+        let angles = pos_axis.broadcast_mul(&omega_t)?; // [B, L, half]
+        cos_all.push(angles.cos()?);
+        sin_all.push(angles.sin()?);
     }
 
-    pub fn forward(&self, context: &Tensor) -> Result<Tensor> {
-        let norm_ctx = self.norm.forward(context)?;
-        self.proj.forward(&norm_ctx)
-    }
+    let cos_cat = Tensor::cat(&cos_all.iter().collect::<Vec<_>>(), 2)?; // [B, L, 64]
+    let sin_cat = Tensor::cat(&sin_all.iter().collect::<Vec<_>>(), 2)?; // [B, L, 64]
+
+    // Reshape to [B, 1, L, 64] for broadcasting with [B, H, L, 64]
+    let cos = cos_cat.unsqueeze(1)?;
+    let sin = sin_cat.unsqueeze(1)?;
+    Ok((cos, sin))
 }
 
-/// Final Layer of NextDiT / Z-Image:
-/// RMSNorm/LayerNorm -> AdaLN modulation (1 + scale, shift) -> Linear(hidden_size, 64)
-#[derive(Debug, Clone)]
-pub struct ZImageFinalLayer {
-    pub norm: Option<RMSNorm>,
-    pub ada_ln: Linear,
-    pub linear: Linear,
+/// Sinusoidal Timestep Embedding (Flux / Krea2 standard)
+pub fn krea_timestep_embedding(t: &Tensor, dim: usize) -> Result<Tensor> {
+    let t_scaled = (t * 1000.0)?;
+    let half = dim / 2;
+    let mut freqs_vec = Vec::with_capacity(half);
+    let max_period = 10000.0f64;
+    for i in 0..half {
+        let freq = (-max_period.ln() * (i as f64) / (half as f64)).exp();
+        freqs_vec.push(freq as f32);
+    }
+    let freqs = Tensor::from_vec(freqs_vec, (1, half), t.device())?;
+    let t_f32 = t_scaled.to_dtype(DType::F32)?.unsqueeze(1)?; // [B, 1]
+    let args = t_f32.matmul(&freqs)?; // [B, half]
+    let cos = args.cos()?;
+    let sin = args.sin()?;
+    Tensor::cat(&[&cos, &sin], 1)?.to_dtype(t.dtype())
 }
 
-impl ZImageFinalLayer {
-    pub fn new(cfg: &ZImageConfig, vb: VarBuilder) -> Result<Self> {
-        let norm = RMSNorm::new(cfg.hidden_size, vb.pp("norm")).ok();
-        let ada_ln = if let Ok(aln) = linear(cfg.time_embed_dim, cfg.hidden_size, vb.pp("adaLN_modulation.1")) {
-            aln
-        } else if let Ok(w) = vb.get((2, cfg.hidden_size), "modulation.lin") {
-            Linear::new(w, None)
-        } else if let Ok(aln) = linear_or_no_bias(cfg.hidden_size, 2, vb.pp("modulation.lin")) {
-            aln
-        } else if let Ok(aln) = linear_or_no_bias(cfg.hidden_size, cfg.hidden_size, vb.pp("modulation.lin")) {
-            aln
-        } else {
-            linear(cfg.time_embed_dim, cfg.hidden_size, vb.pp("adaLN_modulation.1"))?
-        };
-        let linear = linear_or_no_bias(cfg.hidden_size, cfg.out_channels, vb.pp("linear"))
-            .or_else(|_| linear_or_no_bias(cfg.hidden_size, cfg.out_channels, vb.clone()))?;
-        Ok(Self { norm, ada_ln, linear })
-    }
-
-    pub fn forward(&self, x: &Tensor, temb: &Tensor) -> Result<Tensor> {
-        let orig_dtype = x.dtype();
-        let norm_x = if let Some(ref n) = self.norm {
-            n.forward(x)?
-        } else {
-            layer_norm_no_affine(x, 1e-6)?
-        };
-        let act_t = candle_nn::ops::silu(temb)?;
-        let mod_out = self.ada_ln.forward(&act_t)?;
-        let modulated = if mod_out.dim(1)? == 2 {
-            let chunks = mod_out.chunk(2, 1)?;
-            let scale = chunks[0].unsqueeze(1)?;
-            let shift = chunks[1].unsqueeze(1)?;
-            let ones = Tensor::ones((1, 1, 1), scale.dtype(), scale.device())?;
-            let scale_p1 = scale.broadcast_add(&ones)?;
-            norm_x.broadcast_mul(&scale_p1)?.broadcast_add(&shift)?
-        } else {
-            let scale = mod_out.unsqueeze(1)?;
-            let ones = Tensor::ones((1, 1, 1), scale.dtype(), scale.device())?;
-            let scale_p1 = scale.broadcast_add(&ones)?;
-            norm_x.broadcast_mul(&scale_p1)?
-        };
-        let out = self.linear.forward(&modulated)?;
-        out.to_dtype(orig_dtype)
-    }
-}
-
-/// Complete Z-Image Turbo Diffusion Transformer
+/// Complete Krea 2 Turbo Single-Stream MMDiT Transformer
 #[derive(Debug, Clone)]
 pub struct ZImageTransformer {
     pub config: ZImageConfig,
-    pub x_embedder: Linear,
-    pub x_pad_token: Tensor,
-    pub cap_pad_token: Tensor,
-    pub t_embedder: ZImageTimestepEmbedder,
-    pub cap_embedder: ZImageCaptionEmbedder,
-    pub txtfusion_projector: Option<Tensor>,
-    pub context_refiner: Vec<ZImageRefinerBlock>,
-    pub layers: Vec<ZImageBlock>,
-    pub noise_refiner: Vec<ZImageRefinerBlock>,
-    pub final_layer: ZImageFinalLayer,
+    pub first: Linear,
+    pub tmlp_0: Linear,
+    pub tmlp_2: Linear,
+    pub tproj_1: Linear,
+    pub txtfusion: TextFusionTransformer,
+    pub txtmlp_norm: KreaRMSNorm,
+    pub txtmlp_1: Linear,
+    pub txtmlp_3: Linear,
+    pub blocks: Vec<SingleStreamBlock>,
+    pub last: LastLayer,
 }
 
 impl ZImageTransformer {
     pub fn new(cfg: ZImageConfig, vb: VarBuilder) -> Result<Self> {
-        let x_embedder = linear_or_no_bias(cfg.in_channels, cfg.hidden_size, vb.pp("x_embedder"))
-            .or_else(|_| linear_or_no_bias(cfg.in_channels, cfg.hidden_size, vb.pp("first")))?;
-        let x_pad_token = vb.get((1, cfg.hidden_size), "x_pad_token")
-            .unwrap_or_else(|_| Tensor::zeros((1, cfg.hidden_size), vb.dtype(), vb.device()).unwrap());
-        let cap_pad_token = vb.get((1, cfg.hidden_size), "cap_pad_token")
-            .unwrap_or_else(|_| Tensor::zeros((1, cfg.hidden_size), vb.dtype(), vb.device()).unwrap());
-        let t_embedder = ZImageTimestepEmbedder::new(cfg.time_embed_dim, cfg.hidden_size, vb.pp("t_embedder"))
-            .or_else(|_| ZImageTimestepEmbedder::new(cfg.time_embed_dim, cfg.hidden_size, vb.pp("tmlp")))?;
-        let cap_embedder = ZImageCaptionEmbedder::new(&cfg, vb.clone())?;
+        let first = linear(cfg.in_channels, cfg.hidden_size, vb.pp("first"))?;
 
-        let txtfusion_projector = vb.pp("txtfusion.projector").get((1, 12), "weight")
-            .or_else(|_| vb.get((1, 12), "txtfusion.projector.weight"))
-            .ok();
+        let tmlp_0 = linear(cfg.time_embed_dim, cfg.hidden_size, vb.pp("tmlp.0"))?;
+        let tmlp_2 = linear(cfg.hidden_size, cfg.hidden_size, vb.pp("tmlp.2"))?;
+        let tproj_1 = linear(cfg.hidden_size, cfg.hidden_size * 6, vb.pp("tproj.1"))?;
 
-        let mut context_refiner = Vec::with_capacity(2);
-        for i in 0..2 {
-            if let Ok(refiner) = ZImageRefinerBlock::new(&cfg, vb.pp(format!("context_refiner.{}", i)), false) {
-                context_refiner.push(refiner);
-            } else if let Ok(refiner) = ZImageRefinerBlock::new(&cfg, vb.pp(format!("txtfusion.refiner_blocks.{}", i)), false) {
-                context_refiner.push(refiner);
-            }
-        }
+        let txt_heads = 20;
+        let txt_kv_heads = 20;
+        let txt_mlp_dim = 6826; // int(2 * 2560 / 3) * 4 -> multiple of 128 = 6912 or exact 6826/6912
+        let actual_mlp_dim = if let Ok(t) = vb.pp("txtfusion.layerwise_blocks.0.mlp.gate").get((txt_heads * 128, 2560), "weight") {
+            t.dim(0)?
+        } else if let Ok(t) = vb.get((6912, 2560), "txtfusion.layerwise_blocks.0.mlp.gate.weight") {
+            t.dim(0)?
+        } else {
+            6826
+        };
 
-        let mut layers = Vec::with_capacity(cfg.num_layers);
+        let txtfusion = TextFusionTransformer::new(
+            12,
+            cfg.cap_dim,
+            txt_heads,
+            txt_kv_heads,
+            actual_mlp_dim,
+            false,
+            vb.pp("txtfusion"),
+        )?;
+
+        let txtmlp_norm = KreaRMSNorm::new(cfg.cap_dim, vb.pp("txtmlp.0"))?;
+        let txtmlp_1 = linear(cfg.cap_dim, cfg.hidden_size, vb.pp("txtmlp.1"))?;
+        let txtmlp_3 = linear(cfg.hidden_size, cfg.hidden_size, vb.pp("txtmlp.3"))?;
+
+        let mut blocks = Vec::with_capacity(cfg.num_layers);
         for i in 0..cfg.num_layers {
-            let layer = ZImageBlock::new(&cfg, vb.pp(format!("layers.{}", i)))
-                .or_else(|_| ZImageBlock::new(&cfg, vb.pp(format!("blocks.{}", i))))?;
-            layers.push(layer);
+            let block = SingleStreamBlock::new(
+                cfg.hidden_size,
+                cfg.num_heads,
+                cfg.num_kv_heads,
+                cfg.intermediate_dim,
+                false,
+                vb.pp(format!("blocks.{}", i)),
+            )?;
+            blocks.push(block);
         }
 
-        let mut noise_refiner = Vec::with_capacity(2);
-        for i in 0..2 {
-            if let Ok(refiner) = ZImageRefinerBlock::new(&cfg, vb.pp(format!("noise_refiner.{}", i)), true) {
-                noise_refiner.push(refiner);
-            }
-        }
-
-        let final_layer = ZImageFinalLayer::new(&cfg, vb.pp("final_layer"))
-            .or_else(|_| ZImageFinalLayer::new(&cfg, vb.pp("last")))?;
+        let last = LastLayer::new(cfg.hidden_size, cfg.out_channels, vb.pp("last"))?;
 
         Ok(Self {
             config: cfg,
-            x_embedder,
-            x_pad_token,
-            cap_pad_token,
-            t_embedder,
-            cap_embedder,
-            txtfusion_projector,
-            context_refiner,
-            layers,
-            noise_refiner,
-            final_layer,
+            first,
+            tmlp_0,
+            tmlp_2,
+            tproj_1,
+            txtfusion,
+            txtmlp_norm,
+            txtmlp_1,
+            txtmlp_3,
+            blocks,
+            last,
         })
     }
 
-    /// Forward pass: input latents [B, C, H, W], timestep [B] (normalized sigma), text context [B, L, D] or [B, 12, L, D]
+    /// Forward pass: latents [B, C=16, H, W], timestep [B] (sigma), context [B, 12, seq_len, 2560]
     pub fn forward(
         &self,
         latents: &Tensor,
@@ -764,165 +573,77 @@ impl ZImageTransformer {
         let (b, c, h, w) = latents.dims4()?;
         let p_h = h / 2;
         let p_w = w / 2;
-        let n_img = p_h * p_w;
-        let pad_multiple = 32usize;
+        let img_tokens = p_h * p_w;
 
-        // 1. Exact Lumina2 / ComfyUI Patchify:
-        // x.view(B, C, H // 2, 2, W // 2, 2).permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2)
-        let x_patch = latents
+        // 1. Exact Krea 2 Patchify:
+        // rearrange(x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+        let img = latents
             .reshape((b, c, p_h, 2, p_w, 2))?
-            .permute((0, 2, 4, 3, 5, 1))?
+            .permute((0, 2, 4, 1, 3, 5))?
             .contiguous()?
-            .reshape((b, n_img, c * 4))?;
+            .reshape((b, img_tokens, c * 4))?;
 
-        let mut x_proj = self.x_embedder.forward(&x_patch)?;
-        let img_pad_extra = (pad_multiple - (n_img % pad_multiple)) % pad_multiple;
-        if img_pad_extra > 0 {
-            let x_pad = self.x_pad_token
-                .to_dtype(x_proj.dtype())?
-                .to_device(x_proj.device())?
-                .unsqueeze(0)?
-                .repeat((b, img_pad_extra, 1))?;
-            x_proj = Tensor::cat(&[&x_proj, &x_pad], 1)?;
+        let img_emb = self.first.forward(&img)?;
+
+        // 2. Timestep embedding: tmlp(timestep_embedding(timesteps, 256))
+        let temb_raw = krea_timestep_embedding(timestep, self.config.time_embed_dim)?;
+        let t_act = self.tmlp_0.forward(&temb_raw)?.gelu()?;
+        let t = self.tmlp_2.forward(&t_act)?; // [B, features]
+        let tvec_act = t.gelu()?;
+        let tvec = self.tproj_1.forward(&tvec_act)?; // [B, features * 6]
+
+        // 3. Text conditioning pipeline:
+        // context: [B, 12, seq_len, 2560]
+        let txt_fused = self.txtfusion.forward(context)?; // [B, seq_len, 2560]
+        let txt_norm = self.txtmlp_norm.forward(&txt_fused)?;
+        let txt_act = self.txtmlp_1.forward(&txt_norm)?.gelu()?;
+        let txt_emb = self.txtmlp_3.forward(&txt_act)?; // [B, seq_len, features]
+
+        let txt_len = txt_emb.dim(1)?;
+        let total_len = txt_len + img_tokens;
+
+        // 4. Position IDs: text tokens at (0, 0, 0), image tokens at (0, row, col)
+        let mut pos_vec = Vec::with_capacity(total_len * 3);
+        // Text pos IDs: (0, 0, 0)
+        for _ in 0..txt_len {
+            pos_vec.push(0f32);
+            pos_vec.push(0f32);
+            pos_vec.push(0f32);
         }
-        let total_img_tokens = x_proj.dim(1)?;
-
-        // 2. Timestep embedding (Lumina: t = (1.0 - sigma) * 1000.0)
-        let temb = self.t_embedder.forward(timestep)?;
-
-        // 3. Caption context projection (from 12 taps if 4D) and embedding & padding to multiple of 32
-        let context_3d = if context.rank() == 4 {
-            let (_b, num_taps, _seq_len, _feat_dim) = context.dims4()?;
-            if let Some(ref proj) = self.txtfusion_projector {
-                let proj_4d = proj.to_dtype(context.dtype())?.to_device(context.device())?.reshape((1, num_taps, 1, 1))?;
-                context.broadcast_mul(&proj_4d)?.sum(1)?
-            } else {
-                context.mean(1)?
-            }
-        } else {
-            context.clone()
-        };
-
-        let raw_text_feat = self.cap_embedder.forward(&context_3d)?;
-        let cap_feats_len = raw_text_feat.dim(1)?;
-        let cap_pad_extra = (pad_multiple - (cap_feats_len % pad_multiple)) % pad_multiple;
-        let mut text_feat = if cap_pad_extra > 0 {
-            let cap_pad = self.cap_pad_token
-                .to_dtype(raw_text_feat.dtype())?
-                .to_device(raw_text_feat.device())?
-                .unsqueeze(0)?
-                .repeat((b, cap_pad_extra, 1))?;
-            Tensor::cat(&[&raw_text_feat, &cap_pad], 1)?
-        } else {
-            raw_text_feat
-        };
-        let total_text_tokens = text_feat.dim(1)?;
-
-        let theta = self.config.theta;
-        let axes_dim = [32, 48, 48];
-
-        // 3a. Context RoPE for context_refiner: pos_ids = [1.0 + i, 0, 0]
-        let mut txt_t = Vec::with_capacity(total_text_tokens);
-        let mut txt_zero = Vec::with_capacity(total_text_tokens);
-        for i in 0..total_text_tokens {
-            txt_t.push((i as f32) + 1.0);
-            txt_zero.push(0f32);
-        }
-
-        let compute_rope = |t_coords: &[f32], r_coords: &[f32], c_coords: &[f32], seq_len: usize| -> Result<(Tensor, Tensor)> {
-            let compute_axis = |coords: &[f32], dim: usize| -> Result<(Tensor, Tensor)> {
-                let half = dim / 2;
-                let inv_freq: Vec<f32> = (0..half)
-                    .map(|i| 1.0 / (theta.powf((i * 2) as f64 / dim as f64) as f32))
-                    .collect();
-                let inv_freq_t = Tensor::from_vec(inv_freq, (half,), latents.device())?;
-                let coords_t = Tensor::from_vec(coords.to_vec(), (seq_len, 1), latents.device())?;
-                let freqs = coords_t.matmul(&inv_freq_t.unsqueeze(0)?)?; // [seq_len, half]
-                let cos_half = freqs.cos()?;
-                let sin_half = freqs.sin()?;
-                let cos_axis = Tensor::cat(&[&cos_half, &cos_half], 1)?; // [seq_len, dim]
-                let sin_axis = Tensor::cat(&[&sin_half, &sin_half], 1)?; // [seq_len, dim]
-                Ok((cos_axis, sin_axis))
-            };
-            let (cos0, sin0) = compute_axis(t_coords, axes_dim[0])?;
-            let (cos1, sin1) = compute_axis(r_coords, axes_dim[1])?;
-            let (cos2, sin2) = compute_axis(c_coords, axes_dim[2])?;
-            let cos_full = Tensor::cat(&[&cos0, &cos1, &cos2], 1)?; // [seq_len, 128]
-            let sin_full = Tensor::cat(&[&sin0, &sin1, &sin2], 1)?; // [seq_len, 128]
-            let cos = cos_full.reshape((1, seq_len, 1, 128))?.to_dtype(latents.dtype())?;
-            let sin = sin_full.reshape((1, seq_len, 1, 128))?.to_dtype(latents.dtype())?;
-            Ok((cos, sin))
-        };
-
-        let (txt_cos, txt_sin) = compute_rope(&txt_t, &txt_zero, &txt_zero, total_text_tokens)?;
-        let txt_rope = (&txt_cos, &txt_sin);
-        for refiner in &self.context_refiner {
-            text_feat = refiner.forward(&text_feat, None, Some(txt_rope))?;
-        }
-
-        // 4. Noise Refiner on image tokens BEFORE backbone
-        // Image pos_ids: t = total_text_tokens + 1, r = 0..p_h, c = 0..p_w, padded tokens = 0
-        let start_t = (total_text_tokens as f32) + 1.0;
-        let mut img_t = Vec::with_capacity(total_img_tokens);
-        let mut img_r = Vec::with_capacity(total_img_tokens);
-        let mut img_c = Vec::with_capacity(total_img_tokens);
+        // Image pos IDs: (0, r, c)
         for r in 0..p_h {
-            for c in 0..p_w {
-                img_t.push(start_t);
-                img_r.push(r as f32);
-                img_c.push(c as f32);
+            for col in 0..p_w {
+                pos_vec.push(0f32);
+                pos_vec.push(r as f32);
+                pos_vec.push(col as f32);
             }
         }
-        for _ in 0..img_pad_extra {
-            img_t.push(0f32);
-            img_r.push(0f32);
-            img_c.push(0f32);
+        let pos_t = Tensor::from_vec(pos_vec, (1, total_len, 3), latents.device())?
+            .repeat((b, 1, 1))?;
+
+        let (cos, sin) = compute_krea_rope(&pos_t, self.config.theta)?;
+        let rotary_freqs = (&cos, &sin);
+
+        // 5. Combined sequence: [Text tokens FIRST, Image tokens SECOND]
+        let mut combined = Tensor::cat(&[&txt_emb, &img_emb], 1)?;
+
+        // 6. Single-Stream MMDiT Blocks
+        for block in &self.blocks {
+            combined = block.forward(&combined, &tvec, Some(rotary_freqs))?;
         }
 
-        let (img_cos, img_sin) = compute_rope(&img_t, &img_r, &img_c, total_img_tokens)?;
-        let img_rope = (&img_cos, &img_sin);
-        let mut x_img = x_proj;
-        for refiner in &self.noise_refiner {
-            x_img = refiner.forward(&x_img, Some(&temb), Some(img_rope))?;
-        }
+        // 7. Last Layer + extract image token slice
+        let final_out = self.last.forward(&combined, &t)?;
+        let img_out = final_out.narrow(1, txt_len, img_tokens)?;
 
-        // 5. Concatenate refined image + refined text tokens: [B, total_img + total_text, Hidden]
-        // In official diffusers & Lumina2: unified = torch.cat([x[i][:x_len], cap_feats[i][:cap_len]])
-        // Image tokens are FIRST, caption tokens are SECOND
-        let mut x_seq = Tensor::cat(&[&x_img, &text_feat], 1)?;
-        let total_tokens = total_img_tokens + total_text_tokens;
-
-        let mut all_t = img_t;
-        all_t.extend(txt_t);
-        let mut all_r = img_r;
-        all_r.extend(txt_zero);
-        let mut all_c = img_c;
-        for _ in 0..total_text_tokens { all_c.push(0f32); }
-
-        let (all_cos, all_sin) = compute_rope(&all_t, &all_r, &all_c, total_tokens)?;
-        let all_rope = (&all_cos, &all_sin);
-
-        // 6. DiT Backbone Layers (0..29)
-        for layer in &self.layers {
-            x_seq = layer.forward(&x_seq, &temb, Some(all_rope))?;
-        }
-
-        // 7. Extract unpadded image token slice (first n_img tokens)
-        let x_img_out = x_seq.narrow(1, 0, n_img)?;
-
-        // 8. Output projection: final_layer (LayerNorm unweighted + AdaLN(1+scale) + Linear)
-        let out_patch = self.final_layer.forward(&x_img_out, &temb)?;
-
-        // 9. Exact Lumina2 / ComfyUI Unpatchify:
-        // out_patch.view(H // 2, W // 2, 2, 2, C).permute(4, 0, 2, 1, 3).flatten(3, 4).flatten(1, 2)
-        // In Candle tensor layout: (B, p_h, p_w, 2, 2, C) -> permute(0, 5, 1, 3, 2, 4) -> reshape(B, C, H, W)
-        let out_latents = out_patch
-            .reshape((b, p_h, p_w, 2, 2, c))?
-            .permute((0, 5, 1, 3, 2, 4))?
+        // 8. Exact Krea 2 Unpatchify:
+        // rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=p_h, w=p_w, ph=2, pw=2, c=16)
+        let out_latents = img_out
+            .reshape((b, p_h, p_w, c, 2, 2))?
+            .permute((0, 3, 1, 4, 2, 5))?
             .contiguous()?
             .reshape((b, c, h, w))?;
 
-        // Return model velocity prediction for Flow Matching Euler ODE
         Ok(out_latents)
     }
 }
