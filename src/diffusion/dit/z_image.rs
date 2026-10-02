@@ -39,6 +39,11 @@ impl Default for ZImageConfig {
 
 impl ZImageConfig {
     pub fn from_tensors(tensors: &std::collections::HashMap<String, Tensor>) -> Self {
+        let keys: Vec<String> = tensors.keys().cloned().collect();
+        Self::from_tensors_and_keys(tensors, &keys)
+    }
+
+    pub fn from_tensors_and_keys(tensors: &std::collections::HashMap<String, Tensor>, all_keys: &[String]) -> Self {
         let mut cfg = Self::default();
 
         if let Some(t) = tensors.get("first.weight") {
@@ -66,8 +71,11 @@ impl ZImageConfig {
         }
 
         let mut max_layer = 0;
-        for k in tensors.keys() {
-            if let Some(rest) = k.strip_prefix("blocks.") {
+        for k in all_keys {
+            let stripped = k.strip_prefix("model.diffusion_model.")
+                .or_else(|| k.strip_prefix("diffusion_model."))
+                .unwrap_or(k);
+            if let Some(rest) = stripped.strip_prefix("blocks.") {
                 if let Some(idx_str) = rest.split('.').next() {
                     if let Ok(idx) = idx_str.parse::<usize>() {
                         if idx + 1 > max_layer {

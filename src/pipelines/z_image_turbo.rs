@@ -103,7 +103,7 @@ impl ZImageTurboPipeline {
         for (k, v) in probe_tensors {
             config_map.insert(k, v);
         }
-        let config = ZImageConfig::from_tensors(&config_map);
+        let config = ZImageConfig::from_tensors_and_keys(&config_map, &keys);
         println!("⚙️ DiT Architecture: hidden={}, heads={}, layers={}, interm={}, in_ch={}",
             config.hidden_size, config.num_heads, config.num_layers, config.intermediate_dim, config.in_channels);
         
