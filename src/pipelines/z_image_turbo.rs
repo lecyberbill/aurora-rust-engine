@@ -54,9 +54,8 @@ impl ZImageTurboPipeline {
                 .map_err(|e| candle_core::Error::Msg(e.to_string()))?
         );
 
-        println!("🚀 Loading Z-Image Turbo DiT Transformer (Low-VRAM Sequential Streaming) from {:?}", p);
-        let mut header_tensors = std::collections::HashMap::new();
-        let mut probe_tensors = std::collections::HashMap::new();
+        println!("🚀 Loading Z-Image Turbo DiT Transformer (Full VRAM In-Memory Mode) from {:?}", p);
+        let mut dit_tensors = std::collections::HashMap::new();
         let keys: Vec<String> = archive.keys().cloned().collect();
         println!("📦 Total archive keys: {}", keys.len());
         
@@ -64,12 +63,14 @@ impl ZImageTurboPipeline {
             if key.ends_with(".weight_scale") || key.ends_with(".scale_weight") || key.ends_with(".comfy_quant") {
                 continue;
             }
-            let is_header = key.starts_with("txtfusion.")
+            let is_dit = key.starts_with("blocks.")
+                || key.starts_with("txtfusion.")
                 || key.starts_with("first.")
                 || key.starts_with("last.")
                 || key.starts_with("tmlp.")
                 || key.starts_with("tproj.")
                 || key.starts_with("txtmlp.")
+                || key.starts_with("model.diffusion_model.blocks.")
                 || key.starts_with("model.diffusion_model.txtfusion.")
                 || key.starts_with("model.diffusion_model.first.")
                 || key.starts_with("model.diffusion_model.last.")
@@ -77,39 +78,25 @@ impl ZImageTurboPipeline {
                 || key.starts_with("model.diffusion_model.tproj.")
                 || key.starts_with("model.diffusion_model.txtmlp.");
 
-            let is_probe = key.starts_with("blocks.0.") || key.starts_with("model.diffusion_model.blocks.0.");
-
             let rest = key.strip_prefix("model.diffusion_model.")
                 .or_else(|| key.strip_prefix("diffusion_model."))
                 .unwrap_or(key);
 
-            if is_header {
+            if is_dit {
                 match archive.get_tensor(key, device, dtype) {
-                    Ok(t) => { header_tensors.insert(rest.to_string(), t); }
-                    Err(e) => eprintln!("⚠️ Error loading header tensor {}: {}", key, e),
-                }
-            } else if is_probe {
-                if let Ok(t) = archive.get_tensor(key, &Device::Cpu, DType::F32) {
-                    probe_tensors.insert(rest.to_string(), t);
+                    Ok(t) => { dit_tensors.insert(rest.to_string(), t); }
+                    Err(e) => eprintln!("⚠️ Error loading DiT tensor {}: {}", key, e),
                 }
             }
         }
-        println!("✅ Loaded {} header DiT tensors onto device", header_tensors.len());
+        println!("✅ Loaded {} active DiT tensors directly into GPU VRAM", dit_tensors.len());
         
-        // Merge probe tensors into a temporary map on CPU for config deduction
-        let mut config_map = std::collections::HashMap::new();
-        for (k, v) in &header_tensors {
-            config_map.insert(k.clone(), v.clone());
-        }
-        for (k, v) in probe_tensors {
-            config_map.insert(k, v);
-        }
-        let config = ZImageConfig::from_tensors_and_keys(&config_map, &keys);
+        let config = ZImageConfig::from_tensors_and_keys(&dit_tensors, &keys);
         println!("⚙️ DiT Architecture: hidden={}, heads={}, layers={}, interm={}, in_ch={}",
             config.hidden_size, config.num_heads, config.num_layers, config.intermediate_dim, config.in_channels);
         
-        let header_vb = candle_nn::VarBuilder::from_tensors(header_tensors, dtype, device);
-        let transformer = ZImageTransformer::new_streaming(config, header_vb, archive.clone(), device.clone(), dtype)?;
+        let dit_vb = candle_nn::VarBuilder::from_tensors(dit_tensors, dtype, device);
+        let transformer = ZImageTransformer::new(config, dit_vb)?;
 
         // 2. Build Qwen3 Text Encoder from same AIO checkpoint
         println!("🧠 Loading Qwen3 Text Encoder from AIO checkpoint");
