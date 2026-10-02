@@ -62,6 +62,18 @@ impl ZImageTurboPipeline {
             if key.ends_with(".weight_scale") || key.ends_with(".scale_weight") || key.ends_with(".comfy_quant") {
                 continue;
             }
+            let is_dit = key.starts_with("model.diffusion_model.")
+                || key.starts_with("diffusion_model.")
+                || key.starts_with("blocks.")
+                || key.starts_with("txtfusion.")
+                || key.starts_with("first.")
+                || key.starts_with("last.")
+                || key.starts_with("tmlp.")
+                || key.starts_with("tproj.")
+                || key.starts_with("txtmlp.");
+            if !is_dit {
+                continue;
+            }
             let rest = key.strip_prefix("model.diffusion_model.")
                 .or_else(|| key.strip_prefix("diffusion_model."))
                 .unwrap_or(&key);
