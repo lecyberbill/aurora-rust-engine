@@ -286,7 +286,7 @@ impl DoubleSharedModulation {
     }
 
     pub fn forward(&self, vec: &Tensor) -> Result<Vec<Tensor>> {
-        let mod_val = vec.broadcast_add(&self.lin.to_dtype(vec.dtype())?)?;
+        let mod_val = vec.broadcast_mul(&self.lin.to_dtype(vec.dtype())?)?;
         mod_val.chunk(6, candle_core::D::Minus1)
     }
 }
@@ -430,8 +430,8 @@ impl LastLayer {
         let lin = self.modulation_lin.to_dtype(tvec.dtype())?;
         let lin_scale = lin.narrow(0, 0, 1)?.squeeze(0)?; // [features]
         let lin_shift = lin.narrow(0, 1, 1)?.squeeze(0)?; // [features]
-        let scale = tvec.broadcast_add(&lin_scale)?; // [B, features]
-        let shift = tvec.broadcast_add(&lin_shift)?; // [B, features]
+        let scale = tvec.broadcast_mul(&lin_scale)?; // [B, features]
+        let shift = tvec.broadcast_mul(&lin_shift)?; // [B, features]
 
         let norm_x = self.norm.forward(x)?;
         let ones = Tensor::ones((1, 1, 1), x.dtype(), x.device())?;

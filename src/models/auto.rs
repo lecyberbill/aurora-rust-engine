@@ -270,6 +270,7 @@ impl AutoModel {
                         &Device::Cpu,
                         DType::F32,
                     )?;
+                    println!("🧠 AutoModel: Successfully attached Qwen3 text encoder to ZImageTurbo pipeline");
                     pipeline.set_text_encoder(enc);
                 }
 
