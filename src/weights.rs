@@ -185,21 +185,21 @@ impl SafeTensorsArchive {
                 } else {
                     data.par_iter().map(|&b| bf16::from_f32(lut[b as usize].to_f32())).collect()
                 };
-                Tensor::from_vec(bf16_data, shape.as_slice(), &Device::Cpu)?.to_device(device)?
+                Tensor::from_vec(bf16_data, shape.as_slice(), device)?
             } else if dtype == DType::F16 {
                 let f16_data: Vec<f16> = if (scale_factor - 1.0).abs() > 1e-6 {
                     data.par_iter().map(|&b| f16::from_f32(lut[b as usize].to_f32() * scale_factor)).collect()
                 } else {
                     data.par_iter().map(|&b| lut[b as usize]).collect()
                 };
-                Tensor::from_vec(f16_data, shape.as_slice(), &Device::Cpu)?.to_device(device)?
+                Tensor::from_vec(f16_data, shape.as_slice(), device)?
             } else {
                 let f32_data: Vec<f32> = if (scale_factor - 1.0).abs() > 1e-6 {
                     data.par_iter().map(|&b| lut[b as usize].to_f32() * scale_factor).collect()
                 } else {
                     data.par_iter().map(|&b| lut[b as usize].to_f32()).collect()
                 };
-                Tensor::from_vec(f32_data, shape.as_slice(), &Device::Cpu)?.to_device(device)?
+                Tensor::from_vec(f32_data, shape.as_slice(), device)?
             };
             return Ok(tensor);
         }
