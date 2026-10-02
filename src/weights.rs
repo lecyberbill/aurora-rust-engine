@@ -178,29 +178,29 @@ impl SafeTensorsArchive {
                 1.0
             };
 
+            use rayon::prelude::*;
             let tensor = if dtype == DType::BF16 {
                 let bf16_data: Vec<bf16> = if (scale_factor - 1.0).abs() > 1e-6 {
-                    data.iter().map(|&b| bf16::from_f32(lut[b as usize].to_f32() * scale_factor)).collect()
+                    data.par_iter().map(|&b| bf16::from_f32(lut[b as usize].to_f32() * scale_factor)).collect()
                 } else {
-                    data.iter().map(|&b| bf16::from_f32(lut[b as usize].to_f32())).collect()
+                    data.par_iter().map(|&b| bf16::from_f32(lut[b as usize].to_f32())).collect()
                 };
                 Tensor::from_vec(bf16_data, shape.as_slice(), &Device::Cpu)?.to_device(device)?
             } else if dtype == DType::F16 {
                 let f16_data: Vec<f16> = if (scale_factor - 1.0).abs() > 1e-6 {
-                    data.iter().map(|&b| f16::from_f32(lut[b as usize].to_f32() * scale_factor)).collect()
+                    data.par_iter().map(|&b| f16::from_f32(lut[b as usize].to_f32() * scale_factor)).collect()
                 } else {
-                    data.iter().map(|&b| lut[b as usize]).collect()
+                    data.par_iter().map(|&b| lut[b as usize]).collect()
                 };
                 Tensor::from_vec(f16_data, shape.as_slice(), &Device::Cpu)?.to_device(device)?
             } else {
                 let f32_data: Vec<f32> = if (scale_factor - 1.0).abs() > 1e-6 {
-                    data.iter().map(|&b| lut[b as usize].to_f32() * scale_factor).collect()
+                    data.par_iter().map(|&b| lut[b as usize].to_f32() * scale_factor).collect()
                 } else {
-                    data.iter().map(|&b| lut[b as usize].to_f32()).collect()
+                    data.par_iter().map(|&b| lut[b as usize].to_f32()).collect()
                 };
                 Tensor::from_vec(f32_data, shape.as_slice(), &Device::Cpu)?.to_device(device)?
             };
-            return Ok(tensor);
         }
 
         // Standard dtypes:
