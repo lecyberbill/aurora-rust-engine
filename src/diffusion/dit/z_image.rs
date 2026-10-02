@@ -163,7 +163,7 @@ impl SwiGLU {
 }
 
 pub fn robust_sigmoid(x: &Tensor) -> Result<Tensor> {
-    // Numerically stable fallback for ROCm/HIP: 1 / (1 + exp(-x))
+    // Numerically stable sigmoid: 1 / (1 + exp(-x))
     candle_nn::ops::sigmoid(x)
         .or_else(|_| {
             let neg_x = (x * -1.0)?;
@@ -214,7 +214,9 @@ impl KreaAttention {
         let (mut q, mut k) = self.qknorm.forward(&q_raw, &k_raw)?;
 
         if let Some((cos, sin)) = rotary_freqs {
-            // Exact Flux / Krea2 RoPE on [B, H, L, 64, 2]
+            // Apply official Krea2 / DiffSynth RoPE:
+            // q_rot0 = cos * x0 - sin * x1
+            // q_rot1 = sin * x0 + cos * x1
             let cos_f32 = cos.to_dtype(DType::F32)?;
             let sin_f32 = sin.to_dtype(DType::F32)?;
             let apply_rope = |t: &Tensor| -> Result<Tensor> {
@@ -286,7 +288,7 @@ impl DoubleSharedModulation {
     }
 
     pub fn forward(&self, vec: &Tensor) -> Result<Vec<Tensor>> {
-        let mod_val = vec.broadcast_mul(&self.lin.to_dtype(vec.dtype())?)?;
+        let mod_val = vec.broadcast_add(&self.lin.to_dtype(vec.dtype())?)?;
         mod_val.chunk(6, candle_core::D::Minus1)
     }
 }
@@ -430,8 +432,8 @@ impl LastLayer {
         let lin = self.modulation_lin.to_dtype(tvec.dtype())?;
         let lin_scale = lin.narrow(0, 0, 1)?.squeeze(0)?; // [features]
         let lin_shift = lin.narrow(0, 1, 1)?.squeeze(0)?; // [features]
-        let scale = tvec.broadcast_mul(&lin_scale)?; // [B, features]
-        let shift = tvec.broadcast_mul(&lin_shift)?; // [B, features]
+        let scale = tvec.broadcast_add(&lin_scale)?; // [B, features]
+        let shift = tvec.broadcast_add(&lin_shift)?; // [B, features]
 
         let norm_x = self.norm.forward(x)?;
         let ones = Tensor::ones((1, 1, 1), x.dtype(), x.device())?;
@@ -441,7 +443,7 @@ impl LastLayer {
     }
 }
 
-/// Compute 3D RoPE (Flux / Krea2 EmbedND format)
+/// Compute 3D RoPE (DiffSynth / Krea 2 standard)
 pub fn compute_krea_rope(
     pos: &Tensor, // [B, L, 3] where text is [0, 0, 0] and img is [0, r, c]
     theta: f64,   // 1000.0
@@ -454,11 +456,7 @@ pub fn compute_krea_rope(
         let half = axis_dim / 2;
         let mut omega_vec = Vec::with_capacity(half);
         for step in 0..half {
-            let scale_val = if half > 1 {
-                (step as f64) * ((axis_dim - 2) as f64 / axis_dim as f64) / ((half - 1) as f64)
-            } else {
-                0.0
-            };
+            let scale_val = (2.0 * step as f64) / (axis_dim as f64);
             let omega = 1.0 / theta.powf(scale_val);
             omega_vec.push(omega as f32);
         }
@@ -478,7 +476,7 @@ pub fn compute_krea_rope(
     Ok((cos, sin))
 }
 
-/// Sinusoidal Timestep Embedding (Flux / Krea2 standard)
+/// Sinusoidal Timestep Embedding (DiffSynth / Krea 2 standard: tfactor=1000, period=10000)
 pub fn krea_timestep_embedding(t: &Tensor, dim: usize) -> Result<Tensor> {
     let t_scaled = (t * 1000.0)?;
     let half = dim / 2;
@@ -497,7 +495,7 @@ pub fn krea_timestep_embedding(t: &Tensor, dim: usize) -> Result<Tensor> {
 }
 
 /// Complete Krea 2 Turbo Single-Stream MMDiT Transformer
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ZImageTransformer {
     pub config: ZImageConfig,
     pub first: Linear,
@@ -510,6 +508,10 @@ pub struct ZImageTransformer {
     pub txtmlp_3: Linear,
     pub blocks: Vec<SingleStreamBlock>,
     pub last: LastLayer,
+    // Low-VRAM streaming support
+    pub archive: Option<std::sync::Arc<crate::weights::SafeTensorsArchive>>,
+    pub device: candle_core::Device,
+    pub dtype: DType,
 }
 
 impl ZImageTransformer {
@@ -565,6 +567,61 @@ impl ZImageTransformer {
             txtmlp_3,
             blocks,
             last,
+            archive: None,
+            device: candle_core::Device::Cpu,
+            dtype: DType::BF16,
+        })
+    }
+
+    /// Construct ZImageTransformer in Low-VRAM Sequential Streaming Mode (< 2GB peak VRAM)
+    pub fn new_streaming(
+        cfg: ZImageConfig,
+        header_vb: VarBuilder,
+        archive: std::sync::Arc<crate::weights::SafeTensorsArchive>,
+        device: candle_core::Device,
+        dtype: DType,
+    ) -> Result<Self> {
+        let first = linear(cfg.in_channels, cfg.hidden_size, header_vb.pp("first"))?;
+
+        let tmlp_0 = linear(cfg.time_embed_dim, cfg.hidden_size, header_vb.pp("tmlp.0"))?;
+        let tmlp_2 = linear(cfg.hidden_size, cfg.hidden_size, header_vb.pp("tmlp.2"))?;
+        let tproj_1 = linear(cfg.hidden_size, cfg.hidden_size * 6, header_vb.pp("tproj.1"))?;
+
+        let txt_heads = 20;
+        let txt_kv_heads = 20;
+        let txt_mlp_dim = 6912;
+
+        let txtfusion = TextFusionTransformer::new(
+            12,
+            cfg.cap_dim,
+            txt_heads,
+            txt_kv_heads,
+            txt_mlp_dim,
+            false,
+            header_vb.pp("txtfusion"),
+        )?;
+
+        let txtmlp_norm = KreaRMSNorm::new(cfg.cap_dim, header_vb.pp("txtmlp.0"))?;
+        let txtmlp_1 = linear(cfg.cap_dim, cfg.hidden_size, header_vb.pp("txtmlp.1"))?;
+        let txtmlp_3 = linear(cfg.hidden_size, cfg.hidden_size, header_vb.pp("txtmlp.3"))?;
+
+        let last = LastLayer::new(cfg.hidden_size, cfg.out_channels, header_vb.pp("last"))?;
+
+        Ok(Self {
+            config: cfg,
+            first,
+            tmlp_0,
+            tmlp_2,
+            tproj_1,
+            txtfusion,
+            txtmlp_norm,
+            txtmlp_1,
+            txtmlp_3,
+            blocks: Vec::new(), // Streaming mode: blocks loaded on demand
+            last,
+            archive: Some(archive),
+            device,
+            dtype,
         })
     }
 
@@ -632,9 +689,45 @@ impl ZImageTransformer {
         // 5. Combined sequence: [Text tokens FIRST, Image tokens SECOND]
         let mut combined = Tensor::cat(&[&txt_emb, &img_emb], 1)?;
 
-        // 6. Single-Stream MMDiT Blocks
-        for block in &self.blocks {
-            combined = block.forward(&combined, &tvec, Some(rotary_freqs))?;
+        // 6. Single-Stream MMDiT Blocks (Resident or Streaming)
+        if !self.blocks.is_empty() {
+            for block in &self.blocks {
+                combined = block.forward(&combined, &tvec, Some(rotary_freqs))?;
+            }
+        } else if let Some(archive) = &self.archive {
+            // Streaming mode: load 1 block at a time to keep VRAM < 2GB
+            for i in 0..self.config.num_layers {
+                let prefix = format!("blocks.{}.", i);
+                let prefix_alt = format!("model.diffusion_model.blocks.{}.", i);
+                let mut block_tensors = std::collections::HashMap::new();
+                for key in archive.keys() {
+                    let matched_suffix = if let Some(suffix) = key.strip_prefix(&prefix) {
+                        Some(suffix)
+                    } else if let Some(suffix) = key.strip_prefix(&prefix_alt) {
+                        Some(suffix)
+                    } else {
+                        None
+                    };
+                    if let Some(suffix) = matched_suffix {
+                        if suffix.ends_with(".weight_scale") || suffix.ends_with(".scale_weight") || suffix.ends_with(".comfy_quant") {
+                            continue;
+                        }
+                        if let Ok(t) = archive.get_tensor(key, &self.device, self.dtype) {
+                            block_tensors.insert(format!("blocks.{}.{}", i, suffix), t);
+                        }
+                    }
+                }
+                let block_vb = VarBuilder::from_tensors(block_tensors, self.dtype, &self.device);
+                let block = SingleStreamBlock::new(
+                    self.config.hidden_size,
+                    self.config.num_heads,
+                    self.config.num_kv_heads,
+                    self.config.intermediate_dim,
+                    false,
+                    block_vb.pp(format!("blocks.{}", i)),
+                )?;
+                combined = block.forward(&combined, &tvec, Some(rotary_freqs))?;
+            }
         }
 
         // 7. Last Layer + extract image token slice
