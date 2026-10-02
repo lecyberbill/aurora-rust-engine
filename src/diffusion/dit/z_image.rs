@@ -516,8 +516,8 @@ pub struct ZImageTransformer {
     pub txtmlp_3: Linear,
     pub blocks: Vec<SingleStreamBlock>,
     pub last: LastLayer,
-    // Ultra-Fast CPU RAM Pre-cached blocks for zero-overhead GPU streaming (< 10ms per block)
-    pub cpu_blocks: Vec<std::collections::HashMap<String, Tensor>>,
+    // Low-VRAM streaming support with Rayon multi-threaded dequantization
+    pub archive: Option<std::sync::Arc<crate::weights::SafeTensorsArchive>>,
     pub device: candle_core::Device,
     pub dtype: DType,
 }
@@ -575,7 +575,7 @@ impl ZImageTransformer {
             txtmlp_3,
             blocks,
             last,
-            cpu_blocks: Vec::new(),
+            archive: None,
             device: candle_core::Device::Cpu,
             dtype: DType::BF16,
         })
@@ -615,33 +615,6 @@ impl ZImageTransformer {
 
         let last = LastLayer::new(cfg.hidden_size, cfg.out_channels, header_vb.pp("last"))?;
 
-        println!("⚡ Pre-caching {} DiT blocks in CPU memory (multi-threaded dequantization)...", cfg.num_layers);
-        let mut cpu_blocks = Vec::with_capacity(cfg.num_layers);
-        for i in 0..cfg.num_layers {
-            let prefix = format!("blocks.{}.", i);
-            let prefix_alt = format!("model.diffusion_model.blocks.{}.", i);
-            let mut block_tensors = std::collections::HashMap::new();
-            for key in archive.keys() {
-                let matched_suffix = if let Some(suffix) = key.strip_prefix(&prefix) {
-                    Some(suffix)
-                } else if let Some(suffix) = key.strip_prefix(&prefix_alt) {
-                    Some(suffix)
-                } else {
-                    None
-                };
-                if let Some(suffix) = matched_suffix {
-                    if suffix.ends_with(".weight_scale") || suffix.ends_with(".scale_weight") || suffix.ends_with(".comfy_quant") {
-                        continue;
-                    }
-                    if let Ok(t) = archive.get_tensor(key, &candle_core::Device::Cpu, dtype) {
-                        block_tensors.insert(format!("blocks.{}.{}", i, suffix), t);
-                    }
-                }
-            }
-            cpu_blocks.push(block_tensors);
-        }
-        println!("✅ Pre-cached {} DiT blocks in RAM. Zero per-step dequantization overhead!", cpu_blocks.len());
-
         Ok(Self {
             config: cfg,
             first,
@@ -654,7 +627,7 @@ impl ZImageTransformer {
             txtmlp_3,
             blocks: Vec::new(),
             last,
-            cpu_blocks,
+            archive: Some(archive),
             device,
             dtype,
         })
@@ -724,19 +697,35 @@ impl ZImageTransformer {
         // 5. Combined sequence: [Text tokens FIRST, Image tokens SECOND]
         let mut combined = Tensor::cat(&[&txt_emb, &img_emb], 1)?;
 
-        // 6. Single-Stream MMDiT Blocks (Resident or CPU-RAM Streaming)
+        // 6. Single-Stream MMDiT Blocks (Resident or On-Demand Multi-Threaded Streaming)
         if !self.blocks.is_empty() {
             for block in &self.blocks {
                 combined = block.forward(&combined, &tvec, Some(rotary_freqs))?;
             }
-        } else if !self.cpu_blocks.is_empty() {
-            // High-speed CPU RAM -> GPU DMA Streaming (PCIe 4.0 transfers 450MB in ~7ms)
-            for (i, block_map_cpu) in self.cpu_blocks.iter().enumerate() {
-                let mut block_tensors_gpu = std::collections::HashMap::with_capacity(block_map_cpu.len());
-                for (k, t_cpu) in block_map_cpu {
-                    block_tensors_gpu.insert(k.clone(), t_cpu.to_device(&self.device)?);
+        } else if let Some(archive) = &self.archive {
+            // Streaming mode with Rayon multi-threaded dequantization (< 1.8GB VRAM peak)
+            for i in 0..self.config.num_layers {
+                let prefix = format!("blocks.{}.", i);
+                let prefix_alt = format!("model.diffusion_model.blocks.{}.", i);
+                let mut block_tensors = std::collections::HashMap::new();
+                for key in archive.keys() {
+                    let matched_suffix = if let Some(suffix) = key.strip_prefix(&prefix) {
+                        Some(suffix)
+                    } else if let Some(suffix) = key.strip_prefix(&prefix_alt) {
+                        Some(suffix)
+                    } else {
+                        None
+                    };
+                    if let Some(suffix) = matched_suffix {
+                        if suffix.ends_with(".weight_scale") || suffix.ends_with(".scale_weight") || suffix.ends_with(".comfy_quant") {
+                            continue;
+                        }
+                        if let Ok(t) = archive.get_tensor(key, &self.device, self.dtype) {
+                            block_tensors.insert(format!("blocks.{}.{}", i, suffix), t);
+                        }
+                    }
                 }
-                let block_vb = VarBuilder::from_tensors(block_tensors_gpu, self.dtype, &self.device);
+                let block_vb = VarBuilder::from_tensors(block_tensors, self.dtype, &self.device);
                 let block = SingleStreamBlock::new(
                     self.config.hidden_size,
                     self.config.num_heads,
