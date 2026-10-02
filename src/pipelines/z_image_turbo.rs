@@ -56,8 +56,12 @@ impl ZImageTurboPipeline {
 
         // 1. Build DiT Transformer
         println!("🚀 Loading Z-Image Turbo DiT Transformer from {:?}", p);
-        let mut dit_tensors = std::collections::HashMap::new();
-        for key in archive.keys() {
+        let keys = archive.keys();
+        println!("📦 Total archive keys: {}", keys.len());
+        for (i, key) in keys.into_iter().enumerate() {
+            if key.ends_with(".weight_scale") || key.ends_with(".scale_weight") || key.ends_with(".comfy_quant") {
+                continue;
+            }
             let rest = key.strip_prefix("model.diffusion_model.")
                 .or_else(|| key.strip_prefix("diffusion_model."))
                 .unwrap_or(&key);
@@ -69,7 +73,12 @@ impl ZImageTurboPipeline {
                     eprintln!("⚠️ Error loading DiT tensor {}: {}", key, e);
                 }
             }
+            if (i + 1) % 50 == 0 {
+                print!(".");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+            }
         }
+        println!("\n✅ Loaded {} active DiT tensors onto device", dit_tensors.len());
         let config = ZImageConfig::from_tensors(&dit_tensors);
         println!("⚙️ DiT Architecture: hidden={}, heads={}, layers={}, interm={}, in_ch={}",
             config.hidden_size, config.num_heads, config.num_layers, config.intermediate_dim, config.in_channels);
