@@ -201,6 +201,7 @@ impl SafeTensorsArchive {
                 };
                 Tensor::from_vec(f32_data, shape.as_slice(), &Device::Cpu)?.to_device(device)?
             };
+            return Ok(tensor);
         }
 
         // Standard dtypes:

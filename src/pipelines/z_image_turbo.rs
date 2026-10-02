@@ -84,8 +84,9 @@ impl ZImageTurboPipeline {
                 .unwrap_or(key);
 
             if is_header {
-                if let Ok(t) = archive.get_tensor(key, device, dtype) {
-                    header_tensors.insert(rest.to_string(), t);
+                match archive.get_tensor(key, device, dtype) {
+                    Ok(t) => { header_tensors.insert(rest.to_string(), t); }
+                    Err(e) => eprintln!("⚠️ Error loading header tensor {}: {}", key, e),
                 }
             } else if is_probe {
                 if let Ok(t) = archive.get_tensor(key, &Device::Cpu, DType::F32) {
