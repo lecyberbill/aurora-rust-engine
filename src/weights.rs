@@ -146,7 +146,7 @@ impl SafeTensorsArchive {
             None
         };
 
-        // 2. High-speed CPU dequantization & scaling for FP8 to eliminate GPU VRAM spikes
+        // 2. High-speed CPU dequantization & scaling for FP8 directly to target dtype
         if *st_dtype == safetensors::Dtype::F8_E4M3 || *st_dtype == safetensors::Dtype::F8_E5M2 {
             let lut = if *st_dtype == safetensors::Dtype::F8_E4M3 {
                 get_fp8_e4m3_lut()
@@ -154,13 +154,12 @@ impl SafeTensorsArchive {
                 get_fp8_e5m2_lut()
             };
             let data: &[u8] = slice;
-            let mut f32_data: Vec<f32> = data.iter().map(|&b| lut[b as usize].to_f32()).collect();
 
-            if let Some(sk) = scale_key {
+            let scale_factor: f32 = if let Some(sk) = scale_key {
                 let (s_dtype, _s_shape, s_shard_idx, s_offset, s_len) = &self.tensors[&sk];
                 let s_shard = self._mmaps.get(*s_shard_idx).ok_or_else(|| LuminaError::Config("shard missing".into()))?;
                 let s_slice = unsafe { std::slice::from_raw_parts(s_shard.as_ptr().add(*s_offset), *s_len) };
-                let scale_factor: f32 = match s_dtype {
+                match s_dtype {
                     safetensors::Dtype::F32 => {
                         let d: &[f32] = bytemuck_cast_slice(s_slice);
                         d.first().copied().unwrap_or(1.0)
@@ -174,21 +173,34 @@ impl SafeTensorsArchive {
                         d.first().map(|x| x.to_f32()).unwrap_or(1.0)
                     }
                     _ => 1.0,
-                };
-                if (scale_factor - 1.0).abs() > 1e-6 {
-                    for x in f32_data.iter_mut() {
-                        *x *= scale_factor;
-                    }
                 }
-            }
-
-            let tensor_cpu = Tensor::from_vec(f32_data, shape.as_slice(), &Device::Cpu)?;
-            let tensor_target = if dtype == DType::F32 {
-                tensor_cpu.to_device(device)?
             } else {
-                tensor_cpu.to_dtype(dtype)?.to_device(device)?
+                1.0
             };
-            return Ok(tensor_target);
+
+            let tensor = if dtype == DType::BF16 {
+                let bf16_data: Vec<bf16> = if (scale_factor - 1.0).abs() > 1e-6 {
+                    data.iter().map(|&b| bf16::from_f32(lut[b as usize].to_f32() * scale_factor)).collect()
+                } else {
+                    data.iter().map(|&b| bf16::from_f32(lut[b as usize].to_f32())).collect()
+                };
+                Tensor::from_vec(bf16_data, shape.as_slice(), device)?
+            } else if dtype == DType::F16 {
+                let f16_data: Vec<f16> = if (scale_factor - 1.0).abs() > 1e-6 {
+                    data.iter().map(|&b| f16::from_f32(lut[b as usize].to_f32() * scale_factor)).collect()
+                } else {
+                    data.iter().map(|&b| lut[b as usize]).collect()
+                };
+                Tensor::from_vec(f16_data, shape.as_slice(), device)?
+            } else {
+                let f32_data: Vec<f32> = if (scale_factor - 1.0).abs() > 1e-6 {
+                    data.iter().map(|&b| lut[b as usize].to_f32() * scale_factor).collect()
+                } else {
+                    data.iter().map(|&b| lut[b as usize].to_f32()).collect()
+                };
+                Tensor::from_vec(f32_data, shape.as_slice(), device)?
+            };
+            return Ok(tensor);
         }
 
         // Standard dtypes:
