@@ -268,12 +268,12 @@ impl QwenImageVaeDecoder {
             return Err(candle_core::Error::Msg(format!("QwenImageVaeDecoder expects 16 channels, got {}", c)));
         }
 
-        // 1. Exact Qwen / Wan Latent Denormalization: z = latents / std + mean
+        // 1. Exact Qwen / Krea Latent Denormalization: z = (latents * latents_std) + latents_mean
         let mean = Tensor::from_slice(&QWEN_LATENTS_MEAN, (1, 16, 1, 1), latents.device())?
             .to_dtype(latents.dtype())?;
         let std = Tensor::from_slice(&QWEN_LATENTS_STD, (1, 16, 1, 1), latents.device())?
             .to_dtype(latents.dtype())?;
-        let z = latents.broadcast_div(&std)?.broadcast_add(&mean)?;
+        let z = latents.broadcast_mul(&std)?.broadcast_add(&mean)?;
 
         // 2. Initial convolution: [B, 16, H, W] -> [B, 384, H, W]
         let mut h_feat = self.conv_in.forward(&z)?;

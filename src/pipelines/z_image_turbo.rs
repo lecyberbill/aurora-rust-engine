@@ -124,13 +124,13 @@ impl ZImageTurboPipeline {
             }
         };
 
-        // 3. Flow Match Euler Scheduler (Official Z-Image Turbo dynamic shift: 0.5 to 1.15)
+        // 3. Flow Match Euler Scheduler (Official Krea 2 Turbo distilled fixed shift: mu = 1.15)
         let scheduler_cfg = FlowMatchEulerConfig {
-            shift: 1.0,
-            base_shift: 0.5,
+            shift: 1.15,
+            base_shift: 1.15,
             max_shift: 1.15,
-            min_shift: 0.5,
-            use_dynamic_shifting: true,
+            min_shift: 1.15,
+            use_dynamic_shifting: false,
             double_shift_linspace: false,
         };
         let scheduler = FlowMatchEulerScheduler::new(scheduler_cfg);
