@@ -54,9 +54,9 @@ impl ZImageTurboPipeline {
                 .map_err(|e| candle_core::Error::Msg(e.to_string()))?
         );
 
-        // 1. Build DiT Transformer
+        println!("🚀 Loading Z-Image Turbo DiT Transformer from {:?}", p);
         let mut dit_tensors = std::collections::HashMap::new();
-        let keys: Vec<String> = archive.keys();
+        let keys: Vec<String> = archive.keys().cloned().collect();
         println!("📦 Total archive keys: {}", keys.len());
         for (i, key) in keys.into_iter().enumerate() {
             if key.ends_with(".weight_scale") || key.ends_with(".scale_weight") || key.ends_with(".comfy_quant") {
