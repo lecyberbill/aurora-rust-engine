@@ -217,8 +217,7 @@ impl ZImageTurboPipeline {
         for (step_idx, &t) in timesteps.iter().enumerate() {
             let step_start = Instant::now();
             let sigma = self.scheduler.sigmas()[step_idx] as f32;
-            let lumina_t = (1.0f32 - sigma) * 1000.0f32;
-            let t_tensor = Tensor::from_vec(vec![lumina_t], (1,), &self.device)?.to_dtype(self.dtype)?;
+            let t_tensor = Tensor::from_vec(vec![sigma], (1,), &self.device)?.to_dtype(self.dtype)?;
 
             // Model Forward: predicts velocity
             let pred_v = self.transformer.forward(&latents, &t_tensor, &context)?;
