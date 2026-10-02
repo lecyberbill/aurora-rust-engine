@@ -58,6 +58,7 @@ impl ZImageTurboPipeline {
         let mut dit_tensors = std::collections::HashMap::new();
         let keys: Vec<String> = archive.keys().cloned().collect();
         println!("📦 Total archive keys: {}", keys.len());
+        let total_k = keys.len();
         for (i, key) in keys.into_iter().enumerate() {
             if key.ends_with(".weight_scale") || key.ends_with(".scale_weight") || key.ends_with(".comfy_quant") {
                 continue;
@@ -77,6 +78,9 @@ impl ZImageTurboPipeline {
             let rest = key.strip_prefix("model.diffusion_model.")
                 .or_else(|| key.strip_prefix("diffusion_model."))
                 .unwrap_or(&key);
+            if i % 10 == 0 {
+                println!("  [{}/{}] Loading {}", i, total_k, key);
+            }
             match archive.get_tensor(&key, device, dtype) {
                 Ok(t) => {
                     dit_tensors.insert(rest.to_string(), t);
@@ -84,10 +88,6 @@ impl ZImageTurboPipeline {
                 Err(e) => {
                     eprintln!("⚠️ Error loading DiT tensor {}: {}", key, e);
                 }
-            }
-            if (i + 1) % 50 == 0 {
-                print!(".");
-                let _ = std::io::Write::flush(&mut std::io::stdout());
             }
         }
         println!("\n✅ Loaded {} active DiT tensors onto device", dit_tensors.len());
