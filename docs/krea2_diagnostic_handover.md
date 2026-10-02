@@ -27,16 +27,30 @@ Lorsqu'un modèle Flow Matching produit du bruit rose/gris uniforme après 8 ét
 
 ### 🎯 Piste A : Facteur d'Échelle & Shift du VAE (`qwen_image_vae`)
 - **Dans `src/pipelines/z_image_turbo.rs` :**
-  ```rust
-  let scaled_latents = ((latents / vae_scaling_factor) + vae_shift)?;
+### 🎯 Piste A : Facteur d'Échelle & Shift du VAE (`qwen_image_vae`) - **RÉSOLU ✅**
+- **Formule officielle confirmée :**
+  ```python
+  # Dans autoencoder.py de krea-community/krea-2
+  x = (x * self.latents_std) + self.latents_mean
   ```
-- **Problème potentiel :** Les VAE Qwen / Krea / Wan2.1 utilisent des conventions d'échelle latente spécifiques. 
-  - SDXL : `latents / 0.13025`
-  - Flux : `latents / 0.3611`
-  - Qwen-Image / Wan2.1 : `latents * scale + shift` où `shift` et `scale` sont des vecteurs de taille `[1, 16, 1, 1]`.
-- **Action :** Vérifier dans `diffsynth/models/qwen_image_vae.py` ou le `config.json` du VAE la constante exacte appliquée aux latents avant décodage.
+- **Correction appliquée :** Remplacement de `broadcast_div` par `broadcast_mul` dans `src/diffusion/vae_qwen.rs`.
 
 ---
+
+### 🎯 Piste B : Permutation Patchify / Unpatchify - **VÉRIFIÉ ✅**
+- L'ordre `c ph pw` avec `transpose(0, 2, 4, 1, 3, 5)` et `transpose(0, 3, 1, 4, 2, 5)` en Rust est 100% conforme à l'implémentation officielle.
+
+---
+
+### 🎯 Piste C : Intégration Flow Matching Turbo - **ALIGNÉ ✅**
+- $\mu = 1.15$ fixé pour Krea 2 Turbo (`FlowMatchEulerConfig`).
+- Pas d'Euler $x_{t-\Delta t} = x_t - v_t \cdot \Delta t$ conforme avec $\Delta t = t_{curr} - t_{next} > 0$.
+
+---
+
+### 🎯 Piste D : Conditionnement Texte Qwen3-VL (MMDiT txtfusion) - **CONFORME ✅**
+- 12 couches exactes : `[2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35]`.
+- Prompt template officiel Krea 2 appliqué avec concaténation `[Text (512 tokens), Image ((H/2)*(W/2) tokens)]`.
 
 ### 🎯 Piste B : Permutation Patchify / Unpatchify (Ordre des Dimensions)
 - **Dans `src/diffusion/dit/z_image.rs` :**
