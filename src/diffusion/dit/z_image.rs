@@ -522,21 +522,14 @@ impl ZImageTransformer {
 
         let txt_heads = 20;
         let txt_kv_heads = 20;
-        let txt_mlp_dim = 6826; // int(2 * 2560 / 3) * 4 -> multiple of 128 = 6912 or exact 6826/6912
-        let actual_mlp_dim = if let Ok(t) = vb.pp("txtfusion.layerwise_blocks.0.mlp.gate").get((txt_heads * 128, 2560), "weight") {
-            t.dim(0)?
-        } else if let Ok(t) = vb.get((6912, 2560), "txtfusion.layerwise_blocks.0.mlp.gate.weight") {
-            t.dim(0)?
-        } else {
-            6826
-        };
+        let txt_mlp_dim = 6912;
 
         let txtfusion = TextFusionTransformer::new(
             12,
             cfg.cap_dim,
             txt_heads,
             txt_kv_heads,
-            actual_mlp_dim,
+            txt_mlp_dim,
             false,
             vb.pp("txtfusion"),
         )?;
