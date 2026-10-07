@@ -153,11 +153,15 @@ impl QwenRMSNorm {
         let orig_dtype = x.dtype();
         let x_f32 = x.to_dtype(DType::F32)?;
         let sq = x_f32.sqr()?;
-        let mean = sq.mean_keepdim(sq.dims().len() - 1)?;
+        let last_dim = sq.dims().len() - 1;
+        let mean = sq.mean_keepdim(last_dim)?;
         let rms = (mean + self.eps)?.sqrt()?;
         let norm = x_f32.broadcast_div(&rms)?;
-        let w_f32 = self.weight.to_dtype(DType::F32)?;
-        norm.broadcast_mul(&w_f32)?.to_dtype(orig_dtype)
+        
+        let mut target_shape = vec![1; x.dims().len()];
+        target_shape[last_dim] = self.weight.dim(0)?;
+        let w = self.weight.to_dtype(DType::F32)?.reshape(target_shape.as_slice())?;
+        norm.broadcast_mul(&w)?.to_dtype(orig_dtype)
     }
 }
 
@@ -213,8 +217,27 @@ impl QwenAttention {
         let v_proj = linear_layer(hidden_dim, num_kv_heads * head_dim, vb.pp("v_proj"))?;
         let o_proj = linear_layer(num_heads * head_dim, hidden_dim, vb.pp("o_proj"))?;
 
-        let q_norm = QwenRMSNorm::new(head_dim, 1e-6, vb.pp("q_norm")).ok();
-        let k_norm = QwenRMSNorm::new(head_dim, 1e-6, vb.pp("k_norm")).ok();
+        let q_norm = match QwenRMSNorm::new(head_dim, 1e-6, vb.pp("q_norm")) {
+            Ok(n) => {
+                Some(n)
+            }
+            Err(e) => {
+                println!("⚠️ q_norm failed to load: {:?}", e);
+                None
+            }
+        };
+        let k_norm = match QwenRMSNorm::new(head_dim, 1e-6, vb.pp("k_norm")) {
+            Ok(n) => {
+                Some(n)
+            }
+            Err(e) => {
+                println!("⚠️ k_norm failed to load: {:?}", e);
+                None
+            }
+        };
+        if q_norm.is_none() || k_norm.is_none() {
+            println!("🚨 WARNING: Qwen Attention created WITHOUT q_norm or k_norm!");
+        }
         let scale = 1.0 / (head_dim as f64).sqrt();
 
         Ok(Self {
@@ -280,22 +303,26 @@ impl QwenAttention {
         let k = apply_qwen_rope(&k)?;
 
         // Grouped Query Attention (GQA): repeat 8 kv heads to match 32 query heads (x4)
+        // Correct broadcast: [b, seq_len, kv_heads, head_dim] -> permute -> [b, kv_heads, seq_len, head_dim]
+        // repeat along heads -> [b, q_heads, seq_len, head_dim]
         let n_rep = self.num_heads / self.num_kv_heads;
-        let k = if n_rep > 1 {
-            k.unsqueeze(3)?.repeat((1, 1, 1, n_rep, 1))?.reshape((b, seq_len, self.num_heads, self.head_dim))?
+        let k_perm = k.transpose(1, 2)?.contiguous()?; // [b, kv_heads, seq_len, head_dim]
+        let v_perm = v.transpose(1, 2)?.contiguous()?; // [b, kv_heads, seq_len, head_dim]
+
+        let k_t = if n_rep > 1 {
+            k_perm.unsqueeze(2)?.repeat((1, 1, n_rep, 1, 1))?.reshape((b, self.num_heads, seq_len, self.head_dim))?
         } else {
-            k
-        };
-        let v = if n_rep > 1 {
-            v.unsqueeze(3)?.repeat((1, 1, 1, n_rep, 1))?.reshape((b, seq_len, self.num_heads, self.head_dim))?
+            k_perm
+        }.to_dtype(DType::F32)?;
+
+        let v_t = if n_rep > 1 {
+            v_perm.unsqueeze(2)?.repeat((1, 1, n_rep, 1, 1))?.reshape((b, self.num_heads, seq_len, self.head_dim))?
         } else {
-            v
-        };
+            v_perm
+        }.to_dtype(DType::F32)?;
 
         // Scaled Dot-Product Attention in F32 with Causal Mask
         let q_t = (q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)? * self.scale)?;
-        let k_t = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-        let v_t = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
 
         let mut scores = q_t.matmul(&k_t.transpose(2, 3)?.contiguous()?)?;
         
@@ -345,10 +372,10 @@ impl QwenDecoderLayer {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let normed = self.input_layernorm.forward(x)?;
         let attn_out = self.self_attn.forward(&normed)?;
-        let h = (x + attn_out)?;
+        let h = (x + &attn_out)?;
         let post_normed = self.post_attention_layernorm.forward(&h)?;
         let mlp_out = self.mlp.forward(&post_normed)?;
-        &h + mlp_out
+        &h + &mlp_out
     }
 }
 
@@ -461,6 +488,8 @@ impl Qwen3TextEncoder {
 
         let tokenizer = if let Some(p) = tokenizer_path {
             Tokenizer::from_file(p).ok()
+        } else if Path::new("/home/ai-dev/.cache/huggingface/hub/models--Qwen--Qwen2.5-3B/snapshots/3aab1f1954e9cc14eb9509a215f9e5ca08227a9b/tokenizer.json").exists() {
+            Tokenizer::from_file("/home/ai-dev/.cache/huggingface/hub/models--Qwen--Qwen2.5-3B/snapshots/3aab1f1954e9cc14eb9509a215f9e5ca08227a9b/tokenizer.json").ok()
         } else if Path::new(r"G:\models\zit\tokenizer.json").exists() {
             Tokenizer::from_file(r"G:\models\zit\tokenizer.json").ok()
         } else if Path::new("qwen_tokenizer/tokenizer.json").exists() {
@@ -557,10 +586,15 @@ impl Qwen3TextEncoder {
     /// Returns stacked tensor [1, 12, seq_len, 2560]
     pub fn encode_krea2_12_layers(&self, prompt: &str, max_len: usize) -> Result<Tensor> {
         let pad_id = self.pad_id;
-        let token_ids = if let Some(ref tok) = self.tokenizer {
+        let system_prefix = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n";
+        let (token_ids, prefix_len) = if let Some(ref tok) = self.tokenizer {
+            let prefix_enc = tok.encode(system_prefix, false)
+                .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+            let p_len = prefix_enc.get_ids().len();
+
             let formatted_prompt = format!(
-                "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
-                prompt
+                "{}{}<|im_end|>\n<|im_start|>assistant\n",
+                system_prefix, prompt
             );
             let enc = tok.encode(formatted_prompt.as_str(), true)
                 .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
@@ -571,32 +605,40 @@ impl Qwen3TextEncoder {
                     ids.push(pad_id);
                 }
             }
-            ids
+            (ids, p_len)
         } else {
             let len = if max_len > 0 { max_len } else { 1 };
-            vec![pad_id; len]
+            (vec![pad_id; len], 0)
         };
 
         let seq_len = token_ids.len();
         let ids_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
         let mut h = self.embed_tokens.forward(&ids_tensor)?;
 
+        // Official Krea 2 / ai-toolkit / ComfyUI 0-indexed decoder layer taps:
         let target_layers = [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35];
         let mut taps: Vec<Tensor> = Vec::with_capacity(12);
+
+        // Slice off the 34-token system prompt prefix as confirmed by Krea 2 spec
+        let start_idx = if prefix_len > 0 { prefix_len } else { 34.min(seq_len) };
+        let slice_len = if seq_len > start_idx { seq_len - start_idx } else { seq_len };
+        let actual_start = if seq_len > start_idx { start_idx } else { 0 };
 
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h)?;
             if target_layers.contains(&i) {
-                taps.push(h.clone());
+                let h_sliced = h.narrow(1, actual_start, slice_len)?;
+                taps.push(h_sliced);
             }
         }
 
         while taps.len() < 12 {
-            taps.push(h.clone());
+            let h_sliced = h.narrow(1, actual_start, slice_len)?;
+            taps.push(h_sliced);
         }
 
-        // Stack taps into [1, 12, seq_len, hidden_dim]
-        Tensor::stack(&taps, 1)
+        // Stack taps into [1, seq_len_prompt, 12, hidden_dim=2560]
+        Tensor::stack(&taps, 2)
     }
 
     /// Encode prompt for Z-Image / Lumina2:

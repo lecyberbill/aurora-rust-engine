@@ -48,7 +48,7 @@ fn main() -> anyhow::Result<()> {
 
     let out_dir = PathBuf::from("output");
     std::fs::create_dir_all(&out_dir)?;
-    let out_file = out_dir.join("zimage_turbo_test.png");
+    let out_file = out_dir.join("krea_2_test.png");
     image.save(&out_file)?;
 
     println!("================================================================================");

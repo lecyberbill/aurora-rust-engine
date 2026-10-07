@@ -79,16 +79,27 @@ Lorsqu'un modèle Flow Matching produit du bruit rose/gris uniforme après 8 ét
 
 ---
 
-## 3. Protocole Déterministe pour la Reprise 🛠️
+## 3. Derniers Résultats de la Session (02 Octobre 2026) 🔬
 
-Lors de la prochaine session, suivre cette méthodologie étape par étape sans régresser :
+1. **Sonde 1 (VAE Isolé) : VALIDÉ ✅**
+   - Binaire `test_qwen_vae` exécuté sur `aurora-dev` avec `qwen_image_vae_complet.safetensors`.
+   - Entrée dummy latent `[1, 16, 128, 128]` -> sortie `[1, 3, 1024, 1024]`.
+   - Décodeur VAE 100% stable et fonctionnel.
 
-1. **Test Isolé du VAE (Sonde 1) :**
-   - Créer un binaire de test `cargo run --bin test_vae_decode` qui décode un latent standard ou un tenseur connu.
-   - Valider que le décodeur VAE produit une image cohérente et identifier le facteur de scaling exact.
-2. **Comparaison Pas à Pas avec DiffSynth (Sonde 2) :**
-   - Extraire du fichier local `diffsynth_krea2.py` les statistiques (mean, std, min, max) du tenseur $x_0, x_1$ au step 0 et step 1.
-   - Comparer avec les logs de TransRust pour repérer immédiatement à quelle étape l'écart survient (Patchify, RoPE, Attention ou Euler update).
-3. **Validation & Lancement UI :**
-   - Recompiler avec `cargo build --release --bin aurora_studio --features rocm,ui`.
-   - Tester la génération finale depuis l'interface web (7860).
+2. **Test Inférence Studio après fix TextFusion :**
+   - Correction appliquée : attention sur `seq_len` (tokens) au lieu de `12` (taps) dans `TextFusionTransformer::forward`.
+   - Inférence 8 steps exécutée sur ROCm HIP.
+   - Résultat visuel : toujours un bruit plat rosâtre identique.
+   - **Conclusion :** Le blocage principal ne provient pas uniquement de TextFusion. Il se situe très probablement au niveau du cœur du DiT (Euler Flow Matching sign / scaling timestep / attention mask) ou des poids de projection initiaux / finaux (`first`, `last`).
+
+---
+
+## 4. Protocole Déterministe pour la Prochaine Session 🛠️
+
+1. **Sonde Pas-à-Pas (Golden Tensor Reference) :**
+   - Exécuter 1 pas d'inférence en Python via `diffsynth_krea2.py` avec une graine fixe (seed 42, prompt simple).
+   - Dumper les statistiques couche par couche (`first(img)`, `temb`, `blocks.0` output, `pred_v`, `latents_next`).
+   - Insérer des sondes identiques dans `src/pipelines/z_image_turbo.rs` pour repérer à quel tenseur exact la divergence apparaît.
+2. **Vérification Signe Flow Matching :**
+   - Vérifier si $v_t$ prédit par Krea 2 Turbo a la même convention de signe que Lumina / Flux ou si $\Delta t$ doit être inversé.
+

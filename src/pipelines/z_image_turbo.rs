@@ -75,21 +75,51 @@ impl ZImageTurboPipeline {
                 || key.starts_with("model.diffusion_model.last.")
                 || key.starts_with("model.diffusion_model.tmlp.")
                 || key.starts_with("model.diffusion_model.tproj.")
-                || key.starts_with("model.diffusion_model.txtmlp.");
+                || key.starts_with("model.diffusion_model.txtmlp.")
+                || key.starts_with("model.diffusion_model.x_embedder.")
+                || key.starts_with("model.diffusion_model.final_layer.")
+                || key.starts_with("model.diffusion_model.t_embedder.")
+                || key.starts_with("model.diffusion_model.cap_embedder.")
+                || key.starts_with("model.diffusion_model.context_refiner.")
+                || key.starts_with("model.diffusion_model.noise_refiner.")
+                || key.starts_with("model.diffusion_model.norm_final.");
 
-            let is_probe = key.starts_with("blocks.0.") || key.starts_with("model.diffusion_model.blocks.0.");
+            let is_probe = key.starts_with("blocks.0.")
+                || key.starts_with("model.diffusion_model.blocks.0.")
+                || key.starts_with("model.diffusion_model.layers.0.");
 
             let rest = key.strip_prefix("model.diffusion_model.")
                 .or_else(|| key.strip_prefix("diffusion_model."))
                 .unwrap_or(key);
 
+            // Universal key aliases mapping:
+            let mapped_key = if rest.starts_with("x_embedder.") {
+                rest.replace("x_embedder.", "first.")
+            } else if rest.starts_with("final_layer.") {
+                rest.replace("final_layer.", "last.")
+            } else if rest.starts_with("cap_embedder.0.") {
+                rest.replace("cap_embedder.0.", "txtmlp.0.")
+            } else if rest.starts_with("cap_embedder.1.") {
+                rest.replace("cap_embedder.1.", "txtmlp.1.")
+            } else if rest.starts_with("t_embedder.mlp.0.") {
+                rest.replace("t_embedder.mlp.0.", "tmlp.0.")
+            } else if rest.starts_with("t_embedder.mlp.2.") {
+                rest.replace("t_embedder.mlp.2.", "tmlp.2.")
+            } else {
+                rest.to_string()
+            };
+
             if is_header {
                 match archive.get_tensor(key, device, dtype) {
-                    Ok(t) => { header_tensors.insert(rest.to_string(), t); }
+                    Ok(t) => {
+                        header_tensors.insert(mapped_key.clone(), t.clone());
+                        header_tensors.insert(rest.to_string(), t);
+                    }
                     Err(e) => eprintln!("⚠️ Error loading header tensor {}: {}", key, e),
                 }
             } else if is_probe {
                 if let Ok(t) = archive.get_tensor(key, &Device::Cpu, DType::F32) {
+                    probe_tensors.insert(mapped_key, t.clone());
                     probe_tensors.insert(rest.to_string(), t);
                 }
             }
@@ -124,9 +154,9 @@ impl ZImageTurboPipeline {
             }
         };
 
-        // 3. Flow Match Euler Scheduler (Official Krea 2 Turbo distilled fixed shift: mu = 1.15)
+        // 3. Flow Match Euler Scheduler (Official Krea 2 Turbo distilled fixed shift: mu = 1.15, exp(mu) = 3.15819)
         let scheduler_cfg = FlowMatchEulerConfig {
-            shift: 1.15,
+            shift: 1.15f64.exp(),
             base_shift: 1.15,
             max_shift: 1.15,
             min_shift: 1.15,
@@ -145,7 +175,7 @@ impl ZImageTurboPipeline {
             let mut vae_tensors = std::collections::HashMap::new();
             let mut is_qwen_vae = false;
             for key in vae_archive.keys() {
-                if key.starts_with("decoder.conv1") || key.starts_with("decoder.head") || key.starts_with("decoder.conv_in") || key.starts_with("decoder.up_blocks") {
+                if key.starts_with("decoder.conv1") || key.starts_with("decoder.head") || key.starts_with("decoder.up_blocks") {
                     is_qwen_vae = true;
                 }
                 if let Ok(t) = vae_archive.get_tensor(&key, &vae_device, DType::F32) {
@@ -258,8 +288,9 @@ impl ZImageTurboPipeline {
             let pred_v = self.transformer.forward(&latents, &t_tensor, &context)?;
             let v_std = pred_v.to_dtype(DType::F32)?.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
 
-            // Step scheduler: Flow-Matching Euler ODE step (dt < 0 steps toward signal)
-            latents = self.scheduler.step(&pred_v, t, &latents)?;
+            // Step scheduler: Flow-Matching Euler ODE step (dt < 0 steps toward signal, velocity negated per Lumina2 convention)
+            let pred_v_neg = pred_v.neg()?;
+            latents = self.scheduler.step(&pred_v_neg, t, &latents)?;
             let lat_std = latents.to_dtype(DType::F32)?.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
 
             println!(

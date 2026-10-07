@@ -141,12 +141,14 @@ impl QwenVaeUpsample2d {
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let (b, c, h, w) = x.dims4()?;
-        // Nearest 2x exact upsample
+        // Exact deterministic Nearest 2x Spatial Upsampling
         let up = x.unsqueeze(4)?
-            .repeat((1, 1, 1, 1, 2))?
+            .broadcast_as((b, c, h, w, 2))?
+            .contiguous()?
             .reshape((b, c, h, w * 2))?
             .unsqueeze(3)?
-            .repeat((1, 1, 1, 2, 1))?
+            .broadcast_as((b, c, h, 2, w * 2))?
+            .contiguous()?
             .reshape((b, c, h * 2, w * 2))?;
         self.conv.forward(&up)
     }
