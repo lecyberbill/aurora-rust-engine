@@ -617,24 +617,15 @@ impl Qwen3TextEncoder {
 
         // Official Krea 2 / ai-toolkit / ComfyUI 0-indexed decoder layer taps:
         let target_layers = [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35];
-        let mut taps: Vec<Tensor> = Vec::with_capacity(12);
-
-        // Slice off the 34-token system prompt prefix as confirmed by Krea 2 spec
-        let start_idx = if prefix_len > 0 { prefix_len } else { 34.min(seq_len) };
-        let slice_len = if seq_len > start_idx { seq_len - start_idx } else { seq_len };
-        let actual_start = if seq_len > start_idx { start_idx } else { 0 };
-
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h)?;
             if target_layers.contains(&i) {
-                let h_sliced = h.narrow(1, actual_start, slice_len)?;
-                taps.push(h_sliced);
+                taps.push(h.clone());
             }
         }
 
         while taps.len() < 12 {
-            let h_sliced = h.narrow(1, actual_start, slice_len)?;
-            taps.push(h_sliced);
+            taps.push(h.clone());
         }
 
         // Stack taps into [1, seq_len_prompt, 12, hidden_dim=2560]
