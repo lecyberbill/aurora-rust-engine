@@ -265,19 +265,21 @@ impl KreaAttention {
         let (mut q, mut k) = self.qknorm.forward(&q_raw, &k_raw)?;
 
         if let Some((cos, sin)) = rotary_freqs {
-            // Official Krea 2 / EmbedND 3D RoPE:
-            // q_rot = (q * cos) + (rotate_interleaved(q) * sin)
-            // where rotate_interleaved([u0, u1, u2, u3, ...]) = [-u1, u0, -u3, u2, ...]
+            // Official DiffSynth / Krea 2 3D RoPE:
+            // xq_ = freqs[..., 0] * xq_[..., 0] + freqs[..., 1] * xq_[..., 1]
+            // where freqs has [[cos, -sin], [sin, cos]] matrix format for each (u0, u1) pair
             let cos_f32 = cos.to_dtype(DType::F32)?;
             let sin_f32 = sin.to_dtype(DType::F32)?;
             let apply_rope = |t: &Tensor| -> Result<Tensor> {
                 let (tb, th, tl, td) = t.dims4()?;
-                let t_f32 = t.to_dtype(DType::F32)?;
-                let t1 = t_f32.narrow(3, 0, td / 2)?;
-                let t2 = t_f32.narrow(3, td / 2, td / 2)?;
-                let neg_t2 = (t2 * -1.0)?;
-                let rotated = Tensor::cat(&[&neg_t2, &t1], 3)?;
-                let out = (t_f32.broadcast_mul(&cos_f32)? + rotated.broadcast_mul(&sin_f32)?)?;
+                let t_f32 = t.to_dtype(DType::F32)?.reshape((tb, th, tl, td / 2, 2))?;
+                let u0 = t_f32.narrow(4, 0, 1)?; // [B, H, L, D/2, 1]
+                let u1 = t_f32.narrow(4, 1, 1)?; // [B, H, L, D/2, 1]
+                // [cos, -sin] * [u0, u1]^T -> new_u0 = cos * u0 - sin * u1
+                // [sin,  cos] * [u0, u1]^T -> new_u1 = sin * u0 + cos * u1
+                let new_u0 = (u0.broadcast_mul(&cos_f32)? - u1.broadcast_mul(&sin_f32)?)?;
+                let new_u1 = (u0.broadcast_mul(&sin_f32)? + u1.broadcast_mul(&cos_f32)?)?;
+                let out = Tensor::cat(&[&new_u0, &new_u1], 4)?.reshape((tb, th, tl, td))?;
                 out.to_dtype(orig_dtype)
             };
             q = apply_rope(&q)?;
@@ -625,7 +627,7 @@ impl LastLayer {
     }
 }
 
-/// Compute 3D RoPE (EmbedND / Krea 2 standard: axes [32, 48, 48], theta = 10000.0)
+/// Compute 3D RoPE (EmbedND / Krea 2 standard: axes [48, 48, 32], theta = 10000.0)
 pub fn compute_krea_rope(
     pos: &Tensor, // [B, L, 3] containing integer coordinates (y=row, x=col, t=frame)
     theta: f64,   // 10000.0
@@ -641,17 +643,15 @@ pub fn compute_krea_rope(
             let omega = 1.0 / theta.powf(scale_val);
             half_freqs.push(omega as f32);
         }
-        let mut freqs_vec = half_freqs.clone();
-        freqs_vec.extend_from_slice(&half_freqs);
-        let omega_t = Tensor::from_vec(freqs_vec, (1, 1, axis_dim), pos.device())?;
+        let omega_t = Tensor::from_vec(half_freqs, (1, 1, half), pos.device())?;
         let pos_axis = pos.narrow(2, axis_idx, 1)?; // [B, L, 1]
-        let angles = pos_axis.broadcast_mul(&omega_t)?; // [B, L, axis_dim]
+        let angles = pos_axis.broadcast_mul(&omega_t)?; // [B, L, half]
         angles_all.push(angles);
     }
 
-    let angles_cat = Tensor::cat(&angles_all.iter().collect::<Vec<_>>(), 2)?; // [B, L, 128]
-    let cos = angles_cat.cos()?.unsqueeze(1)?; // [B, 1, L, 128]
-    let sin = angles_cat.sin()?.unsqueeze(1)?; // [B, 1, L, 128]
+    let angles_cat = Tensor::cat(&angles_all.iter().collect::<Vec<_>>(), 2)?; // [B, L, 64]
+    let cos = angles_cat.cos()?.unsqueeze(1)?.unsqueeze(4)?; // [B, 1, L, 64, 1]
+    let sin = angles_cat.sin()?.unsqueeze(1)?.unsqueeze(4)?; // [B, 1, L, 64, 1]
     Ok((cos, sin))
 }
 
