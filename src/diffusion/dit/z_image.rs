@@ -273,11 +273,10 @@ impl KreaAttention {
             let apply_rope = |t: &Tensor| -> Result<Tensor> {
                 let (tb, th, tl, td) = t.dims4()?;
                 let t_f32 = t.to_dtype(DType::F32)?;
-                let t_pairs = t_f32.reshape((tb, th, tl, td / 2, 2))?;
-                let u0 = t_pairs.narrow(4, 0, 1)?.squeeze(4)?; // [B, H, L, D/2]
-                let u1 = t_pairs.narrow(4, 1, 1)?.squeeze(4)?; // [B, H, L, D/2]
-                let neg_u1 = (u1 * -1.0)?;
-                let rotated = Tensor::stack(&[&neg_u1, &u0], 4)?.reshape((tb, th, tl, td))?;
+                let t1 = t_f32.narrow(3, 0, td / 2)?;
+                let t2 = t_f32.narrow(3, td / 2, td / 2)?;
+                let neg_t2 = (t2 * -1.0)?;
+                let rotated = Tensor::cat(&[&neg_t2, &t1], 3)?;
                 let out = (t_f32.broadcast_mul(&cos_f32)? + rotated.broadcast_mul(&sin_f32)?)?;
                 out.to_dtype(orig_dtype)
             };
@@ -636,14 +635,14 @@ pub fn compute_krea_rope(
 
     for (axis_idx, &axis_dim) in axes.iter().enumerate() {
         let half = axis_dim / 2;
-        let mut freqs_vec = Vec::with_capacity(axis_dim);
+        let mut half_freqs = Vec::with_capacity(half);
         for step in 0..half {
             let scale_val = (2.0 * step as f64) / (axis_dim as f64);
             let omega = 1.0 / theta.powf(scale_val);
-            // Expansion entrelacée repeat_interleave(2): phi_k, phi_k
-            freqs_vec.push(omega as f32);
-            freqs_vec.push(omega as f32);
+            half_freqs.push(omega as f32);
         }
+        let mut freqs_vec = half_freqs.clone();
+        freqs_vec.extend_from_slice(&half_freqs);
         let omega_t = Tensor::from_vec(freqs_vec, (1, 1, axis_dim), pos.device())?;
         let pos_axis = pos.narrow(2, axis_idx, 1)?; // [B, L, 1]
         let angles = pos_axis.broadcast_mul(&omega_t)?; // [B, L, axis_dim]
