@@ -275,9 +275,9 @@ impl KreaAttention {
                 let t_f32 = t.to_dtype(DType::F32)?;
                 let t_pairs = t_f32.reshape((tb, th, tl, td / 2, 2))?;
                 let u0 = t_pairs.narrow(4, 0, 1)?; // [B, H, L, D/2, 1]
-                let u1 = t_pairs.narrow(4, 1, 1)?;
+                let u1 = t_pairs.narrow(4, 1, 1)?; // [B, H, L, D/2, 1]
                 let neg_u1 = (u1 * -1.0)?;
-                let rotated = Tensor::cat(&[&neg_u1, &u0], 4)?.reshape((tb, th, tl, td))?;
+                let rotated = Tensor::cat(&[&neg_u1, &u0], 4)?.contiguous()?.reshape((tb, th, tl, td))?;
                 let out = (t_f32.broadcast_mul(&cos_f32)? + rotated.broadcast_mul(&sin_f32)?)?;
                 out.to_dtype(orig_dtype)
             };
@@ -671,7 +671,7 @@ pub fn krea_timestep_embedding(t: &Tensor, dim: usize) -> Result<Tensor> {
     let args = t_f32.matmul(&freqs)?; // [B, half]
     let cos = args.cos()?;
     let sin = args.sin()?;
-    Tensor::cat(&[&cos, &sin], 1)?.to_dtype(t.dtype())
+    Tensor::cat(&[&sin, &cos], 1)?.to_dtype(t.dtype())
 }
 
 /// Complete Krea 2 Turbo Single-Stream MMDiT Transformer
