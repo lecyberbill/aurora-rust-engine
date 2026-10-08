@@ -881,14 +881,8 @@ impl ZImageTransformer {
             println!("      📊 Embeddings: img_std={:.4}, txt_std={:.4}, tvec_std={:.4}", img_std, txt_std, tv_std);
         }
 
-        // 4. Position IDs: text tokens at (0, 0, 0) (context invariance), image tokens at (0, row, col)
+        // 4. Position IDs: image tokens at (0, row, col), text tokens at (0, 0, 0)
         let mut pos_vec = Vec::with_capacity(total_len * 3);
-        // Text pos IDs: Axe 0 = 0, Axe 1 = 0, Axe 2 = 0 (context invariance scheme)
-        for _ in 0..txt_len {
-            pos_vec.push(0f32);
-            pos_vec.push(0f32);
-            pos_vec.push(0f32);
-        }
         // Image pos IDs: Axe 0 = 0 (static frame), Axe 1 = row [0..p_h-1], Axe 2 = col [0..p_w-1]
         for r in 0..p_h {
             for col in 0..p_w {
@@ -897,14 +891,20 @@ impl ZImageTransformer {
                 pos_vec.push(col as f32);
             }
         }
+        // Text pos IDs: Axe 0 = 0, Axe 1 = 0, Axe 2 = 0 (context invariance scheme)
+        for _ in 0..txt_len {
+            pos_vec.push(0f32);
+            pos_vec.push(0f32);
+            pos_vec.push(0f32);
+        }
         let pos_t = Tensor::from_vec(pos_vec, (1, total_len, 3), latents.device())?
             .repeat((b, 1, 1))?;
 
         let (cos, sin) = compute_krea_rope(&pos_t, self.config.theta)?;
         let rotary_freqs = (&cos, &sin);
 
-        // 5. Combined sequence: [Text tokens FIRST, Image tokens SECOND]
-        let mut combined = Tensor::cat(&[&txt_emb, &img_emb], 1)?;
+        // 5. Combined sequence: [Image tokens FIRST, Text tokens SECOND]
+        let mut combined = Tensor::cat(&[&img_emb, &txt_emb], 1)?;
 
         // 6. Single-Stream MMDiT Blocks (Resident or On-Demand Multi-Threaded Streaming)
         if !self.blocks.is_empty() {
@@ -1022,8 +1022,8 @@ impl ZImageTransformer {
             }
         }
 
-        // 7. Extract image token slice strictly BEFORE last layer modulation
-        let img_tokens_out = combined.narrow(1, txt_len, img_tokens)?;
+        // 7. Extract image token slice strictly BEFORE last layer modulation (Image tokens are at 0..img_tokens)
+        let img_tokens_out = combined.narrow(1, 0, img_tokens)?;
 
         // 8. Last Layer modulation & linear projection on image tokens
         let out = self.last.forward(&img_tokens_out, &t)?;
