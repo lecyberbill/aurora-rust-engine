@@ -631,7 +631,7 @@ pub fn compute_krea_rope(
     pos: &Tensor, // [B, L, 3] containing integer coordinates (y=row, x=col, t=frame)
     theta: f64,   // 10000.0
 ) -> Result<(Tensor, Tensor)> {
-    let axes = [48usize, 48usize, 32usize];
+    let axes = [56usize, 56usize, 16usize];
     let mut angles_all = Vec::with_capacity(3);
 
     for (axis_idx, &axis_dim) in axes.iter().enumerate() {
