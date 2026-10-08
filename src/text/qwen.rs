@@ -617,6 +617,7 @@ impl Qwen3TextEncoder {
 
         // Official Krea 2 / ai-toolkit / ComfyUI 0-indexed decoder layer taps:
         let target_layers = [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35];
+        let mut taps: Vec<Tensor> = Vec::with_capacity(12);
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h)?;
             if target_layers.contains(&i) {
