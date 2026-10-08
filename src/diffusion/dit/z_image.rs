@@ -627,11 +627,11 @@ impl LastLayer {
 
 /// Compute 3D RoPE (EmbedND / Krea 2 standard: axes [32, 48, 48], theta = 10000.0)
 pub fn compute_krea_rope(
-    pos: &Tensor, // [B, L, 2] containing integer coordinates (y=row, x=col)
+    pos: &Tensor, // [B, L, 3] containing integer coordinates (y=row, x=col, t=frame)
     theta: f64,   // 10000.0
 ) -> Result<(Tensor, Tensor)> {
-    let axes = [64usize, 64usize];
-    let mut angles_all = Vec::with_capacity(2);
+    let axes = [48usize, 48usize, 32usize];
+    let mut angles_all = Vec::with_capacity(3);
 
     for (axis_idx, &axis_dim) in axes.iter().enumerate() {
         let half = axis_dim / 2;
@@ -880,21 +880,23 @@ impl ZImageTransformer {
             println!("      📊 Embeddings: img_std={:.4}, txt_std={:.4}, tvec_std={:.4}", img_std, txt_std, tv_std);
         }
 
-        // 4. Position IDs: text tokens at (0, 0), image tokens at (row, col)
-        let mut pos_vec = Vec::with_capacity(total_len * 2);
-        // Text pos IDs: Row = 0, Col = 0 (context invariance scheme)
+        // 4. Position IDs: text tokens at (0, 0, 0), image tokens at (row, col, frame=0)
+        let mut pos_vec = Vec::with_capacity(total_len * 3);
+        // Text pos IDs: Row = 0, Col = 0, Frame = 0 (context invariance scheme)
         for _ in 0..txt_len {
             pos_vec.push(0f32);
             pos_vec.push(0f32);
+            pos_vec.push(0f32);
         }
-        // Image pos IDs: Row = r, Col = col (axes [64, 64])
+        // Image pos IDs: Row = r, Col = col, Frame = 0 (axes [48, 48, 32])
         for r in 0..p_h {
             for col in 0..p_w {
                 pos_vec.push(r as f32);
                 pos_vec.push(col as f32);
+                pos_vec.push(0f32);
             }
         }
-        let pos_t = Tensor::from_vec(pos_vec, (1, total_len, 2), latents.device())?
+        let pos_t = Tensor::from_vec(pos_vec, (1, total_len, 3), latents.device())?
             .repeat((b, 1, 1))?;
 
         let (cos, sin) = compute_krea_rope(&pos_t, self.config.theta)?;
