@@ -277,9 +277,9 @@ impl KreaAttention {
                 let u1 = t_f32.narrow(4, 1, 1)?; // [B, H, L, D/2, 1]
                 // [cos, -sin] * [u0, u1]^T -> new_u0 = cos * u0 - sin * u1
                 // [sin,  cos] * [u0, u1]^T -> new_u1 = sin * u0 + cos * u1
-                let new_u0 = (u0.broadcast_mul(&cos_f32)? - u1.broadcast_mul(&sin_f32)?)?;
-                let new_u1 = (u0.broadcast_mul(&sin_f32)? + u1.broadcast_mul(&cos_f32)?)?;
-                let out = Tensor::cat(&[&new_u0, &new_u1], 4)?.reshape((tb, th, tl, td))?;
+                let new_u0 = (u0.broadcast_mul(&cos_f32)? - u1.broadcast_mul(&sin_f32)?)?.squeeze(4)?;
+                let new_u1 = (u0.broadcast_mul(&sin_f32)? + u1.broadcast_mul(&cos_f32)?)?.squeeze(4)?;
+                let out = Tensor::stack(&[&new_u0, &new_u1], 4)?.reshape((tb, th, tl, td))?;
                 out.to_dtype(orig_dtype)
             };
             q = apply_rope(&q)?;
