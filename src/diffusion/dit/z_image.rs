@@ -671,7 +671,7 @@ pub fn krea_timestep_embedding(t: &Tensor, dim: usize) -> Result<Tensor> {
     let args = t_f32.matmul(&freqs)?; // [B, half]
     let cos = args.cos()?;
     let sin = args.sin()?;
-    Tensor::cat(&[&sin, &cos], 1)?.to_dtype(t.dtype())
+    Tensor::cat(&[&cos, &sin], 1)?.to_dtype(t.dtype())
 }
 
 /// Complete Krea 2 Turbo Single-Stream MMDiT Transformer
