@@ -32,7 +32,7 @@ impl Default for ZImageConfig {
             intermediate_dim: 16384,
             cap_dim: 2560, // Qwen3-VL-4B hidden size
             time_embed_dim: 256,
-            theta: 10000.0,
+            theta: 100.0,
         }
     }
 }
