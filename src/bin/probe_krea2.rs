@@ -121,9 +121,14 @@ fn main() -> anyhow::Result<()> {
     let mut config_map = std::collections::HashMap::new();
     for (k, v) in &header_tensors { config_map.insert(k.clone(), v.clone()); }
     for (k, v) in probe_tensors { config_map.insert(k, v); }
-    let config = ZImageConfig::from_tensors_and_keys(&config_map, &keys);
-    println!("⚙️ DiT Architecture: hidden={}, heads={}, layers={}, in_ch={}",
-        config.hidden_size, config.num_heads, config.num_layers, config.in_channels);
+    let mut config = ZImageConfig::from_tensors_and_keys(&config_map, &keys);
+    if let Ok(theta_str) = std::env::var("KREA_THETA") {
+        if let Ok(th) = theta_str.parse::<f64>() {
+            config.theta = th;
+        }
+    }
+    println!("⚙️ DiT Architecture: hidden={}, heads={}, layers={}, in_ch={}, theta={}",
+        config.hidden_size, config.num_heads, config.num_layers, config.in_channels, config.theta);
 
     let header_vb = candle_nn::VarBuilder::from_tensors(header_tensors, dtype, &device);
     let transformer = ZImageTransformer::new_streaming(config, header_vb, dit_archive.clone(), device.clone(), dtype)?;
