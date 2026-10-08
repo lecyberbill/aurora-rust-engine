@@ -165,14 +165,13 @@ fn main() -> anyhow::Result<()> {
 
     std::fs::create_dir_all("outputs")?;
 
-    // Run full 8 steps with (1.0 - sigma) timestep
+    // Run full 8 steps with FlowMatch sigma timestep
     let num_steps = 8;
     for step_idx in 0..num_steps {
         let t = timesteps[step_idx];
         let sigma = sigmas[step_idx] as f32;
-        let t_norm = (1.0 - sigma) as f32;
-        let t_tensor = Tensor::from_vec(vec![t_norm], (1,), &device)?.to_dtype(dtype)?;
-        println!("\n🔄 Running Step {}/{} (sigma={:.4}, t_model={:.4}):", step_idx + 1, num_steps, sigma, t_norm);
+        let t_tensor = Tensor::from_vec(vec![sigma], (1,), &device)?.to_dtype(dtype)?;
+        println!("\n🔄 Running Step {}/{} (sigma={:.4}):", step_idx + 1, num_steps, sigma);
         let t0 = Instant::now();
         
         let pred_v = if (cfg_scale - 1.0).abs() > 1e-5 {
