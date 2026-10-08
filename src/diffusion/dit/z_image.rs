@@ -287,13 +287,13 @@ impl KreaAttention {
 
         let k = if self.kv_heads != self.heads {
             let rep = self.heads / self.kv_heads;
-            k.unsqueeze(2)?.repeat((1, 1, rep, 1, 1))?.reshape((b, self.heads, l, self.head_dim))?
+            k.unsqueeze(2)?.repeat((1, 1, rep, 1, 1))?.permute((0, 1, 2, 3, 4))?.contiguous()?.reshape((b, self.heads, l, self.head_dim))?
         } else {
             k
         };
         let v = if self.kv_heads != self.heads {
             let rep = self.heads / self.kv_heads;
-            v_raw.unsqueeze(2)?.repeat((1, 1, rep, 1, 1))?.reshape((b, self.heads, l, self.head_dim))?
+            v_raw.unsqueeze(2)?.repeat((1, 1, rep, 1, 1))?.permute((0, 1, 2, 3, 4))?.contiguous()?.reshape((b, self.heads, l, self.head_dim))?
         } else {
             v_raw
         };
