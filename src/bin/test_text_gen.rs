@@ -45,12 +45,21 @@ fn main() -> anyhow::Result<()> {
     println!("💬 Prompt: \"{}\"", prompt);
     println!("⚙️  Params: max_tokens = {}, temp = {}", max_tokens, temperature);
 
-    let device = if candle_core::utils::cuda_is_available() {
-        println!("⚡ Device: NVIDIA CUDA / AMD ROCm (GPU)");
-        Device::new_cuda(0)?
-    } else {
-        println!("🖥️  Device: CPU");
-        Device::Cpu
+    let device = match aurora_rust_engine::device::auto_device() {
+        Ok(d) => {
+            match &d {
+                Device::Cuda(_) => println!("⚡ Device: NVIDIA CUDA (GPU)"),
+                #[cfg(feature = "rocm")]
+                Device::Rocm(_) => println!("⚡ Device: AMD ROCm (GPU)"),
+                Device::Metal(_) => println!("⚡ Device: Apple Metal (GPU)"),
+                Device::Cpu => println!("🖥️  Device: CPU"),
+            }
+            d
+        }
+        Err(e) => {
+            println!("⚠️ Failed to initialize auto_device: {e}, using CPU");
+            Device::Cpu
+        }
     };
 
     let start_load = Instant::now();
