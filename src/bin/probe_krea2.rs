@@ -165,15 +165,15 @@ fn main() -> anyhow::Result<()> {
     let mut latents = Tensor::randn(0.0f32, 1.0f32, (b, 16, latent_h, latent_w), &device)?.to_dtype(dtype)?;
     print_stats("Initial Noise x_0", &latents)?;
 
-    println!("\n📂 Pre-loading VAE decoder:");
+    println!("\n📂 Pre-loading VAE decoder on {:?}", device);
     let vae_archive = SafeTensorsArchive::open(&vae_path)?;
     let mut vae_tensors = std::collections::HashMap::new();
     for k in vae_archive.keys() {
-        if let Ok(t) = vae_archive.get_tensor(&k, &Device::Cpu, DType::F32) {
+        if let Ok(t) = vae_archive.get_tensor(&k, &device, dtype) {
             vae_tensors.insert(k.to_string(), t);
         }
     }
-    let vae_vb = candle_nn::VarBuilder::from_tensors(vae_tensors, DType::F32, &Device::Cpu);
+    let vae_vb = candle_nn::VarBuilder::from_tensors(vae_tensors, dtype, &device);
     let vae = QwenImageVaeDecoder::new(vae_vb)?;
 
     std::fs::create_dir_all("outputs")?;
@@ -203,14 +203,20 @@ fn main() -> anyhow::Result<()> {
 
         // x_0 direct estimation: x_0 = x_t - t_cur * v
         let x0_est = (&latents - (&pred_v * t_cur)?)?;
-        let cpu_x0 = x0_est.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
         if (step_idx + 1) % 4 == 0 || step_idx + 1 == num_steps || step_idx == 0 {
-            if let Ok(decoded_x0) = vae.decode(&cpu_x0) {
-                if let Ok(img) = aurora_rust_engine::diffusion::vae::tensor_to_rgb_image(&decoded_x0) {
-                    let path = format!("outputs/probe_x0_step{}.png", step_idx + 1);
-                    img.save(&path)?;
-                    println!("   📸 Saved direct x0 estimate to {}", path);
+            match vae.decode(&x0_est) {
+                Ok(decoded_x0) => {
+                    let cpu_dec = decoded_x0.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+                    match aurora_rust_engine::diffusion::vae::tensor_to_rgb_image(&cpu_dec) {
+                        Ok(img) => {
+                            let path = format!("outputs/probe_x0_step{}.png", step_idx + 1);
+                            img.save(&path)?;
+                            println!("   📸 Saved direct x0 estimate to {}", path);
+                        }
+                        Err(e) => eprintln!("   ⚠️ tensor_to_rgb_image error: {:?}", e),
+                    }
                 }
+                Err(e) => eprintln!("   ⚠️ VAE decode error: {:?}", e),
             }
         }
 
@@ -223,18 +229,18 @@ fn main() -> anyhow::Result<()> {
     }
 
     println!("\n📂 Final decode:");
-    let cpu_latents = latents.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
-    let decoded = vae.decode(&cpu_latents)?;
-    print_stats("Decoded RGB Tensor", &decoded)?;
+    let decoded = vae.decode(&latents)?;
+    let cpu_decoded = decoded.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+    print_stats("Decoded RGB Tensor", &cpu_decoded)?;
 
-    let img_std = aurora_rust_engine::diffusion::vae::tensor_to_rgb_image(&decoded)?;
+    let img_std = aurora_rust_engine::diffusion::vae::tensor_to_rgb_image(&cpu_decoded)?;
     img_std.save("outputs/probe_step8.png")?;
     img_std.save("outputs/probe_step8_std.png")?;
 
-    let min_val = decoded.flatten_all()?.to_vec1::<f32>()?.into_iter().fold(f32::INFINITY, f32::min);
-    let max_val = decoded.flatten_all()?.to_vec1::<f32>()?.into_iter().fold(f32::NEG_INFINITY, f32::max);
+    let min_val = cpu_decoded.flatten_all()?.to_vec1::<f32>()?.into_iter().fold(f32::INFINITY, f32::min);
+    let max_val = cpu_decoded.flatten_all()?.to_vec1::<f32>()?.into_iter().fold(f32::NEG_INFINITY, f32::max);
     let range = (max_val - min_val).max(1e-5);
-    let norm_stretch = (((&decoded - min_val as f64)? / range as f64)? * 255.0)?.clamp(0.0f32, 255.0f32)?.to_dtype(DType::U8)?;
+    let norm_stretch = (((&cpu_decoded - min_val as f64)? / range as f64)? * 255.0)?.clamp(0.0f32, 255.0f32)?.to_dtype(DType::U8)?;
     let hw3_stretch = norm_stretch.squeeze(0)?.permute((1, 2, 0))?.contiguous()?;
     let flat_stretch = hw3_stretch.flatten_all()?.to_vec1::<u8>()?;
     if let Some(img_stretch) = image::RgbImage::from_raw(1024, 1024, flat_stretch) {
