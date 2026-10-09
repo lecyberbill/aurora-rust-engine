@@ -632,22 +632,32 @@ impl CausalLMPipeline {
             || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ssm_a"));
 
         let (attn_out, x) = if is_ssm_layer {
-            // SSM / Linear Attention / Conv1D DeltaNet forward pass
-            let in_proj_w = self.get_layer_weight(layer_idx, &["ssm_in.weight", "attn_qkv.weight", "self_attn.qkv_proj.weight", "ssm_proj.weight"])?;
-            let out_proj_w = self.get_layer_weight(layer_idx, &["ssm_out.weight", "self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
-            
+            // SSM / Linear Attention / Conv1D DeltaNet forward pass:
+            // in_proj (attn_qkv): [10240, 5120] -> projected is [B, S, 10240]
+            let in_proj_w = self.get_layer_weight(layer_idx, &["attn_qkv.weight", "ssm_in.weight", "self_attn.qkv_proj.weight", "ssm_proj.weight"])?;
             let projected = Self::matmul_linear(&normed_x, &in_proj_w)?;
             
-            // Apply 1D causal convolution if present
-            let conv_out = if let Ok(conv1d_w) = self.get_layer_weight(layer_idx, &["ssm_conv1d.weight", "conv1d.weight"]) {
-                // conv1d_w: [hidden_dim, 1, kernel_size] or [hidden_dim, kernel_size]
-                let silu_proj = candle_nn::ops::silu(&projected).map_err(LuminaError::Candle)?;
-                silu_proj
+            // Squeeze/slice to SSM dimension 6144 (or gate projection)
+            let ssm_dim = 6144;
+            let conv_act = if projected.dim(candle_core::D::Minus1)? >= ssm_dim {
+                projected.narrow(candle_core::D::Minus1, 0, ssm_dim)?
             } else {
-                candle_nn::ops::silu(&projected).map_err(LuminaError::Candle)?
+                projected
+            };
+            let silu_act = candle_nn::ops::silu(&conv_act).map_err(LuminaError::Candle)?;
+
+            // If an explicit gate projection exists, modulate the state
+            let gated_act = if let Ok(gate_w) = self.get_layer_weight(layer_idx, &["attn_gate.weight", "ssm_gate.weight"]) {
+                let gate = Self::matmul_linear(&normed_x, &gate_w)?;
+                let silu_gate = candle_nn::ops::silu(&gate).map_err(LuminaError::Candle)?;
+                (silu_act * silu_gate).map_err(LuminaError::Candle)?
+            } else {
+                silu_act
             };
 
-            let out = Self::matmul_linear(&conv_out, &out_proj_w)?;
+            // out_proj (ssm_out): [5120, 6144] -> out is [B, S, 5120]
+            let out_proj_w = self.get_layer_weight(layer_idx, &["ssm_out.weight", "self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
+            let out = Self::matmul_linear(&gated_act, &out_proj_w)?;
             let x_res = (x + &out).map_err(LuminaError::Candle)?;
             (out, x_res)
         } else {
