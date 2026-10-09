@@ -586,29 +586,37 @@ impl Qwen3TextEncoder {
     /// Returns stacked tensor [1, seq_len_prompt, 12, 2560]
     pub fn encode_krea2_12_layers(&self, prompt: &str, max_len: usize) -> Result<Tensor> {
         let pad_id = self.pad_id;
-        let system_prefix = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n";
-        let (token_ids, prefix_len) = if let Some(ref tok) = self.tokenizer {
-            let prefix_enc = tok.encode(system_prefix, false)
-                .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-            let p_len = prefix_enc.get_ids().len();
+        let prefix_idx = 34;
+        let suffix_start_idx = 5;
+        let max_length = if max_len > 0 { max_len } else { 512 };
+        let prompt_template_prefix = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n";
+        let prompt_template_suffix = "<|im_end|>\n<|im_start|>assistant\n";
 
-            let formatted_prompt = format!(
-                "{}{}<|im_end|>\n<|im_start|>assistant\n",
-                system_prefix, prompt
-            );
-            let enc = tok.encode(formatted_prompt.as_str(), true)
+        let (token_ids, p_idx) = if let Some(ref tok) = self.tokenizer {
+            let prompt_full = format!("{}{}", prompt_template_prefix, prompt);
+            let p_enc = tok.encode(prompt_full.as_str(), true)
                 .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-            let mut ids = enc.get_ids().to_vec();
-            if max_len > 0 {
-                ids.truncate(max_len);
-                while ids.len() < max_len {
-                    ids.push(pad_id);
+            let mut p_ids = p_enc.get_ids().to_vec();
+
+            let target_p_len = max_length + prefix_idx - suffix_start_idx; // 512 + 34 - 5 = 541
+            if p_ids.len() > target_p_len {
+                p_ids.truncate(target_p_len);
+            } else {
+                while p_ids.len() < target_p_len {
+                    p_ids.push(pad_id);
                 }
             }
-            (ids, p_len)
+
+            let s_enc = tok.encode(prompt_template_suffix, true)
+                .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+            let s_ids = s_enc.get_ids();
+
+            let mut all_ids = p_ids;
+            all_ids.extend_from_slice(s_ids);
+            (all_ids, prefix_idx)
         } else {
-            let len = if max_len > 0 { max_len } else { 1 };
-            (vec![pad_id; len], 0)
+            let len = max_length + prefix_idx;
+            (vec![pad_id; len], prefix_idx)
         };
 
         let seq_len = token_ids.len();
@@ -632,10 +640,10 @@ impl Qwen3TextEncoder {
         // Stack taps into [1, seq_len_total, 12, hidden_dim=2560]
         let stacked = Tensor::stack(&taps, 2)?;
 
-        // Strict prompt slicing: remove the system prefix tokens (prefix_len, typically 34)
-        // so only the contextualized prompt + suffix tokens enter txtfusion
-        if prefix_len > 0 && seq_len > prefix_len {
-            stacked.narrow(1, prefix_len, seq_len - prefix_len)
+        // Strict prompt slicing: remove the system prefix tokens (prefix_idx = 34)
+        // so exactly 512 tokens enter txtfusion
+        if p_idx > 0 && seq_len > p_idx {
+            stacked.narrow(1, p_idx, seq_len - p_idx)
         } else {
             Ok(stacked)
         }
