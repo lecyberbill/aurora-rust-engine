@@ -154,11 +154,62 @@ impl QwenVaeUpsample2d {
     }
 }
 
+/// Single-head Spatial Self-Attention for Qwen Image VAE mid block
+#[derive(Debug, Clone)]
+pub struct QwenVaeAttention {
+    norm: VaeRMSNorm,
+    to_qkv: Conv2d,
+    proj: Conv2d,
+    scale: f64,
+}
+
+impl QwenVaeAttention {
+    pub fn new(channels: usize, vb: VarBuilder) -> Result<Self> {
+        let norm = VaeRMSNorm::new(channels, vb.pp("norm"))?;
+        let to_qkv = {
+            let weight = vb.get((3 * channels, channels, 1, 1), "to_qkv.weight")?;
+            let bias = vb.get(3 * channels, "to_qkv.bias").ok();
+            Conv2d::new(weight, bias, Conv2dConfig::default())
+        };
+        let proj = {
+            let weight = vb.get((channels, channels, 1, 1), "proj.weight")?;
+            let bias = vb.get(channels, "proj.bias").ok();
+            Conv2d::new(weight, bias, Conv2dConfig::default())
+        };
+        let scale = 1.0 / (channels as f64).sqrt();
+        Ok(Self { norm, to_qkv, proj, scale })
+    }
+
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let (b, c, h, w) = x.dims4()?;
+        let orig_dtype = x.dtype();
+        let norm_x = self.norm.forward(x)?;
+        let qkv = self.to_qkv.forward(&norm_x)?; // [B, 3*C, H, W]
+        let q = qkv.narrow(1, 0, c)?.reshape((b, c, h * w))?.transpose(1, 2)?.contiguous()?; // [B, HW, C]
+        let k = qkv.narrow(1, c, c)?.reshape((b, c, h * w))?.transpose(1, 2)?.contiguous()?; // [B, HW, C]
+        let v = qkv.narrow(1, 2 * c, c)?.reshape((b, c, h * w))?.transpose(1, 2)?.contiguous()?; // [B, HW, C]
+
+        // Scaled dot product attention in F32
+        let q_f = (q.to_dtype(DType::F32)? * self.scale)?;
+        let k_f = k.to_dtype(DType::F32)?;
+        let v_f = v.to_dtype(DType::F32)?;
+
+        let scores = q_f.matmul(&k_f.transpose(1, 2)?)?; // [B, HW, HW]
+        let weights = crate::device::softmax_last_dim(&scores)?;
+        let attn_out = weights.matmul(&v_f)?.to_dtype(orig_dtype)?; // [B, HW, C]
+
+        let attn_map = attn_out.transpose(1, 2)?.contiguous()?.reshape((b, c, h, w))?;
+        let proj_out = self.proj.forward(&attn_map)?;
+        x + proj_out
+    }
+}
+
 /// Complete AutoencoderKLQwenImage Decoder in pure Rust
 #[derive(Debug, Clone)]
 pub struct QwenImageVaeDecoder {
     conv_in: Conv2d,
     mid_res1: QwenVaeResidual,
+    mid_attn: Option<QwenVaeAttention>,
     mid_res2: QwenVaeResidual,
     // Upsample stages: 384 -> 384 -> 192 -> 96 -> 3 RGB
     up_blocks_0: Vec<QwenVaeResidual>, // 384
@@ -183,6 +234,8 @@ impl QwenImageVaeDecoder {
             .or_else(|_| causal_3d_to_2d_conv(vb.pp("decoder.conv1"), 384, 16, 3, 1))?;
         let mid_res1 = QwenVaeResidual::new(384, 384, vb.pp("decoder.mid_block.resnets.0"))
             .or_else(|_| QwenVaeResidual::new(384, 384, vb.pp("decoder.middle.0")))?;
+        let mid_attn = QwenVaeAttention::new(384, vb.pp("decoder.mid_block.attentions.0"))
+            .or_else(|_| QwenVaeAttention::new(384, vb.pp("decoder.middle.1"))).ok();
         let mid_res2 = QwenVaeResidual::new(384, 384, vb.pp("decoder.mid_block.resnets.1"))
             .or_else(|_| QwenVaeResidual::new(384, 384, vb.pp("decoder.middle.2")))?;
 
@@ -280,8 +333,11 @@ impl QwenImageVaeDecoder {
         // 2. Initial convolution: [B, 16, H, W] -> [B, 384, H, W]
         let mut h_feat = self.conv_in.forward(&z)?;
 
-        // 3. Middle residual blocks
+        // 3. Middle residual blocks (Res -> Attn -> Res)
         h_feat = self.mid_res1.forward(&h_feat)?;
+        if let Some(ref attn) = self.mid_attn {
+            h_feat = attn.forward(&h_feat)?;
+        }
         h_feat = self.mid_res2.forward(&h_feat)?;
 
         // 4. Stage 0 (384 -> 384) + Resample 1 (384 -> 192, 2x up)
