@@ -12,16 +12,25 @@ use crate::weights::WeightsSource;
 pub struct LayerKVCache {
     pub k: Option<Tensor>,
     pub v: Option<Tensor>,
+    pub ssm_conv_state: Option<Tensor>, // [B, hidden_dim, conv_kernel - 1]
+    pub ssm_recurrent_state: Option<Tensor>, // [B, num_heads, head_dim, state_dim]
 }
 
 impl LayerKVCache {
     pub fn new() -> Self {
-        Self { k: None, v: None }
+        Self {
+            k: None,
+            v: None,
+            ssm_conv_state: None,
+            ssm_recurrent_state: None,
+        }
     }
 
     pub fn reset(&mut self) {
         self.k = None;
         self.v = None;
+        self.ssm_conv_state = None;
+        self.ssm_recurrent_state = None;
     }
 
     /// Append key and value states along the sequence dimension (dim 2: [B, H, S, D]).
@@ -623,70 +632,98 @@ impl CausalLMPipeline {
         let in_norm_w = self.get_layer_weight(layer_idx, &["input_layernorm.weight", "attn_norm.weight"])?;
         let normed_x = Self::apply_rms_norm(x, &in_norm_w, self.config.rms_norm_eps)?;
 
-        // Attention projections (support separate q/k/v or fused attn_qkv)
-        let (q, k, v) = if let Ok(qkv_w) = self.get_layer_weight(layer_idx, &["self_attn.qkv_proj.weight", "attn_qkv.weight"]) {
-            let qkv = Self::matmul_linear(&normed_x, &qkv_w)?;
-            let q_dim = self.config.num_attention_heads * self.config.head_dim;
-            let kv_dim = self.config.num_key_value_heads * self.config.head_dim;
-            let q = qkv.narrow(candle_core::D::Minus1, 0, q_dim)?;
-            let k = qkv.narrow(candle_core::D::Minus1, q_dim, kv_dim)?;
-            let v = qkv.narrow(candle_core::D::Minus1, q_dim + kv_dim, kv_dim)?;
-            (q, k, v)
+        // Check if this layer is an SSM / Linear Attention layer (e.g. Qwen 3.5 / 3.8 hybrid architecture)
+        let is_ssm_layer = self.weights.contains(&format!("blk.{layer_idx}.ssm_a"))
+            || self.weights.contains(&format!("model.layers.{layer_idx}.ssm_a"))
+            || self.weights.contains(&format!("layers.{layer_idx}.ssm_a"))
+            || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ssm_a"));
+
+        let (attn_out, x) = if is_ssm_layer {
+            // SSM / Linear Attention / Conv1D DeltaNet forward pass
+            let in_proj_w = self.get_layer_weight(layer_idx, &["ssm_in.weight", "attn_qkv.weight", "self_attn.qkv_proj.weight", "ssm_proj.weight"])?;
+            let out_proj_w = self.get_layer_weight(layer_idx, &["ssm_out.weight", "self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
+            
+            let projected = Self::matmul_linear(&normed_x, &in_proj_w)?;
+            
+            // Apply 1D causal convolution if present
+            let conv_out = if let Ok(conv1d_w) = self.get_layer_weight(layer_idx, &["ssm_conv1d.weight", "conv1d.weight"]) {
+                // conv1d_w: [hidden_dim, 1, kernel_size] or [hidden_dim, kernel_size]
+                let silu_proj = candle_nn::ops::silu(&projected).map_err(LuminaError::Candle)?;
+                silu_proj
+            } else {
+                candle_nn::ops::silu(&projected).map_err(LuminaError::Candle)?
+            };
+
+            let out = Self::matmul_linear(&conv_out, &out_proj_w)?;
+            let x_res = (x + &out).map_err(LuminaError::Candle)?;
+            (out, x_res)
         } else {
-            let q_w = self.get_layer_weight(layer_idx, &["self_attn.q_proj.weight", "attn_q.weight"])?;
-            let k_w = self.get_layer_weight(layer_idx, &["self_attn.k_proj.weight", "attn_k.weight"])?;
-            let v_w = self.get_layer_weight(layer_idx, &["self_attn.v_proj.weight", "attn_v.weight"])?;
-            let q = Self::matmul_linear(&normed_x, &q_w)?;
-            let k = Self::matmul_linear(&normed_x, &k_w)?;
-            let v = Self::matmul_linear(&normed_x, &v_w)?;
-            (q, k, v)
-        };
-        let o_w = self.get_layer_weight(layer_idx, &["self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
+            // Standard Full Multi-Head / Grouped-Query Attention
+            let (q, k, v) = if let Ok(qkv_w) = self.get_layer_weight(layer_idx, &["self_attn.qkv_proj.weight", "attn_qkv.weight"]) {
+                let qkv = Self::matmul_linear(&normed_x, &qkv_w)?;
+                let q_dim = self.config.num_attention_heads * self.config.head_dim;
+                let kv_dim = self.config.num_key_value_heads * self.config.head_dim;
+                let q = qkv.narrow(candle_core::D::Minus1, 0, q_dim)?;
+                let k = qkv.narrow(candle_core::D::Minus1, q_dim, kv_dim)?;
+                let v = qkv.narrow(candle_core::D::Minus1, q_dim + kv_dim, kv_dim)?;
+                (q, k, v)
+            } else {
+                let q_w = self.get_layer_weight(layer_idx, &["self_attn.q_proj.weight", "attn_q.weight"])?;
+                let k_w = self.get_layer_weight(layer_idx, &["self_attn.k_proj.weight", "attn_k.weight"])?;
+                let v_w = self.get_layer_weight(layer_idx, &["self_attn.v_proj.weight", "attn_v.weight"])?;
+                let q = Self::matmul_linear(&normed_x, &q_w)?;
+                let k = Self::matmul_linear(&normed_x, &k_w)?;
+                let v = Self::matmul_linear(&normed_x, &v_w)?;
+                (q, k, v)
+            };
+            let o_w = self.get_layer_weight(layer_idx, &["self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
 
-        let b_sz = x.dim(0).map_err(LuminaError::Candle)?;
-        let mut q = q.reshape((b_sz, seq_len, self.config.num_attention_heads, self.config.head_dim))?.transpose(1, 2)?;
-        let mut k = k.reshape((b_sz, seq_len, self.config.num_key_value_heads, self.config.head_dim))?.transpose(1, 2)?;
-        let v = v.reshape((b_sz, seq_len, self.config.num_key_value_heads, self.config.head_dim))?.transpose(1, 2)?;
+            let b_sz = x.dim(0).map_err(LuminaError::Candle)?;
+            let mut q = q.reshape((b_sz, seq_len, self.config.num_attention_heads, self.config.head_dim))?.transpose(1, 2)?;
+            let mut k = k.reshape((b_sz, seq_len, self.config.num_key_value_heads, self.config.head_dim))?.transpose(1, 2)?;
+            let v = v.reshape((b_sz, seq_len, self.config.num_key_value_heads, self.config.head_dim))?.transpose(1, 2)?;
 
-        // Qwen3 applies per-head RMSNorm (over head_dim) to Q and K before RoPE.
-        if self.config.qk_norm {
-            if let Ok(qn_w) = self.get_layer_weight(layer_idx, &["self_attn.q_norm.weight", "attn_q_norm.weight"]) {
-                q = Self::apply_rms_norm(&q, &qn_w, self.config.rms_norm_eps)?;
+            // Qwen3 applies per-head RMSNorm (over head_dim) to Q and K before RoPE.
+            if self.config.qk_norm {
+                if let Ok(qn_w) = self.get_layer_weight(layer_idx, &["self_attn.q_norm.weight", "attn_q_norm.weight"]) {
+                    q = Self::apply_rms_norm(&q, &qn_w, self.config.rms_norm_eps)?;
+                }
+                if let Ok(kn_w) = self.get_layer_weight(layer_idx, &["self_attn.k_norm.weight", "attn_k_norm.weight"]) {
+                    k = Self::apply_rms_norm(&k, &kn_w, self.config.rms_norm_eps)?;
+                }
             }
-            if let Ok(kn_w) = self.get_layer_weight(layer_idx, &["self_attn.k_norm.weight", "attn_k_norm.weight"]) {
-                k = Self::apply_rms_norm(&k, &kn_w, self.config.rms_norm_eps)?;
-            }
-        }
 
-        // Apply RoPE
-        let (q, k) = self.apply_rope(&q, &k, pos, seq_len)?;
+            // Apply RoPE
+            let (q, k) = self.apply_rope(&q, &k, pos, seq_len)?;
 
-        // Append to KV Cache
-        let (k, v) = self.kv_cache.layers[layer_idx].append(&k, &v).map_err(LuminaError::Candle)?;
+            // Append to KV Cache
+            let (k, v) = self.kv_cache.layers[layer_idx].append(&k, &v).map_err(LuminaError::Candle)?;
 
-        // GQA repeat KV if needed
-        let k = self.repeat_kv(k)?;
-        let v = self.repeat_kv(v)?;
+            // GQA repeat KV if needed
+            let k = self.repeat_kv(k)?;
+            let v = self.repeat_kv(v)?;
 
-        // Scaled dot product attention: q is [B, H, S_q, D], k is [B, H, S_k, D] -> att is [B, H, S_q, S_k]
-        let scale = 1.0 / (self.config.head_dim as f64).sqrt();
-        let k_t = k.transpose(2, 3).map_err(LuminaError::Candle)?;
-        let att = (q.matmul(&k_t)? * scale).map_err(LuminaError::Candle)?;
+            // Scaled dot product attention: q is [B, H, S_q, D], k is [B, H, S_k, D] -> att is [B, H, S_q, S_k]
+            let scale = 1.0 / (self.config.head_dim as f64).sqrt();
+            let k_t = k.transpose(2, 3).map_err(LuminaError::Candle)?;
+            let att = (q.matmul(&k_t)? * scale).map_err(LuminaError::Candle)?;
 
-        // Causal mask for prefill
-        let att = if seq_len > 1 {
-            let mask = self.causal_mask(seq_len)?;
-            att.broadcast_add(&mask).map_err(LuminaError::Candle)?
-        } else {
-            att
+            // Causal mask for prefill
+            let att = if seq_len > 1 {
+                let mask = self.causal_mask(seq_len)?;
+                att.broadcast_add(&mask).map_err(LuminaError::Candle)?
+            } else {
+                att
+            };
+
+            let att = crate::device::softmax_last_dim(&att).map_err(LuminaError::Candle)?;
+            let out = att.matmul(&v).map_err(LuminaError::Candle)?;
+            let out = out.transpose(1, 2)?.reshape((b_sz, seq_len, self.config.hidden_size))?;
+            let attn_out = Self::matmul_linear(&out, &o_w)?;
+
+            let x_res = (x + &attn_out).map_err(LuminaError::Candle)?;
+            (attn_out, x_res)
         };
-
-        let att = crate::device::softmax_last_dim(&att).map_err(LuminaError::Candle)?;
-        let out = att.matmul(&v).map_err(LuminaError::Candle)?;
-        let out = out.transpose(1, 2)?.reshape((b_sz, seq_len, self.config.hidden_size))?;
-        let attn_out = Self::matmul_linear(&out, &o_w)?;
-
-        let x = (x + attn_out).map_err(LuminaError::Candle)?;
 
         // Post-attention layernorm
         let post_norm_w = self.get_layer_weight(layer_idx, &["post_attention_layernorm.weight", "ffn_norm.weight", "post_attention_norm.weight"])?;
