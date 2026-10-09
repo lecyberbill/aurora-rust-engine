@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
     println!("⚙️  Params: max_tokens = {}, temp = {}", max_tokens, temperature);
 
     let device = if candle_core::utils::cuda_is_available() {
-        println!("⚡ Device: NVIDIA CUDA (GPU)");
+        println!("⚡ Device: NVIDIA CUDA / AMD ROCm (GPU)");
         Device::new_cuda(0)?
     } else {
         println!("🖥️  Device: CPU");
@@ -54,13 +54,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     let start_load = Instant::now();
-    let archive = if model_path.is_dir() {
-        std::sync::Arc::new(aurora_rust_engine::weights::SafeTensorsArchive::open_shards_dir(&model_path)?) as std::sync::Arc<dyn aurora_rust_engine::weights::WeightsSource>
-    } else if model_path.to_string_lossy().to_lowercase().ends_with(".gguf") {
-        std::sync::Arc::new(aurora_rust_engine::gguf::GgufWeights::open(&model_path)?) as std::sync::Arc<dyn aurora_rust_engine::weights::WeightsSource>
-    } else {
-        std::sync::Arc::new(aurora_rust_engine::weights::SafeTensorsArchive::open(&model_path)?) as std::sync::Arc<dyn aurora_rust_engine::weights::WeightsSource>
-    };
+    let archive = aurora_rust_engine::weights::open_auto(&model_path)?;
     println!("🔍 Sample tensor keys in GGUF (first 20):");
     for k in archive.keys().iter().take(20) {
         println!("   - {}", k);

@@ -55,17 +55,8 @@ impl AutoModel {
             return Err(LuminaError::ModelNotFound(format!("{}", path.display())));
         }
 
-        // ---- Open the weights source (detect format by extension) -----------------
-        let archive: Arc<dyn crate::weights::WeightsSource> = if path.is_dir() {
-            Arc::new(SafeTensorsArchive::open_shards_dir(path)?)
-        } else {
-            let lower = path.to_string_lossy().to_lowercase();
-            if lower.ends_with(".gguf") {
-                Arc::new(crate::gguf::GgufWeights::open(path)?)
-            } else {
-                Arc::new(SafeTensorsArchive::open(path)?)
-            }
-        };
+        // ---- Open the weights source (detect format by magic/extension) ---------
+        let archive = crate::weights::open_auto(path)?;
 
         let arch = detect_architecture(&*archive);
         Self::build(arch, path.to_path_buf(), device, dtype)
@@ -111,13 +102,7 @@ impl AutoModel {
         let arch = match &desc.family {
             Some(a) => a.clone(),
             None => {
-                let archive: Arc<dyn crate::weights::WeightsSource> = if desc.checkpoint.is_dir() {
-                    Arc::new(SafeTensorsArchive::open_shards_dir(&desc.checkpoint)?)
-                } else if desc.checkpoint.to_string_lossy().to_lowercase().ends_with(".gguf") {
-                    Arc::new(crate::gguf::GgufWeights::open(&desc.checkpoint)?)
-                } else {
-                    Arc::new(SafeTensorsArchive::open(&desc.checkpoint)?)
-                };
+                let archive = crate::weights::open_auto(&desc.checkpoint)?;
                 detect_architecture(&*archive)
             }
         };
@@ -139,11 +124,7 @@ impl AutoModel {
                 if let Some(spec) = &desc.text_encoder {
                     match spec {
                         super::descriptor::TextEncoderSpec::Qwen3 { path } => {
-                            let archive: Arc<dyn crate::weights::WeightsSource> = if path.is_dir() {
-                                Arc::new(SafeTensorsArchive::open_shards_dir(path)?)
-                            } else {
-                                Arc::new(SafeTensorsArchive::open(path)?)
-                            };
+                            let archive = crate::weights::open_auto(path)?;
                             let enc = crate::text::Qwen3TextEncoder::from_archive(
                                 &*archive,
                                 Some(std::path::Path::new("qwen_tokenizer.json")),
@@ -258,11 +239,7 @@ impl AutoModel {
                 pipeline.enable_flash_attn();
 
                 if let Some(super::descriptor::TextEncoderSpec::Qwen3 { path }) = &desc.text_encoder {
-                    let archive: Arc<dyn crate::weights::WeightsSource> = if path.is_dir() {
-                        Arc::new(SafeTensorsArchive::open_shards_dir(path)?)
-                    } else {
-                        Arc::new(SafeTensorsArchive::open(path)?)
-                    };
+                    let archive = crate::weights::open_auto(path)?;
                     // Run Qwen3 text encoder on CPU to preserve full 16GB GPU VRAM for the 13GB DiT model
                     let enc = crate::text::Qwen3TextEncoder::from_archive(
                         &*archive,
@@ -401,13 +378,7 @@ fn build_text(
     dtype: DType,
 ) -> Result<TextModel> {
     let id = arch.slug();
-    let archive: Arc<dyn crate::weights::WeightsSource> = if weights.is_dir() {
-        Arc::new(SafeTensorsArchive::open_shards_dir(weights)?)
-    } else if weights.to_string_lossy().to_lowercase().ends_with(".gguf") {
-        Arc::new(crate::gguf::GgufWeights::open(weights)?)
-    } else {
-        Arc::new(SafeTensorsArchive::open(weights)?)
-    };
+    let archive = crate::weights::open_auto(weights)?;
 
     match arch {
         Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma | Architecture::Qwen3 | Architecture::Mistral3 => {
