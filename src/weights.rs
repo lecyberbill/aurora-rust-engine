@@ -180,10 +180,15 @@ impl SafeTensorsArchive {
 
             use rayon::prelude::*;
             let tensor = if dtype == DType::BF16 {
-                let bf16_data: Vec<bf16> = if (scale_factor - 1.0).abs() > 1e-6 {
-                    data.par_iter().map(|&b| bf16::from_f32(lut[b as usize].to_f32() * scale_factor)).collect()
+                let lut_bf16 = if *st_dtype == safetensors::Dtype::F8_E4M3 {
+                    get_fp8_e4m3_lut_bf16()
                 } else {
-                    data.par_iter().map(|&b| bf16::from_f32(lut[b as usize].to_f32())).collect()
+                    get_fp8_e5m2_lut_bf16()
+                };
+                let bf16_data: Vec<bf16> = if (scale_factor - 1.0).abs() > 1e-6 {
+                    data.par_iter().map(|&b| bf16::from_f32(lut_bf16[b as usize].to_f32() * scale_factor)).collect()
+                } else {
+                    data.par_iter().map(|&b| lut_bf16[b as usize]).collect()
                 };
                 Tensor::from_vec(bf16_data, shape.as_slice(), device)?
             } else if dtype == DType::F16 {
@@ -281,6 +286,8 @@ fn bytemuck_cast_slice<T>(bytes: &[u8]) -> &[T] {
 
 static FP8_E4M3_LUT_F16: std::sync::OnceLock<[half::f16; 256]> = std::sync::OnceLock::new();
 static FP8_E5M2_LUT_F16: std::sync::OnceLock<[half::f16; 256]> = std::sync::OnceLock::new();
+static FP8_E4M3_LUT_BF16: std::sync::OnceLock<[half::bf16; 256]> = std::sync::OnceLock::new();
+static FP8_E5M2_LUT_BF16: std::sync::OnceLock<[half::bf16; 256]> = std::sync::OnceLock::new();
 
 fn get_fp8_e4m3_lut() -> &'static [half::f16; 256] {
     FP8_E4M3_LUT_F16.get_or_init(|| {
@@ -297,6 +304,26 @@ fn get_fp8_e5m2_lut() -> &'static [half::f16; 256] {
         let mut lut = [half::f16::ZERO; 256];
         for b in 0..=255u8 {
             lut[b as usize] = half::f16::from_f32(fp8_e5m2_to_f32(b));
+        }
+        lut
+    })
+}
+
+fn get_fp8_e4m3_lut_bf16() -> &'static [half::bf16; 256] {
+    FP8_E4M3_LUT_BF16.get_or_init(|| {
+        let mut lut = [half::bf16::ZERO; 256];
+        for b in 0..=255u8 {
+            lut[b as usize] = half::bf16::from_f32(fp8_e4m3_to_f32(b));
+        }
+        lut
+    })
+}
+
+fn get_fp8_e5m2_lut_bf16() -> &'static [half::bf16; 256] {
+    FP8_E5M2_LUT_BF16.get_or_init(|| {
+        let mut lut = [half::bf16::ZERO; 256];
+        for b in 0..=255u8 {
+            lut[b as usize] = half::bf16::from_f32(fp8_e5m2_to_f32(b));
         }
         lut
     })
