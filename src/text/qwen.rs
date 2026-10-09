@@ -623,8 +623,10 @@ impl Qwen3TextEncoder {
         let ids_tensor = Tensor::from_vec(token_ids, (1, seq_len), &self.device)?;
         let mut h = self.embed_tokens.forward(&ids_tensor)?;
 
-        // Official Krea 2 / ai-toolkit / ComfyUI 0-indexed decoder layer taps:
-        let target_layers = [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35];
+        // Official Krea 2 / Hugging Face output_hidden_states indices:
+        // hidden_states[0] = embed, so hidden_states[k] is the output of layer (k - 1).
+        // (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35) -> layers [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34]
+        let target_layers = [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34];
         let mut taps: Vec<Tensor> = Vec::with_capacity(12);
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h)?;
