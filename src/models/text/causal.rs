@@ -677,6 +677,16 @@ impl CausalLMPipeline {
             };
             let o_w = self.get_layer_weight(layer_idx, &["self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
 
+            let (q, gate_opt) = if q.dim(candle_core::D::Minus1)? == self.config.num_attention_heads * self.config.head_dim * 2 {
+                let half_dim = self.config.num_attention_heads * self.config.head_dim;
+                let q_proj = q.narrow(candle_core::D::Minus1, 0, half_dim)?;
+                let gate_proj = q.narrow(candle_core::D::Minus1, half_dim, half_dim)?;
+                let gate_act = candle_nn::ops::silu(&gate_proj).map_err(LuminaError::Candle)?;
+                (q_proj, Some(gate_act))
+            } else {
+                (q, None)
+            };
+
             let b_sz = x.dim(0).map_err(LuminaError::Candle)?;
             let mut q = q.reshape((b_sz, seq_len, self.config.num_attention_heads, self.config.head_dim))?.transpose(1, 2)?;
             let mut k = k.reshape((b_sz, seq_len, self.config.num_key_value_heads, self.config.head_dim))?.transpose(1, 2)?;
@@ -718,7 +728,12 @@ impl CausalLMPipeline {
             let att = crate::device::softmax_last_dim(&att).map_err(LuminaError::Candle)?;
             let out = att.matmul(&v).map_err(LuminaError::Candle)?;
             let attn_dim = self.config.num_attention_heads * self.config.head_dim;
-            let out = out.transpose(1, 2)?.reshape((b_sz, seq_len, attn_dim))?;
+            let mut out = out.transpose(1, 2)?.reshape((b_sz, seq_len, attn_dim))?;
+            
+            if let Some(gate) = gate_opt {
+                out = (out * gate).map_err(LuminaError::Candle)?;
+            }
+
             let attn_out = Self::matmul_linear(&out, &o_w)?;
 
             let x_res = (x + &attn_out).map_err(LuminaError::Candle)?;
