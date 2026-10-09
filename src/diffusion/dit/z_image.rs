@@ -162,17 +162,17 @@ impl StandardRMSNorm {
     }
 }
 
-/// Per-head QK Normalization with StandardRMSNorm
+/// Per-head QK Normalization with zero-centered KreaRMSNorm (scale + 1.0)
 #[derive(Debug, Clone)]
 pub struct QKNorm {
-    qnorm: StandardRMSNorm,
-    knorm: StandardRMSNorm,
+    qnorm: KreaRMSNorm,
+    knorm: KreaRMSNorm,
 }
 
 impl QKNorm {
     pub fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let qnorm = StandardRMSNorm::new(dim, vb.pp("qnorm"))?;
-        let knorm = StandardRMSNorm::new(dim, vb.pp("knorm"))?;
+        let qnorm = KreaRMSNorm::new(dim, vb.pp("qnorm"))?;
+        let knorm = KreaRMSNorm::new(dim, vb.pp("knorm"))?;
         Ok(Self { qnorm, knorm })
     }
 
