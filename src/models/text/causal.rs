@@ -572,6 +572,23 @@ impl CausalLMPipeline {
         Ok(0)
     }
 
+    /// Universal RMSNorm supporting CPU, CUDA and ROCm
+    fn apply_rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
+        let orig_dtype = x.dtype();
+        let x_f32 = x.to_dtype(DType::F32)?;
+        let sq = x_f32.sqr()?;
+        let last_dim = sq.dims().len() - 1;
+        let mean = sq.mean_keepdim(last_dim)?;
+        let rms = (mean + eps)?.sqrt()?;
+        let norm = x_f32.broadcast_div(&rms)?;
+
+        let mut target_shape = vec![1; x.dims().len()];
+        target_shape[last_dim] = weight.dim(0)?;
+        let w = weight.to_dtype(DType::F32)?.reshape(target_shape.as_slice())?;
+        let out = norm.broadcast_mul(&w)?.to_dtype(orig_dtype)?;
+        Ok(out)
+    }
+
     /// Forward pass through the Transformer
     fn forward(&mut self, input_ids: &Tensor, pos: usize) -> Result<Tensor> {
         let (_b_size, seq_len) = input_ids.shape().dims2().map_err(LuminaError::Candle)?;
@@ -592,8 +609,7 @@ impl CausalLMPipeline {
 
         // 3. Final layer norm
         let norm_w = self.get_weight_or_fallback(&["model.norm.weight", "output_norm.weight", "norm.weight"])?;
-        let norm = RmsNorm::new(norm_w, self.config.rms_norm_eps);
-        let hidden = norm.forward(&hidden).map_err(LuminaError::Candle)?;
+        let hidden = Self::apply_rms_norm(&hidden, &norm_w, self.config.rms_norm_eps)?;
 
         // 4. LM Head projection
         let lm_head_w = self.get_weight_or_fallback(&["lm_head.weight", "output.weight", "model.embed_tokens.weight", "embed_tokens.weight", "token_embd.weight"])?;
@@ -605,8 +621,7 @@ impl CausalLMPipeline {
     fn forward_layer(&mut self, layer_idx: usize, x: &Tensor, pos: usize, seq_len: usize) -> Result<Tensor> {
         // Input layernorm
         let in_norm_w = self.get_layer_weight(layer_idx, &["input_layernorm.weight", "attn_norm.weight"])?;
-        let in_norm = RmsNorm::new(in_norm_w, self.config.rms_norm_eps);
-        let normed_x = in_norm.forward(x).map_err(LuminaError::Candle)?;
+        let normed_x = Self::apply_rms_norm(x, &in_norm_w, self.config.rms_norm_eps)?;
 
         // Attention projections (support separate q/k/v or fused attn_qkv)
         let (q, k, v) = if let Ok(qkv_w) = self.get_layer_weight(layer_idx, &["self_attn.qkv_proj.weight", "attn_qkv.weight"]) {
@@ -636,12 +651,10 @@ impl CausalLMPipeline {
         // Qwen3 applies per-head RMSNorm (over head_dim) to Q and K before RoPE.
         if self.config.qk_norm {
             if let Ok(qn_w) = self.get_layer_weight(layer_idx, &["self_attn.q_norm.weight", "attn_q_norm.weight"]) {
-                let qn = RmsNorm::new(qn_w, self.config.rms_norm_eps);
-                q = qn.forward(&q).map_err(LuminaError::Candle)?;
+                q = Self::apply_rms_norm(&q, &qn_w, self.config.rms_norm_eps)?;
             }
             if let Ok(kn_w) = self.get_layer_weight(layer_idx, &["self_attn.k_norm.weight", "attn_k_norm.weight"]) {
-                let kn = RmsNorm::new(kn_w, self.config.rms_norm_eps);
-                k = kn.forward(&k).map_err(LuminaError::Candle)?;
+                k = Self::apply_rms_norm(&k, &kn_w, self.config.rms_norm_eps)?;
             }
         }
 
@@ -677,8 +690,7 @@ impl CausalLMPipeline {
 
         // Post-attention layernorm
         let post_norm_w = self.get_layer_weight(layer_idx, &["post_attention_layernorm.weight", "ffn_norm.weight", "post_attention_norm.weight"])?;
-        let post_norm = RmsNorm::new(post_norm_w, self.config.rms_norm_eps);
-        let normed_post_x = post_norm.forward(&x).map_err(LuminaError::Candle)?;
+        let normed_post_x = Self::apply_rms_norm(&x, &post_norm_w, self.config.rms_norm_eps)?;
 
         // SwiGLU MLP
         let gate_w = self.get_layer_weight(layer_idx, &["mlp.gate_proj.weight", "ffn_gate.weight"])?;
