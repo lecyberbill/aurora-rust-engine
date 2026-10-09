@@ -415,27 +415,18 @@ impl FluxTransformer {
         let txt_sin_o = if ropeless { None } else { Some(&txt_sin) };
 
         if let Some(s) = streamer {
-            for i in 0..self.config.num_double_blocks {
-                let (next_img, next_txt) = s.execute_double_block(
-                    i,
-                    &img_h,
-                    &txt_h,
-                    &temb,
-                    img_cos_o,
-                    img_sin_o,
-                    txt_cos_o,
-                    txt_sin_o,
-                )?;
-                img_h = next_img;
-                txt_h = next_txt;
-                if std::env::var("FLUX_TRACE").is_ok() {
-                    let f = img_h.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap();
-                    if let Ok(v) = f.to_vec1::<f32>() {
-                        let m = v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / v.len() as f64;
-                        eprintln!("    [TRACE] after double.{i} img_rms={:.5}", m.sqrt());
-                    }
-                }
-            }
+            let (next_img, next_txt) = s.execute_double_blocks_pipelined(
+                self.config.num_double_blocks,
+                img_h,
+                txt_h,
+                &temb,
+                img_cos_o,
+                img_sin_o,
+                txt_cos_o,
+                txt_sin_o,
+            )?;
+            img_h = next_img;
+            txt_h = next_txt;
         } else {
             for block in &self.double_blocks {
                 let (next_img, next_txt) = block.forward(
@@ -469,9 +460,13 @@ impl FluxTransformer {
             let fcos = if ropeless { None } else { Some(&freqs_cos) };
             let fsin = if ropeless { None } else { Some(&freqs_sin) };
             if let Some(s) = streamer {
-                for i in 0..self.config.num_single_blocks {
-                    unified = s.execute_single_block(i, &unified, &temb, fcos, fsin)?;
-                }
+                unified = s.execute_single_blocks_pipelined(
+                    self.config.num_single_blocks,
+                    unified,
+                    &temb,
+                    fcos,
+                    fsin,
+                )?;
             } else {
                 for block in &self.single_blocks {
                     unified = block.forward(&unified, &temb, fcos, fsin)?;

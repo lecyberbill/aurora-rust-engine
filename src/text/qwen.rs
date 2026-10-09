@@ -273,9 +273,9 @@ impl QwenAttention {
             k = kn.forward(&k)?;
         }
 
-        // Apply 1D Rotary Position Embedding (RoPE) matching Hugging Face / Qwen3 exact math
+        // Apply 1D Rotary Position Embedding (RoPE) matching Hugging Face / Qwen3 exact math (theta = 5000000.0)
         let half_dim = self.head_dim / 2;
-        let theta = 1000000.0f64;
+        let theta = 5000000.0f64;
         let inv_freq: Vec<f32> = (0..half_dim)
             .map(|i| 1.0 / (theta.powf((i * 2) as f64 / self.head_dim as f64) as f32))
             .collect();

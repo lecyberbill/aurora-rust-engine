@@ -34,6 +34,10 @@ Thumbs.db
 
 # Runtime caches
 .cache/
+scratch/
+*.png
+*.jpg
+qwen_tokenizer_*.json
 
 #gemini.md (local context)
 gemini.md

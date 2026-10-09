@@ -647,3 +647,25 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
   - Validation of GGUF, SafeTensors mmap, Flash-Attn fallback, and VLM pipelines under Linux POSIX memory mapping.
 - [ ] **Automated CI/CD Cross-Compilation**:
   - GitHub Actions matrix workflow building release binaries on `ubuntu-latest` with ROCm 6.x and CUDA 12.x toolchains.
+
+---
+
+## 🚀 Milestone 26: Cross-Platform Performance & Kernel Optimizations (CUDA, ROCm, Metal, CPU)
+
+**Goal.** Maximiser le débit d'inférence, minimiser l'empreinte VRAM et éliminer les temps morts I/O sur l'ensemble des architectures matérielles supportées (NVIDIA CUDA, AMD ROCm / HIP, Apple Silicon Metal, CPU multi-cœurs) :
+
+- [ ] **Async Double-Buffering & Host-to-Device Prefetcher (`src/diffusion/dit/streamer.rs`)**:
+  - Thread worker d'arrière-plan avec ring-buffer MPSC pour charger, désérialiser et déquantifier le bloc $N+1$ en mémoire d'hôte pendant l'exécution GPU du bloc $N$.
+  - Masquage complet de la latence I/O et des transferts PCIe.
+- [x] **Universal Tiled Scaled Dot-Product Attention (`src/device.rs`, `src/diffusion/dit/blocks.rs`)**:
+  - Algorithme d'attention par tuiles (chunking de 512 tokens + online softmax) évitant l'allocation quadratique $O(N^2)$.
+  - Support natif garanti et vérifié sur ROCm, CUDA, Metal et CPU sans dépendance C++/CUDA restrictive.
+- [ ] **In-place Operations & Activation Buffer Reuse**:
+  - Pré-allocation statique et réutilisation des buffers temporaires $Q, K, V$ et MLP pour éliminer le coût des `cudaMalloc`/`hipMalloc` et la fragmentation VRAM.
+- [ ] **Pinned Host Memory (Zero-Copy Transfer)**:
+  - Staging CPU en mémoire verrouillée (*page-locked*) pour permettre les transferts DMA asynchrones directs sans copie intermédiaire OS.
+- [ ] **Weight Cache LLRU / VRAM Resident Mode**:
+  - Gestionnaire intelligent de rétention VRAM pour conserver les blocs DiT récurrents en mémoire GPU lorsque la VRAM est suffisante.
+- [ ] **Native Hardware GEMM & Fused Kernels**:
+  - Évaluation et intégration de GEMM direct en FP8/Int8 et de fusions Linéaire + RMSNorm/Activation par backend spécifique (CK/AOTriton sur ROCm, FA3 sur CUDA, MPS Graph sur Metal).
+

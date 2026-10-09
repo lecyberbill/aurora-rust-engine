@@ -315,11 +315,8 @@ impl KreaAttention {
             }
         }
 
-        // Scaled dot-product attention
-        let q_scaled = (q * self.scale)?;
-        let scores = q_scaled.matmul(&k.transpose(2, 3)?)?;
-        let weights = crate::device::softmax_last_dim(&scores)?;
-        let attn_out = weights.matmul(&v)?; // [B, H, L, D]
+        // Scaled dot-product attention (Universal Tiled SDPA: fast, low-memory on ROCm, Metal, CUDA & CPU)
+        let attn_out = crate::device::tiled_scaled_dot_product_attention(&q, &k, &v, self.scale, 512)?; // [B, H, L, D]
         let out_seq = attn_out.transpose(1, 2)?.contiguous()?.reshape((b, l, self.heads * self.head_dim))?;
         // Official SingleStreamAttention: Gating is strictly applied BEFORE wo
         let final_out = if let Some(ref g) = gate { (out_seq * g)? } else { out_seq };

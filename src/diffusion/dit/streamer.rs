@@ -1,9 +1,12 @@
-// [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Sequential Block Streamer for MMDiT Low-VRAM Inference
+// [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Asynchronous Double-Buffering Block Streamer for Low-VRAM MMDiT
+// Invariant: Pure multiplatform Rust (CUDA, ROCm, Metal, CPU) with zero data races and exact numerical determinism.
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 use std::collections::HashMap;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 use crate::canonical::{canonicalize, detect_family, CheckpointFamily};
 use crate::diffusion::dit::blocks::{DoubleStreamBlock, SingleStreamBlock};
 use crate::weights::{WeightsSource, apply_flux_deltas_to_tensor};
@@ -57,18 +60,8 @@ impl SequentialBlockStreamer {
         self.lora_deltas = None;
     }
 
-    /// Load and execute a single DoubleStreamBlock on GPU, then return result
-    pub fn execute_double_block(
-        &self,
-        block_idx: usize,
-        img: &Tensor,
-        txt: &Tensor,
-        temb: &Tensor,
-        img_freqs_cos: Option<&Tensor>,
-        img_freqs_sin: Option<&Tensor>,
-        txt_freqs_cos: Option<&Tensor>,
-        txt_freqs_sin: Option<&Tensor>,
-    ) -> Result<(Tensor, Tensor)> {
+    /// Load block tensors dictionary for DoubleStreamBlock at `block_idx`
+    pub fn load_double_block_tensors(&self, block_idx: usize) -> Result<HashMap<String, Tensor>> {
         let prefix = format!("double_blocks.{}.", block_idx);
         let prefix_alt = format!("model.diffusion_model.double_blocks.{}.", block_idx);
         let mut tensors = HashMap::new();
@@ -131,20 +124,11 @@ impl SequentialBlockStreamer {
             }
         }
 
-        let vb = VarBuilder::from_tensors(tensors, self.dtype, &self.device);
-        let block = DoubleStreamBlock::new(self.hidden_dim, self.num_heads, self.mlp_ratio, vb)?;
-        block.forward(img, txt, temb, img_freqs_cos, img_freqs_sin, txt_freqs_cos, txt_freqs_sin)
+        Ok(tensors)
     }
 
-    /// Load and execute a single SingleStreamBlock on GPU, then return result
-    pub fn execute_single_block(
-        &self,
-        block_idx: usize,
-        x: &Tensor,
-        temb: &Tensor,
-        freqs_cos: Option<&Tensor>,
-        freqs_sin: Option<&Tensor>,
-    ) -> Result<Tensor> {
+    /// Load block tensors dictionary for SingleStreamBlock at `block_idx`
+    pub fn load_single_block_tensors(&self, block_idx: usize) -> Result<HashMap<String, Tensor>> {
         let prefix = format!("single_blocks.{}.", block_idx);
         let prefix_alt = format!("model.diffusion_model.single_blocks.{}.", block_idx);
         let mut tensors = HashMap::new();
@@ -188,6 +172,37 @@ impl SequentialBlockStreamer {
             }
         }
 
+        Ok(tensors)
+    }
+
+    /// Load and execute a single DoubleStreamBlock on GPU, then return result
+    pub fn execute_double_block(
+        &self,
+        block_idx: usize,
+        img: &Tensor,
+        txt: &Tensor,
+        temb: &Tensor,
+        img_freqs_cos: Option<&Tensor>,
+        img_freqs_sin: Option<&Tensor>,
+        txt_freqs_cos: Option<&Tensor>,
+        txt_freqs_sin: Option<&Tensor>,
+    ) -> Result<(Tensor, Tensor)> {
+        let tensors = self.load_double_block_tensors(block_idx)?;
+        let vb = VarBuilder::from_tensors(tensors, self.dtype, &self.device);
+        let block = DoubleStreamBlock::new(self.hidden_dim, self.num_heads, self.mlp_ratio, vb)?;
+        block.forward(img, txt, temb, img_freqs_cos, img_freqs_sin, txt_freqs_cos, txt_freqs_sin)
+    }
+
+    /// Load and execute a single SingleStreamBlock on GPU, then return result
+    pub fn execute_single_block(
+        &self,
+        block_idx: usize,
+        x: &Tensor,
+        temb: &Tensor,
+        freqs_cos: Option<&Tensor>,
+        freqs_sin: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let tensors = self.load_single_block_tensors(block_idx)?;
         let vb = VarBuilder::from_tensors(tensors, self.dtype, &self.device);
         let block = SingleStreamBlock::new(self.hidden_dim, self.num_heads, self.mlp_ratio, vb)?;
         let out = block.forward(x, temb, freqs_cos, freqs_sin)?;
@@ -202,6 +217,154 @@ impl SequentialBlockStreamer {
             eprintln!("    [TRACE] single.{block_idx} in={:.4} out={:.4}", rms(x), rms(&out));
         }
         Ok(out)
+    }
+
+    /// Execute all DoubleStreamBlocks with Asynchronous Double-Buffering Prefetcher (Masquage I/O + déquantisation FP8).
+    pub fn execute_double_blocks_pipelined(
+        &self,
+        num_blocks: usize,
+        mut img: Tensor,
+        mut txt: Tensor,
+        temb: &Tensor,
+        img_freqs_cos: Option<&Tensor>,
+        img_freqs_sin: Option<&Tensor>,
+        txt_freqs_cos: Option<&Tensor>,
+        txt_freqs_sin: Option<&Tensor>,
+    ) -> Result<(Tensor, Tensor)> {
+        if num_blocks == 0 {
+            return Ok((img, txt));
+        }
+
+        // Spawn background prefetch thread with a bounded ring channel (depth 2 for smooth double-buffering)
+        let (tx, rx): (SyncSender<Result<(usize, HashMap<String, Tensor>)>>, Receiver<Result<(usize, HashMap<String, Tensor>)>>) = sync_channel(2);
+        let archive = self.archive.clone();
+        let device = self.device.clone();
+        let dtype = self.dtype;
+        let hidden_dim = self.hidden_dim;
+        let family = self.family;
+        let lora_deltas = self.lora_deltas.clone();
+
+        let prefetch_handle: JoinHandle<()> = thread::spawn(move || {
+            let dummy_streamer = SequentialBlockStreamer {
+                archive,
+                device,
+                dtype,
+                hidden_dim,
+                num_heads: 0,
+                mlp_ratio: 0,
+                family,
+                lora_deltas,
+            };
+
+            for idx in 0..num_blocks {
+                let res = dummy_streamer.load_double_block_tensors(idx).map(|t| (idx, t));
+                if tx.send(res).is_err() {
+                    break; // Main thread dropped receiver
+                }
+            }
+        });
+
+        for i in 0..num_blocks {
+            let (idx, tensors) = rx.recv()
+                .map_err(|e| candle_core::Error::Msg(format!("Double-buffering channel error: {e}")))?
+                .map_err(|e| candle_core::Error::Msg(format!("Prefetch error at double block {i}: {e}")))?;
+
+            assert_eq!(idx, i, "Prefetch pipeline block index mismatch");
+
+            let vb = VarBuilder::from_tensors(tensors, self.dtype, &self.device);
+            let block = DoubleStreamBlock::new(self.hidden_dim, self.num_heads, self.mlp_ratio, vb)?;
+            let (next_img, next_txt) = block.forward(
+                &img,
+                &txt,
+                temb,
+                img_freqs_cos,
+                img_freqs_sin,
+                txt_freqs_cos,
+                txt_freqs_sin,
+            )?;
+            img = next_img;
+            txt = next_txt;
+
+            if std::env::var("FLUX_TRACE").is_ok() {
+                let f = img.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap();
+                if let Ok(v) = f.to_vec1::<f32>() {
+                    let m = v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / v.len() as f64;
+                    eprintln!("    [TRACE] after pipelined double.{i} img_rms={:.5}", m.sqrt());
+                }
+            }
+        }
+
+        let _ = prefetch_handle.join();
+        Ok((img, txt))
+    }
+
+    /// Execute all SingleStreamBlocks with Asynchronous Double-Buffering Prefetcher (Masquage I/O + déquantisation FP8).
+    pub fn execute_single_blocks_pipelined(
+        &self,
+        num_blocks: usize,
+        mut unified: Tensor,
+        temb: &Tensor,
+        freqs_cos: Option<&Tensor>,
+        freqs_sin: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        if num_blocks == 0 {
+            return Ok(unified);
+        }
+
+        // Spawn background prefetch thread with a bounded ring channel (depth 2 for smooth double-buffering)
+        let (tx, rx): (SyncSender<Result<(usize, HashMap<String, Tensor>)>>, Receiver<Result<(usize, HashMap<String, Tensor>)>>) = sync_channel(2);
+        let archive = self.archive.clone();
+        let device = self.device.clone();
+        let dtype = self.dtype;
+        let hidden_dim = self.hidden_dim;
+        let family = self.family;
+        let lora_deltas = self.lora_deltas.clone();
+
+        let prefetch_handle: JoinHandle<()> = thread::spawn(move || {
+            let dummy_streamer = SequentialBlockStreamer {
+                archive,
+                device,
+                dtype,
+                hidden_dim,
+                num_heads: 0,
+                mlp_ratio: 0,
+                family,
+                lora_deltas,
+            };
+
+            for idx in 0..num_blocks {
+                let res = dummy_streamer.load_single_block_tensors(idx).map(|t| (idx, t));
+                if tx.send(res).is_err() {
+                    break; // Main thread dropped receiver
+                }
+            }
+        });
+
+        for i in 0..num_blocks {
+            let (idx, tensors) = rx.recv()
+                .map_err(|e| candle_core::Error::Msg(format!("Double-buffering channel error: {e}")))?
+                .map_err(|e| candle_core::Error::Msg(format!("Prefetch error at single block {i}: {e}")))?;
+
+            assert_eq!(idx, i, "Prefetch pipeline block index mismatch");
+
+            let vb = VarBuilder::from_tensors(tensors, self.dtype, &self.device);
+            let block = SingleStreamBlock::new(self.hidden_dim, self.num_heads, self.mlp_ratio, vb)?;
+            unified = block.forward(&unified, temb, freqs_cos, freqs_sin)?;
+
+            if std::env::var("FLUX_TRACE").is_ok() {
+                let rms = |t: &Tensor| -> f32 {
+                    let f = t.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap();
+                    if let Ok(v) = f.to_vec1::<f32>() {
+                        let m = v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / v.len() as f64;
+                        m.sqrt() as f32
+                    } else { 0.0 }
+                };
+                eprintln!("    [TRACE] pipelined single.{i} out_rms={:.4}", rms(&unified));
+            }
+        }
+
+        let _ = prefetch_handle.join();
+        Ok(unified)
     }
 }
 
@@ -222,5 +385,3 @@ fn fuse_split_qkv(tensors: &mut HashMap<String, Tensor>, base: &str) {
         tensors.remove(&format!("{base}@V.weight"));
     }
 }
-
-

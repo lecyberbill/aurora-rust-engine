@@ -407,13 +407,10 @@ impl DoubleStreamBlock {
         ctx.transpose(1, 2)?.contiguous()?.to_dtype(orig_dtype)?.reshape((b, seq, h, d))
     }
 
-    /// Scaled dot-product attention with an optional FlashAttention-2 fast path (F16/BF16 on CUDA).
+    /// Scaled dot-product attention with FlashAttention-2 (CUDA) or Universal Tiled SDPA (CUDA/ROCm/Metal/CPU).
     ///
-    /// **Manette**: `FLUX_FLASH_ATTN` (default `0`).
-    /// - `0` → always `standard_sdpa` (F32 fallback, model-safe, slower).
-    /// - `1` → use `candle_flash_attn` when available, else fall back to `standard_sdpa`.
-    ///
-    /// Flash runs in the input dtype and is only taken on CUDA. Any error safely falls back.
+    /// - If `FLUX_FLASH_ATTN=1` and running CUDA F16/BF16: uses `candle_flash_attn` fast path.
+    /// - Otherwise: uses `tiled_scaled_dot_product_attention` for fast execution without O(N^2) VRAM allocation.
     fn sdpa(&self, q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
         #[cfg(feature = "flash-attn")]
         {
@@ -425,7 +422,12 @@ impl DoubleStreamBlock {
                 }
             }
         }
-        self.standard_sdpa(q, k, v)
+        // Universal Tiled SDPA: fast, low-memory, zero O(N^2) memory footprint on ROCm, Metal, CUDA & CPU
+        let q_trans = q.transpose(1, 2)?.contiguous()?;
+        let k_trans = k.transpose(1, 2)?.contiguous()?;
+        let v_trans = v.transpose(1, 2)?.contiguous()?;
+        let out = crate::device::tiled_scaled_dot_product_attention(&q_trans, &k_trans, &v_trans, self.scale, 512)?;
+        out.transpose(1, 2)?.contiguous()
     }
 }
 
@@ -571,13 +573,10 @@ impl SingleStreamBlock {
         ctx.transpose(1, 2)?.contiguous()?.to_dtype(orig_dtype)?.reshape((b, seq, h, d))
     }
 
-    /// Scaled dot-product attention with an optional FlashAttention-2 fast path (F16/BF16 on CUDA).
+    /// Scaled dot-product attention with FlashAttention-2 (CUDA) or Universal Tiled SDPA (CUDA/ROCm/Metal/CPU).
     ///
-    /// **Manette**: `FLUX_FLASH_ATTN` (default `0`).
-    /// - `0` → always `standard_sdpa` (F32 fallback, model-safe, slower).
-    /// - `1` → use `candle_flash_attn` when available, else fall back to `standard_sdpa`.
-    ///
-    /// Flash runs in the input dtype and is only taken on CUDA. Any error safely falls back.
+    /// - If `FLUX_FLASH_ATTN=1` and running CUDA F16/BF16: uses `candle_flash_attn` fast path.
+    /// - Otherwise: uses `tiled_scaled_dot_product_attention` for fast execution without O(N^2) VRAM allocation.
     fn sdpa(&self, q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
         #[cfg(feature = "flash-attn")]
         {
@@ -589,6 +588,12 @@ impl SingleStreamBlock {
                 }
             }
         }
-        self.standard_sdpa(q, k, v)
+        // Universal Tiled SDPA: fast, low-memory, zero O(N^2) memory footprint on ROCm, Metal, CUDA & CPU
+        let q_trans = q.transpose(1, 2)?.contiguous()?;
+        let k_trans = k.transpose(1, 2)?.contiguous()?;
+        let v_trans = v.transpose(1, 2)?.contiguous()?;
+        let out = crate::device::tiled_scaled_dot_product_attention(&q_trans, &k_trans, &v_trans, self.scale, 512)?;
+        out.transpose(1, 2)?.contiguous()
     }
 }
+

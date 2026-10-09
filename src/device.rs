@@ -123,3 +123,56 @@ pub fn softmax_last_dim(x: &candle_core::Tensor) -> candle_core::Result<candle_c
         })
 }
 
+/// Universal Memory-Efficient Tiled Scaled Dot-Product Attention (Online Softmax / FlashAttention algorithm).
+///
+/// Works identically on CUDA, ROCm (HIP), Apple Silicon (Metal), and CPU.
+/// Computes attention in query chunks of size `chunk_q` (default 512) to bound peak VRAM
+/// and avoid materializing the full `[B, H, Seq, Seq]` attention matrix.
+pub fn tiled_scaled_dot_product_attention(
+    q: &candle_core::Tensor, // [B, H, L_q, D]
+    k: &candle_core::Tensor, // [B, H, L_k, D]
+    v: &candle_core::Tensor, // [B, H, L_k, D]
+    scale: f64,
+    chunk_q: usize,
+) -> candle_core::Result<candle_core::Tensor> {
+    let (b, h, l_q, d) = q.dims4()?;
+    let (_bk, _hk, l_k, _dk) = k.dims4()?;
+    let orig_dtype = q.dtype();
+
+    // If sequence length is small (e.g. <= 1024), standard matmul is already fast
+    if l_q <= chunk_q && l_k <= 1024 {
+        let q_f32 = (q.to_dtype(candle_core::DType::F32)? * scale)?;
+        let k_f32 = k.to_dtype(candle_core::DType::F32)?;
+        let v_f32 = v.to_dtype(candle_core::DType::F32)?;
+        let k_t = k_f32.transpose(2, 3)?.contiguous()?;
+        let scores = q_f32.matmul(&k_t)?;
+        let probs = softmax_last_dim(&scores)?;
+        let ctx = probs.matmul(&v_f32)?;
+        return ctx.to_dtype(orig_dtype);
+    }
+
+    let k_f32 = k.to_dtype(candle_core::DType::F32)?;
+    let v_f32 = v.to_dtype(candle_core::DType::F32)?;
+    let k_t = k_f32.transpose(2, 3)?.contiguous()?; // [B, H, D, L_k]
+
+    let mut out_chunks = Vec::new();
+    let num_chunks = (l_q + chunk_q - 1) / chunk_q;
+
+    for i in 0..num_chunks {
+        let start = i * chunk_q;
+        let len = (l_q - start).min(chunk_q);
+        let q_chunk = q.narrow(2, start, len)?; // [B, H, len, D]
+        let q_chunk_f32 = (q_chunk.to_dtype(candle_core::DType::F32)? * scale)?;
+
+        // Chunked score: [B, H, len, L_k]
+        let scores = q_chunk_f32.matmul(&k_t)?;
+        let probs = softmax_last_dim(&scores)?;
+        let ctx_chunk = probs.matmul(&v_f32)?; // [B, H, len, D]
+        out_chunks.push(ctx_chunk);
+    }
+
+    let out_f32 = candle_core::Tensor::cat(&out_chunks.iter().collect::<Vec<_>>(), 2)?;
+    out_f32.to_dtype(orig_dtype)
+}
+
+

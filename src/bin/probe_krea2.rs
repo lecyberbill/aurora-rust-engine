@@ -139,9 +139,13 @@ fn main() -> anyhow::Result<()> {
     // ts = exp(mu) / (exp(mu) + (1/ts_lin - 1))
     let num_steps: usize = std::env::var("KREA_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
     let mu: f64 = std::env::var("KREA_MU").ok().and_then(|s| s.parse().ok()).unwrap_or(1.15);
-    let guidance: f64 = std::env::var("KREA_GUIDANCE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let cfg_scale: f64 = std::env::var("KREA_CFG")
+        .or_else(|_| std::env::var("KREA_GUIDANCE"))
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3.5);
 
-    println!("🎛️ Inference Mode: Krea 2 Turbo (Steps={}, mu={:.4}, Guidance={:.2})", num_steps, mu, guidance);
+    println!("🎛️ Inference Mode: Krea 2 Turbo (Steps={}, mu={:.4}, CFG Scale={:.2})", num_steps, mu, cfg_scale);
 
     let mut ts_vec = Vec::with_capacity(num_steps + 1);
     let exp_mu = mu.exp();
@@ -191,11 +195,11 @@ fn main() -> anyhow::Result<()> {
         println!("\n🔄 Running Step {}/{} (t_cur={:.4} -> t_next={:.4}, dt={:.4}):", step_idx + 1, num_steps, t_cur, t_next, dt);
         let t0 = Instant::now();
         
-        let pred_v = if guidance > 0.0 {
+        let pred_v = if (cfg_scale - 1.0).abs() > 1e-4 {
             let v_cond = transformer.forward(&latents, &t_tensor, &context)?;
             let v_uncond = transformer.forward(&latents, &t_tensor, &uncond_context)?;
             let diff = (&v_cond - &v_uncond)?;
-            (&v_cond + (diff * guidance)?)?
+            (&v_uncond + (diff * cfg_scale)?)?
         } else {
             transformer.forward(&latents, &t_tensor, &context)?
         };
