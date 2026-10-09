@@ -295,6 +295,7 @@ impl QwenImageVaeDecoder {
         Ok(Self {
             conv_in,
             mid_res1,
+            mid_attn,
             mid_res2,
             up_blocks_0,
             resample_1,
