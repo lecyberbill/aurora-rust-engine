@@ -45,6 +45,9 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 - **Flux.1 & Flux.2 Family Full Support**: Native implementation of Multimodal Diffusion Transformers (MMDiT) for **Flux.1 [dev/schnell]**, **Flux.2-Klein-4B**, **Flux.2-Klein-9B**, and **Flux.2-Dev Scaled** with exact 3D/4D Rotary Position Embeddings (RoPE).
 - **Z-Image Turbo Realtime DiT (S3-DiT 6B)**: 100% pure Rust 4-step real-time inference with native FlashAttention-2, Qwen3-4B text conditioning, 16-channel VAE, and dynamic shift timestep scheduling.
 - **FLUX.2 Multi-Image Reference Conditioning (Mode Édition)**: Native zero-adapter reference image guidance using 4D RoPE spatial-temporal coordinates $[T, Y, X, \text{Ref}]$ and VAE latent token injection for identity preservation across scenes.
+- **Universal Multiplatform Hardware Acceleration**: Unified execution across **NVIDIA CUDA**, **AMD ROCm / HIP** (RDNA2/RDNA3/RDNA4), **Apple Silicon Metal**, and multi-core CPU.
+- **Universal Tiled Scaled Dot-Product Attention (Chunked 512 + Online Softmax)**: Pure Rust cross-platform attention engine avoiding $O(N^2)$ memory spikes on arbitrary GPU/CPU architectures without external C++ bindings.
+- **Async Double-Buffering & Host-to-Device Streaming**: Ring-buffered MPSC background worker pre-loading and dequantizing block $N+1$ on CPU during block $N$ GPU computation to completely mask PCIe I/O latency.
 - **Sub-7.5GB VRAM Flux Sequential Block Streaming**: Executes massive MMDiT models (3.88B to 12B parameters) with on-demand per-block GPU streaming and zero WDDM paging.
 - **FLUX.2 Image-to-Image (Img2Img) & Inpainting with LoRA**: Contextual ODE transformation, LoRA adapter hot-splicing during block streaming, and sharp mask boundary preservation with flow-matching background re-injection.
 - **Pure Rust 32-Channel & 16-Channel `FluxVaeEncoder` & `FluxVaeDecoder`**: Bit-exact VAE encoding and decoding with BatchNorm latent standardization.

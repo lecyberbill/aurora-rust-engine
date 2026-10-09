@@ -654,7 +654,7 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 
 **Goal.** Maximiser le débit d'inférence, minimiser l'empreinte VRAM et éliminer les temps morts I/O sur l'ensemble des architectures matérielles supportées (NVIDIA CUDA, AMD ROCm / HIP, Apple Silicon Metal, CPU multi-cœurs) :
 
-- [ ] **Async Double-Buffering & Host-to-Device Prefetcher (`src/diffusion/dit/streamer.rs`)**:
+- [x] **Async Double-Buffering & Host-to-Device Prefetcher (`src/diffusion/dit/streamer.rs`)**:
   - Thread worker d'arrière-plan avec ring-buffer MPSC pour charger, désérialiser et déquantifier le bloc $N+1$ en mémoire d'hôte pendant l'exécution GPU du bloc $N$.
   - Masquage complet de la latence I/O et des transferts PCIe.
 - [x] **Universal Tiled Scaled Dot-Product Attention (`src/device.rs`, `src/diffusion/dit/blocks.rs`)**:
