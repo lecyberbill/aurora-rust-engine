@@ -1,17 +1,18 @@
-// [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Asynchronous Double-Buffering Block Streamer for Low-VRAM MMDiT
-// Invariant: Pure multiplatform Rust (CUDA, ROCm, Metal, CPU) with zero data races and exact numerical determinism.
+// [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: High-Performance Multiplatform Block Streamer with Double-Buffering & VRAM Weight Caching
+// Invariant: Pure multiplatform Rust (CUDA, ROCm, Metal, CPU) with zero data races, bounded VRAM and exact numerical determinism.
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 use std::collections::HashMap;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use crate::canonical::{canonicalize, detect_family, CheckpointFamily};
 use crate::diffusion::dit::blocks::{DoubleStreamBlock, SingleStreamBlock};
 use crate::weights::{WeightsSource, apply_flux_deltas_to_tensor};
 
-/// Stream-loads individual MMDiT blocks into GPU VRAM on-demand and drops them after computation.
+/// Stream-loads individual MMDiT blocks into GPU VRAM on-demand, with optional LRU/VRAM caching
+/// and asynchronous double-buffering.
 /// Works with any [`WeightsSource`] (safetensors single/multi-shard, or GGUF).
 pub struct SequentialBlockStreamer {
     archive: Arc<dyn WeightsSource>,
@@ -25,6 +26,11 @@ pub struct SequentialBlockStreamer {
     /// Optional LoRA deltas (BFL-style names, possibly `@Q`/`@K`/`@V`-tagged) to splice into each
     /// block's weights as it is streamed in.
     lora_deltas: Option<Arc<HashMap<String, Tensor>>>,
+    /// VRAM Block Weight Cache for zero-I/O repeat steps when VRAM permits
+    double_blocks_cache: Arc<Mutex<HashMap<usize, HashMap<String, Tensor>>>>,
+    single_blocks_cache: Arc<Mutex<HashMap<usize, HashMap<String, Tensor>>>>,
+    max_cached_double_blocks: usize,
+    max_cached_single_blocks: usize,
 }
 
 impl SequentialBlockStreamer {
@@ -46,22 +52,59 @@ impl SequentialBlockStreamer {
             mlp_ratio,
             family,
             lora_deltas: None,
+            double_blocks_cache: Arc::new(Mutex::new(HashMap::new())),
+            single_blocks_cache: Arc::new(Mutex::new(HashMap::new())),
+            max_cached_double_blocks: 0,
+            max_cached_single_blocks: 0,
+        }
+    }
+
+    /// Enable VRAM Weight Caching (keeps up to `max_double` double blocks and `max_single` single blocks resident in VRAM)
+    pub fn with_vram_cache(mut self, max_double: usize, max_single: usize) -> Self {
+        self.max_cached_double_blocks = max_double;
+        self.max_cached_single_blocks = max_single;
+        self
+    }
+
+    /// Set VRAM cache capacities dynamically
+    pub fn set_cache_capacities(&mut self, max_double: usize, max_single: usize) {
+        self.max_cached_double_blocks = max_double;
+        self.max_cached_single_blocks = max_single;
+    }
+
+    /// Clear all resident cached blocks
+    pub fn clear_cache(&self) {
+        if let Ok(mut c) = self.double_blocks_cache.lock() {
+            c.clear();
+        }
+        if let Ok(mut c) = self.single_blocks_cache.lock() {
+            c.clear();
         }
     }
 
     /// Attach LoRA deltas (BFL-style names, possibly `@Q`/`@K`/`@V`-tagged) to splice into each
     /// streamed block's weights.
     pub fn set_lora_deltas(&mut self, lora_deltas: HashMap<String, Tensor>) {
+        self.clear_cache();
         self.lora_deltas = Some(Arc::new(lora_deltas));
     }
 
     /// Clear any attached LoRA deltas.
     pub fn clear_lora_deltas(&mut self) {
+        self.clear_cache();
         self.lora_deltas = None;
     }
 
-    /// Load block tensors dictionary for DoubleStreamBlock at `block_idx`
+    /// Load block tensors dictionary for DoubleStreamBlock at `block_idx` (with VRAM Cache lookup)
     pub fn load_double_block_tensors(&self, block_idx: usize) -> Result<HashMap<String, Tensor>> {
+        if self.max_cached_double_blocks > 0 {
+            if let Ok(cache) = self.double_blocks_cache.lock() {
+                if let Some(cached_tensors) = cache.get(&block_idx) {
+                    return Ok(cached_tensors.clone());
+                }
+            }
+        }
+
         let prefix = format!("double_blocks.{}.", block_idx);
         let prefix_alt = format!("model.diffusion_model.double_blocks.{}.", block_idx);
         let mut tensors = HashMap::new();
@@ -124,11 +167,25 @@ impl SequentialBlockStreamer {
             }
         }
 
+        if self.max_cached_double_blocks > 0 && block_idx < self.max_cached_double_blocks {
+            if let Ok(mut cache) = self.double_blocks_cache.lock() {
+                cache.insert(block_idx, tensors.clone());
+            }
+        }
+
         Ok(tensors)
     }
 
-    /// Load block tensors dictionary for SingleStreamBlock at `block_idx`
+    /// Load block tensors dictionary for SingleStreamBlock at `block_idx` (with VRAM Cache lookup)
     pub fn load_single_block_tensors(&self, block_idx: usize) -> Result<HashMap<String, Tensor>> {
+        if self.max_cached_single_blocks > 0 {
+            if let Ok(cache) = self.single_blocks_cache.lock() {
+                if let Some(cached_tensors) = cache.get(&block_idx) {
+                    return Ok(cached_tensors.clone());
+                }
+            }
+        }
+
         let prefix = format!("single_blocks.{}.", block_idx);
         let prefix_alt = format!("model.diffusion_model.single_blocks.{}.", block_idx);
         let mut tensors = HashMap::new();
@@ -169,6 +226,12 @@ impl SequentialBlockStreamer {
                     t
                 };
                 tensors.insert("modulation.lin.weight".to_string(), t_slice);
+            }
+        }
+
+        if self.max_cached_single_blocks > 0 && block_idx < self.max_cached_single_blocks {
+            if let Ok(mut cache) = self.single_blocks_cache.lock() {
+                cache.insert(block_idx, tensors.clone());
             }
         }
 
@@ -235,6 +298,32 @@ impl SequentialBlockStreamer {
             return Ok((img, txt));
         }
 
+        // Fast path: if all blocks are already cached in VRAM, execute sequentially with zero channel overhead
+        if self.max_cached_double_blocks >= num_blocks {
+            let all_cached = {
+                if let Ok(c) = self.double_blocks_cache.lock() {
+                    (0..num_blocks).all(|i| c.contains_key(&i))
+                } else { false }
+            };
+            if all_cached {
+                for i in 0..num_blocks {
+                    let (next_img, next_txt) = self.execute_double_block(
+                        i,
+                        &img,
+                        &txt,
+                        temb,
+                        img_freqs_cos,
+                        img_freqs_sin,
+                        txt_freqs_cos,
+                        txt_freqs_sin,
+                    )?;
+                    img = next_img;
+                    txt = next_txt;
+                }
+                return Ok((img, txt));
+            }
+        }
+
         // Spawn background prefetch thread with a bounded ring channel (depth 2 for smooth double-buffering)
         let (tx, rx): (SyncSender<Result<(usize, HashMap<String, Tensor>)>>, Receiver<Result<(usize, HashMap<String, Tensor>)>>) = sync_channel(2);
         let archive = self.archive.clone();
@@ -243,6 +332,8 @@ impl SequentialBlockStreamer {
         let hidden_dim = self.hidden_dim;
         let family = self.family;
         let lora_deltas = self.lora_deltas.clone();
+        let double_blocks_cache = self.double_blocks_cache.clone();
+        let max_cached = self.max_cached_double_blocks;
 
         let prefetch_handle: JoinHandle<()> = thread::spawn(move || {
             let dummy_streamer = SequentialBlockStreamer {
@@ -254,6 +345,10 @@ impl SequentialBlockStreamer {
                 mlp_ratio: 0,
                 family,
                 lora_deltas,
+                double_blocks_cache,
+                single_blocks_cache: Arc::new(Mutex::new(HashMap::new())),
+                max_cached_double_blocks: max_cached,
+                max_cached_single_blocks: 0,
             };
 
             for idx in 0..num_blocks {
@@ -311,6 +406,21 @@ impl SequentialBlockStreamer {
             return Ok(unified);
         }
 
+        // Fast path: if all blocks are already cached in VRAM, execute sequentially with zero channel overhead
+        if self.max_cached_single_blocks >= num_blocks {
+            let all_cached = {
+                if let Ok(c) = self.single_blocks_cache.lock() {
+                    (0..num_blocks).all(|i| c.contains_key(&i))
+                } else { false }
+            };
+            if all_cached {
+                for i in 0..num_blocks {
+                    unified = self.execute_single_block(i, &unified, temb, freqs_cos, freqs_sin)?;
+                }
+                return Ok(unified);
+            }
+        }
+
         // Spawn background prefetch thread with a bounded ring channel (depth 2 for smooth double-buffering)
         let (tx, rx): (SyncSender<Result<(usize, HashMap<String, Tensor>)>>, Receiver<Result<(usize, HashMap<String, Tensor>)>>) = sync_channel(2);
         let archive = self.archive.clone();
@@ -319,6 +429,8 @@ impl SequentialBlockStreamer {
         let hidden_dim = self.hidden_dim;
         let family = self.family;
         let lora_deltas = self.lora_deltas.clone();
+        let single_blocks_cache = self.single_blocks_cache.clone();
+        let max_cached = self.max_cached_single_blocks;
 
         let prefetch_handle: JoinHandle<()> = thread::spawn(move || {
             let dummy_streamer = SequentialBlockStreamer {
@@ -330,6 +442,10 @@ impl SequentialBlockStreamer {
                 mlp_ratio: 0,
                 family,
                 lora_deltas,
+                double_blocks_cache: Arc::new(Mutex::new(HashMap::new())),
+                single_blocks_cache,
+                max_cached_double_blocks: 0,
+                max_cached_single_blocks: max_cached,
             };
 
             for idx in 0..num_blocks {
