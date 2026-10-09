@@ -117,28 +117,24 @@ impl CausalLMConfig {
             hidden_size * 4
         };
 
+        // Sniff head_dim from attn_q_norm or standard 128
+        let head_dim = keys.iter().find_map(|k| {
+            if k.contains("attn_q_norm.weight") || k.contains("self_attn.q_norm.weight") {
+                src.raw_info(k).and_then(|(_, d)| d.first().copied())
+            } else {
+                None
+            }
+        }).unwrap_or(128);
+
         // Sniff num_heads & num_kv_heads
-        let (num_heads, num_kv_heads, head_dim) = if let Some((_, dims)) = src.raw_info("model.layers.0.self_attn.q_proj.weight") {
-            let q_out = dims.first().copied().unwrap_or(hidden_size);
-            let k_out = src.raw_info("model.layers.0.self_attn.k_proj.weight").map(|(_, d)| d[0]).unwrap_or(q_out);
-            let h_dim = 128;
-            (q_out / h_dim, k_out / h_dim, h_dim)
-        } else if let Some((_, dims)) = src.raw_info("layers.0.self_attn.q_proj.weight") {
-            let q_out = dims.first().copied().unwrap_or(hidden_size);
-            let k_out = src.raw_info("layers.0.self_attn.k_proj.weight").map(|(_, d)| d[0]).unwrap_or(q_out);
-            let h_dim = 128;
-            (q_out / h_dim, k_out / h_dim, h_dim)
-        } else if let Some((_, dims)) = src.raw_info("blk.0.attn_q.weight") {
-            let q_out = dims.first().copied().unwrap_or(hidden_size);
-            let k_out = src.raw_info("blk.0.attn_k.weight").map(|(_, d)| d[0]).unwrap_or(q_out);
-            let h_dim = 128;
-            (q_out / h_dim, k_out / h_dim, h_dim)
+        let (num_heads, num_kv_heads, head_dim) = if let Some(q_key) = keys.iter().find(|k| k.ends_with("self_attn.q_proj.weight") || k.ends_with("attn_q.weight")) {
+            let q_out = src.raw_info(q_key).and_then(|(_, d)| d.first().copied()).unwrap_or(hidden_size);
+            let k_key = q_key.replace(".q_proj.", ".k_proj.").replace(".attn_q.", ".attn_k.");
+            let k_out = src.raw_info(&k_key).and_then(|(_, d)| d.first().copied()).unwrap_or(q_out);
+            (q_out / head_dim, k_out / head_dim, head_dim)
         } else if let Some((_, dims)) = src.raw_info("blk.0.attn_qkv.weight") {
             let total_out = dims.first().copied().unwrap_or(hidden_size);
-            // In Qwen GQA models, total_out = (num_heads + 2 * num_kv_heads) * head_dim.
-            // For standard 28-32 heads with 4-8 kv_heads:
-            let h_dim = 128;
-            let total_heads = total_out / h_dim;
+            let total_heads = total_out / head_dim;
             let (num_h, num_kv) = if total_heads == 36 {
                 (28, 4) // Qwen 3B/7B GQA
             } else if total_heads == 20 {
@@ -148,9 +144,9 @@ impl CausalLMConfig {
             } else {
                 (total_heads.saturating_sub(4), 2)
             };
-            (num_h, num_kv, h_dim)
+            (num_h, num_kv, head_dim)
         } else {
-            (32, 8, 128)
+            (32, 8, head_dim)
         };
 
         let is_gemma = keys.iter().any(|k| k.contains("gemma") || k.contains("pre_feedforward_layernorm"));
