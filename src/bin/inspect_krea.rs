@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
                 let keys: Vec<String> = archive.keys().map(|k| k.to_string()).collect();
                 println!("   Total keys: {}", keys.len());
                 for k in &keys {
-                    if k.starts_with("blocks.0.") && !k.ends_with(".weight_scale") {
+                    if !k.starts_with("blocks.") && !k.ends_with(".weight_scale") {
                         if let Ok(t) = archive.get_tensor(k, &Device::Cpu, DType::F32) {
                             println!("   • {:<50} {:?}", k, t.dims());
                         } else {
