@@ -1468,11 +1468,44 @@ flux_pipeline.enable_flash_attn();
 | Total 4-step render | ~21 s | **~11.7 s** | **~14.5 s** |
 | Peak VRAM | ~6.8 GB | ~6.8 GB | **~6.8 GB ($0\text{ MB } O(N^2)$ allocation)** |
 
-### Cross-Platform Acceleration (CUDA, AMD ROCm / HIP, Metal, CPU)
+### Cross-Platform Acceleration & Developer Performance Levers
 
-Aurora automatically applies zero-dependency performance optimizations across non-CUDA platforms:
-- **Universal Tiled SDPA (`src/device.rs`)**: Computes multi-head attention in fixed tiles of 512 tokens using online softmax normalisation, eliminating the $O(N^2)$ memory footprint on AMD Radeon GPUs (ROCm), Apple Silicon (Metal), and multi-core CPUs.
-- **Async Double-Buffering Prefetcher (`src/diffusion/dit/streamer.rs`)**: Leverages background ring-buffered workers to load, parse, and dequantize FP8 weights for Block $N+1$ on the host CPU concurrently while Block $N$ is executing on the GPU, completely hiding PCIe transfer latency.
+Aurora exposes explicit, fine-grained performance knobs across all hardware backends (NVIDIA CUDA, AMD ROCm / HIP, Apple Silicon Metal, CPU):
+
+#### 1. VRAM Resident Weight Cache (`with_vram_cache` / `set_cache_capacities`)
+Controls the trade-off between peak VRAM and generation throughput by keeping frequently used DiT blocks resident in GPU memory:
+```rust
+// Mode Ultra-Low VRAM (< 7.5 GB): 0 cached blocks, purely stream-loaded on demand
+streamer.set_cache_capacities(0, 0);
+
+// Mode Hybride (12 GB - 16 GB): cache all single-stream blocks in VRAM
+streamer.set_cache_capacities(0, 24);
+
+// Mode Full Resident (> 24 GB / Server): keep all blocks in VRAM for instant repeat steps
+streamer.set_cache_capacities(8, 48);
+```
+
+#### 2. Attention Engine Dispatcher
+Select the optimal attention kernel based on target platform and memory constraints:
+```rust
+// 1. Fused CUDA FlashAttention-2 (Fastest on NVIDIA Ampere/Ada/Hopper)
+pipeline.enable_flash_attn();
+
+// 2. Universal Tiled SDPA (Zero O(N^2) memory spike, cross-platform on ROCm/Metal/CPU)
+pipeline.enable_tiled_sdpa(/* chunk_q = */ 512);
+
+// 3. Standard F32 SDPA (Deterministic reference & debugging)
+pipeline.disable_flash_attn();
+```
+
+#### 3. Parallel Batched CFG Forward ($B=2$)
+When Classifier-Free Guidance is enabled (`guidance_scale > 1.0`), Aurora automatically batches conditional and unconditional passes into a single $B=2$ forward pass, reducing GPU kernel launches by $2\times$ and maximizing hardware compute unit saturation.
+
+#### 4. Async Double-Buffering Prefetcher
+The `SequentialBlockStreamer` spawns a background ring-buffered thread (`std::sync::mpsc::sync_channel(2)`) that reads, deserializes, and dequantizes FP8 weights for Block $N+1$ concurrently on the host CPU while the GPU executes Block $N$, completely masking PCIe bus latency.
+
+#### 5. Direct BF16/F16 Static LUT Dequantization
+FP8 ($E4M3FN$ & $E5M2$) weights are transformed directly to target datatypes (`bf16` or `f16`) via static 256-entry lookup tables with Rayon parallel iterators, bypassing all scalar F32 conversion overhead.
 
 ---
 
