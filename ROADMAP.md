@@ -660,12 +660,14 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 - [x] **Universal Tiled Scaled Dot-Product Attention (`src/device.rs`, `src/diffusion/dit/blocks.rs`)**:
   - Algorithme d'attention par tuiles (chunking de 512 tokens + online softmax) évitant l'allocation quadratique $O(N^2)$.
   - Support natif garanti et vérifié sur ROCm, CUDA, Metal et CPU sans dépendance C++/CUDA restrictive.
-- [ ] **In-place Operations & Activation Buffer Reuse**:
+- [x] **In-place Operations & Activation Buffer Reuse**:
   - Pré-allocation statique et réutilisation des buffers temporaires $Q, K, V$ et MLP pour éliminer le coût des `cudaMalloc`/`hipMalloc` et la fragmentation VRAM.
+- [x] **Parallel Batched CFG ($B=2$) Forward (`src/pipelines/flux.rs`)**:
+  - Évaluation conjointe conditionnée + inconditionnelle en une seule passe DiT au lieu de 2 passes séquentielles ($2\times$ moins d'appels noyau et saturation GPU).
 - [ ] **Pinned Host Memory (Zero-Copy Transfer)**:
   - Staging CPU en mémoire verrouillée (*page-locked*) pour permettre les transferts DMA asynchrones directs sans copie intermédiaire OS.
-- [ ] **Weight Cache LLRU / VRAM Resident Mode**:
-  - Gestionnaire intelligent de rétention VRAM pour conserver les blocs DiT récurrents en mémoire GPU lorsque la VRAM est suffisante.
+- [x] **Weight Cache LLRU / VRAM Resident Mode (`src/diffusion/dit/streamer.rs`)**:
+  - Gestionnaire de rétention VRAM avec fast-path d'exécution directe sans latence de threads lorsque la VRAM est suffisante.
 - [ ] **Native Hardware GEMM & Fused Kernels**:
   - Évaluation et intégration de GEMM direct en FP8/Int8 et de fusions Linéaire + RMSNorm/Activation par backend spécifique (CK/AOTriton sur ROCm, FA3 sur CUDA, MPS Graph sur Metal).
 
