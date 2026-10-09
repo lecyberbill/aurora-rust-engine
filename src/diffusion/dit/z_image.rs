@@ -1021,13 +1021,14 @@ impl ZImageTransformer {
             }
         }
 
-        // 7. Extract image token slice strictly BEFORE last layer modulation
-        let img_tokens_out = combined.narrow(1, txt_len, img_tokens)?;
+        // 7. Last Layer modulation & linear projection on combined sequence (Text + Image tokens)
+        // Official DiffSynth / Krea 2 standard:
+        // final = self.last(combined, t)
+        // output = final[:, txt_len : txt_len + img_tokens, :]
+        let final_combined = self.last.forward(&combined, &t)?;
+        let out = final_combined.narrow(1, txt_len, img_tokens)?;
 
-        // 8. Last Layer modulation & linear projection on image tokens
-        let out = self.last.forward(&img_tokens_out, &t)?;
-
-        // 9. Exact Krea 2 Unpatchify:
+        // 8. Exact Krea 2 Unpatchify:
         // rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=p_h, w=p_w, ph=2, pw=2, c=16)
         let out_latents = out
             .reshape((b, p_h, p_w, c, 2, 2))?
