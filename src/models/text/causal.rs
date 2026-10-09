@@ -345,14 +345,7 @@ impl CausalLMPipeline {
         dtype: DType,
     ) -> Self {
         let kv_cache = KVCache::new(config.num_hidden_layers);
-        let mut weights_cache = std::collections::HashMap::new();
-
-        // Preload all weights onto GPU to avoid dequantizing from disk on every single token step!
-        for key in weights.keys() {
-            if let Ok(t) = weights.get_tensor(&key, &device, dtype) {
-                weights_cache.insert(key, t);
-            }
-        }
+        let weights_cache = std::collections::HashMap::new();
 
         Self {
             config,
