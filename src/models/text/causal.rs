@@ -658,7 +658,14 @@ impl CausalLMPipeline {
             (out, x_res)
         } else {
             // Standard Full Multi-Head / Grouped-Query Attention
-            let (q, k, v) = if let Ok(qkv_w) = self.get_layer_weight(layer_idx, &["self_attn.qkv_proj.weight", "attn_qkv.weight"]) {
+            let (q, k, v) = if let Ok(q_w) = self.get_layer_weight(layer_idx, &["self_attn.q_proj.weight", "attn_q.weight"]) {
+                let k_w = self.get_layer_weight(layer_idx, &["self_attn.k_proj.weight", "attn_k.weight"])?;
+                let v_w = self.get_layer_weight(layer_idx, &["self_attn.v_proj.weight", "attn_v.weight"])?;
+                let q = Self::matmul_linear(&normed_x, &q_w)?;
+                let k = Self::matmul_linear(&normed_x, &k_w)?;
+                let v = Self::matmul_linear(&normed_x, &v_w)?;
+                (q, k, v)
+            } else if let Ok(qkv_w) = self.get_layer_weight(layer_idx, &["self_attn.qkv_proj.weight", "attn_qkv.weight"]) {
                 let qkv = Self::matmul_linear(&normed_x, &qkv_w)?;
                 let q_dim = self.config.num_attention_heads * self.config.head_dim;
                 let kv_dim = self.config.num_key_value_heads * self.config.head_dim;
@@ -667,13 +674,7 @@ impl CausalLMPipeline {
                 let v = qkv.narrow(candle_core::D::Minus1, q_dim + kv_dim, kv_dim)?;
                 (q, k, v)
             } else {
-                let q_w = self.get_layer_weight(layer_idx, &["self_attn.q_proj.weight", "attn_q.weight"])?;
-                let k_w = self.get_layer_weight(layer_idx, &["self_attn.k_proj.weight", "attn_k.weight"])?;
-                let v_w = self.get_layer_weight(layer_idx, &["self_attn.v_proj.weight", "attn_v.weight"])?;
-                let q = Self::matmul_linear(&normed_x, &q_w)?;
-                let k = Self::matmul_linear(&normed_x, &k_w)?;
-                let v = Self::matmul_linear(&normed_x, &v_w)?;
-                (q, k, v)
+                return Err(LuminaError::MissingWeight(format!("Attention weights for layer {layer_idx} not found")));
             };
             let o_w = self.get_layer_weight(layer_idx, &["self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
 
