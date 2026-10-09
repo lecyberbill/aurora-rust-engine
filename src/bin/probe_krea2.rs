@@ -137,11 +137,11 @@ fn main() -> anyhow::Result<()> {
     // ts_lin = linspace(1, 0, steps+1)
     // For Raw 1024x1024 (N_img = 4096): mu = 0.90625
     // ts = exp(mu) / (exp(mu) + (1/ts_lin - 1))
-    let num_steps: usize = std::env::var("KREA_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(28);
-    let mu: f64 = std::env::var("KREA_MU").ok().and_then(|s| s.parse().ok()).unwrap_or(0.90625);
-    let guidance: f64 = std::env::var("KREA_GUIDANCE").ok().and_then(|s| s.parse().ok()).unwrap_or(3.5);
+    let num_steps: usize = std::env::var("KREA_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+    let mu: f64 = std::env::var("KREA_MU").ok().and_then(|s| s.parse().ok()).unwrap_or(1.15);
+    let guidance: f64 = std::env::var("KREA_GUIDANCE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
-    println!("🎛️ Inference Mode: Krea 2 Raw (Steps={}, mu={:.4}, Guidance={:.2})", num_steps, mu, guidance);
+    println!("🎛️ Inference Mode: Krea 2 Turbo (Steps={}, mu={:.4}, Guidance={:.2})", num_steps, mu, guidance);
 
     let mut ts_vec = Vec::with_capacity(num_steps + 1);
     let exp_mu = mu.exp();
