@@ -897,24 +897,32 @@ impl FluxPipeline {
             let t_tensor = Tensor::from_slice(&[sigma as f32], (1,), &self.device)?.to_dtype(self.dtype)?;
             
             // Forward pass predicting velocity field v_t (with on-demand block streaming).
-            // Classifier-free guidance (SD3.5 non-turbo): v = v_uncond + g * (v_cond - v_uncond).
+            // Classifier-free guidance (SD3.5 non-turbo): parallel batched B=2 execution.
             let velocity = if let (Some(utxt), Some(uy)) = (&txt_tokens_uncond, &y_vec_uncond) {
-                let v_cond = self.transformer.forward_with_streamer(
-                    &latents,
-                    &txt_tokens,
-                    &t_tensor,
-                    y_vec.as_ref(),
-                    guidance_tensor.as_ref(),
+                // Stack batch [cond, uncond] to compute both in a single parallel GPU forward pass
+                let batch_latents = Tensor::cat(&[&latents, &latents], 0)?;
+                let batch_txt = Tensor::cat(&[&txt_tokens, utxt], 0)?;
+                let batch_t = Tensor::cat(&[&t_tensor, &t_tensor], 0)?;
+                let batch_y = match (y_vec.as_ref(), uy) {
+                    (Some(yc), yu) => Some(Tensor::cat(&[yc, yu], 0)?),
+                    _ => None,
+                };
+                let batch_g = match guidance_tensor.as_ref() {
+                    Some(gt) => Some(Tensor::cat(&[gt, gt], 0)?),
+                    None => None,
+                };
+
+                let batch_v = self.transformer.forward_with_streamer(
+                    &batch_latents,
+                    &batch_txt,
+                    &batch_t,
+                    batch_y.as_ref(),
+                    batch_g.as_ref(),
                     self.streamer.as_ref(),
                 )?;
-                let v_uncond = self.transformer.forward_with_streamer(
-                    &latents,
-                    utxt,
-                    &t_tensor,
-                    Some(uy),
-                    guidance_tensor.as_ref(),
-                    self.streamer.as_ref(),
-                )?;
+
+                let v_cond = batch_v.narrow(0, 0, 1)?;
+                let v_uncond = batch_v.narrow(0, 1, 1)?;
                 let g = params.guidance_scale as f32;
                 let vc = v_cond.to_dtype(DType::F32)?;
                 let vu = v_uncond.to_dtype(DType::F32)?;
