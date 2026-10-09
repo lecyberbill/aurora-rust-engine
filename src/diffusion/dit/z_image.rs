@@ -858,16 +858,16 @@ impl ZImageTransformer {
 
         // 2. Timestep embedding: tmlp(temb(t)) where tmlp activation is GELU(tanh)
         let temb_raw = krea_timestep_embedding(timestep, self.config.time_embed_dim)?;
-        let t_act = self.tmlp_0.forward(&temb_raw)?.gelu_erf()?;
+        let t_act = self.tmlp_0.forward(&temb_raw)?.gelu()?;
         let t = self.tmlp_2.forward(&t_act)?; // [B, features]
-        let tvec_act = t.gelu_erf()?;
+        let tvec_act = t.gelu()?;
         let tvec = self.tproj_1.forward(&tvec_act)?; // [B, features * 6]
 
         // 3. Text conditioning pipeline:
         // context: [B, seq_len, 12, 2560]
         let txt_fused = self.txtfusion.forward(context)?; // [B, seq_len, 2560]
         let txt_norm = self.txtmlp_norm.forward(&txt_fused)?;
-        let txt_act = self.txtmlp_1.forward(&txt_norm)?.gelu_erf()?;
+        let txt_act = self.txtmlp_1.forward(&txt_norm)?.gelu()?;
         let txt_emb = self.txtmlp_3.forward(&txt_act)?; // [B, seq_len, features]
 
         let txt_len = txt_emb.dim(1)?;
