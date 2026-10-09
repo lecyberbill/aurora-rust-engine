@@ -133,22 +133,30 @@ fn main() -> anyhow::Result<()> {
     let header_vb = candle_nn::VarBuilder::from_tensors(header_tensors, dtype, &device);
     let transformer = ZImageTransformer::new_streaming(config, header_vb, dit_archive.clone(), device.clone(), dtype)?;
 
-    // Setup Flow Match Scheduler with standard Z-Image Turbo schedule (shift = 3.0)
-    let scheduler_cfg = FlowMatchEulerConfig {
-        shift: 3.0,
-        base_shift: 0.5,
-        max_shift: 1.15,
-        min_shift: 0.5,
-        use_dynamic_shifting: false,
-        double_shift_linspace: false,
-    };
-    let mut scheduler = FlowMatchEulerScheduler::new(scheduler_cfg);
-    let image_seq_len = (128 / 2) * (128 / 2); // 1024x1024 -> 4096 tokens
-    scheduler.set_timesteps_with_seq_len(8, image_seq_len)?;
-    let timesteps = scheduler.timesteps().to_vec();
-    let sigmas = scheduler.sigmas().to_vec();
-    println!("📋 Timesteps: {:?}", timesteps);
-    println!("📋 Sigmas: {:?}", sigmas);
+    // Setup Flow Match Scheduler with official Krea 2 schedule formula:
+    // ts_lin = linspace(1, 0, steps+1)
+    // For Raw 1024x1024 (N_img = 4096): mu = 0.90625
+    // ts = exp(mu) / (exp(mu) + (1/ts_lin - 1))
+    let num_steps: usize = std::env::var("KREA_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(28);
+    let mu: f64 = std::env::var("KREA_MU").ok().and_then(|s| s.parse().ok()).unwrap_or(0.90625);
+    let guidance: f64 = std::env::var("KREA_GUIDANCE").ok().and_then(|s| s.parse().ok()).unwrap_or(3.5);
+
+    println!("🎛️ Inference Mode: Krea 2 Raw (Steps={}, mu={:.4}, Guidance={:.2})", num_steps, mu, guidance);
+
+    let mut ts_vec = Vec::with_capacity(num_steps + 1);
+    let exp_mu = mu.exp();
+    for i in 0..=num_steps {
+        let ts_lin = 1.0 - (i as f64) / (num_steps as f64);
+        if ts_lin <= 0.0 {
+            ts_vec.push(0.0f64);
+        } else if ts_lin >= 1.0 {
+            ts_vec.push(1.0f64);
+        } else {
+            let val = exp_mu / (exp_mu + (1.0 / ts_lin - 1.0));
+            ts_vec.push(val);
+        }
+    }
+    println!("📋 Timesteps ts: {:?}", ts_vec);
 
     // Initial noise latent (seed 42 deterministic)
     let b = 1;
@@ -170,48 +178,51 @@ fn main() -> anyhow::Result<()> {
 
     std::fs::create_dir_all("outputs")?;
 
-    // Run full 8 steps with FlowMatch sigma timestep
-    let num_steps = 8;
+    // Euler loop matching official Krea 2 formula:
+    // for (t_cur, t_next) in zip(ts[:-1], ts[1:]):
+    //     v = cond + guidance * (cond - uncond) if guidance > 0 else cond
+    //     x = x + (t_next - t_cur) * v
     for step_idx in 0..num_steps {
-        let t = timesteps[step_idx];
-        let sigma = sigmas[step_idx] as f32;
-        let t_tensor = Tensor::from_vec(vec![sigma], (1,), &device)?.to_dtype(dtype)?;
-        println!("\n🔄 Running Step {}/{} (sigma={:.4}):", step_idx + 1, num_steps, sigma);
+        let t_cur = ts_vec[step_idx];
+        let t_next = ts_vec[step_idx + 1];
+        let dt = (t_next - t_cur) as f32; // negative step
+
+        let t_tensor = Tensor::from_vec(vec![t_cur as f32], (1,), &device)?.to_dtype(dtype)?;
+        println!("\n🔄 Running Step {}/{} (t_cur={:.4} -> t_next={:.4}, dt={:.4}):", step_idx + 1, num_steps, t_cur, t_next, dt);
         let t0 = Instant::now();
         
-        let pred_v = if (cfg_scale - 1.0).abs() > 1e-5 {
+        let pred_v = if guidance > 0.0 {
             let v_cond = transformer.forward(&latents, &t_tensor, &context)?;
             let v_uncond = transformer.forward(&latents, &t_tensor, &uncond_context)?;
             let diff = (&v_cond - &v_uncond)?;
-            (&v_uncond + (diff * cfg_scale)?)?
+            (&v_cond + (diff * guidance)?)?
         } else {
             transformer.forward(&latents, &t_tensor, &context)?
         };
         print_stats(&format!("Step {} pred_v", step_idx + 1), &pred_v)?;
 
-        // x_0 direct estimation: x_0 = x_t - sigma * v
-        let x0_est = (&latents - (&pred_v * (sigma as f64))?)?;
+        // x_0 direct estimation: x_0 = x_t - t_cur * v
+        let x0_est = (&latents - (&pred_v * t_cur)?)?;
         let cpu_x0 = x0_est.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
-        if let Ok(decoded_x0) = vae.decode(&cpu_x0) {
-            if let Ok(img) = aurora_rust_engine::diffusion::vae::tensor_to_rgb_image(&decoded_x0) {
-                let path = format!("outputs/probe_x0_step{}.png", step_idx + 1);
-                img.save(&path)?;
-                println!("   📸 Saved direct x0 estimate to {}", path);
+        if (step_idx + 1) % 4 == 0 || step_idx + 1 == num_steps || step_idx == 0 {
+            if let Ok(decoded_x0) = vae.decode(&cpu_x0) {
+                if let Ok(img) = aurora_rust_engine::diffusion::vae::tensor_to_rgb_image(&decoded_x0) {
+                    let path = format!("outputs/probe_x0_step{}.png", step_idx + 1);
+                    img.save(&path)?;
+                    println!("   📸 Saved direct x0 estimate to {}", path);
+                }
             }
         }
-        if let Ok(prev_img) = aurora_rust_engine::diffusion::vae::FastLatentPreviewer::preview_latent(&cpu_x0) {
-            let path = format!("outputs/probe_latent_step{}.png", step_idx + 1);
-            let _ = prev_img.save(&path);
-        }
 
-        let lat_next_sub = scheduler.step(&pred_v, t, &latents)?;
-        print_stats(&format!("Step {} lat_next (ODE -)", step_idx + 1), &lat_next_sub)?;
+        // Standard FlowMatch Euler step: x_next = x_cur + dt * v (dt < 0)
+        let lat_next = (&latents + (&pred_v * (dt as f64))?)?;
+        print_stats(&format!("Step {} lat_next", step_idx + 1), &lat_next)?;
 
-        latents = lat_next_sub;
+        latents = lat_next;
         println!("   Elapsed: {:.2}s", t0.elapsed().as_secs_f64());
     }
 
-    println!("\n📂 Final 8-step decode:");
+    println!("\n📂 Final decode:");
     let cpu_latents = latents.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
     let decoded = vae.decode(&cpu_latents)?;
     print_stats("Decoded RGB Tensor", &decoded)?;

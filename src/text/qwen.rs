@@ -579,11 +579,11 @@ impl Qwen3TextEncoder {
         Tensor::cat(&parts, 2)
     }
 
-    /// Encode prompt for Krea 2 Turbo:
-    /// Extracts 12 specific hidden layers (taps: [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35])
-    /// using the official Krea 2 system chat template:
-    /// `<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n`
-    /// Returns stacked tensor [1, 12, seq_len, 2560]
+    /// Encode prompt for Krea 2:
+    /// 1. Tokenizes `PREFIX (34 tokens) + prompt + padding + SUFFIX (5 tokens)`
+    /// 2. Passes through Qwen3-VL-4B layers, extracting the 12 taps [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35] (raw residual stream)
+    /// 3. Slices away the 34 system prefix tokens: `hiddens = hiddens[:, prefix_idx..]`
+    /// Returns stacked tensor [1, seq_len_prompt, 12, 2560]
     pub fn encode_krea2_12_layers(&self, prompt: &str, max_len: usize) -> Result<Tensor> {
         let pad_id = self.pad_id;
         let system_prefix = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n";
@@ -629,8 +629,16 @@ impl Qwen3TextEncoder {
             taps.push(h.clone());
         }
 
-        // Stack taps into [1, seq_len_prompt, 12, hidden_dim=2560]
-        Tensor::stack(&taps, 2)
+        // Stack taps into [1, seq_len_total, 12, hidden_dim=2560]
+        let stacked = Tensor::stack(&taps, 2)?;
+
+        // Strict prompt slicing: remove the system prefix tokens (prefix_len, typically 34)
+        // so only the contextualized prompt + suffix tokens enter txtfusion
+        if prefix_len > 0 && seq_len > prefix_len {
+            stacked.narrow(1, prefix_len, seq_len - prefix_len)
+        } else {
+            Ok(stacked)
+        }
     }
 
     /// Encode prompt for Z-Image / Lumina2:
