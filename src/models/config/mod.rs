@@ -136,8 +136,8 @@ pub fn detect_architecture(src: &dyn WeightsSource) -> Architecture {
             }
             return Architecture::Llama;
         }
-        if has("blk.0.attn_q.weight") {
-            if has("attn_q_norm") || has("ssm_a") {
+        if has("blk.0.attn_q.weight") || has("blk.0.attn_qkv.weight") || has("blk.0.ssm_a") {
+            if has("attn_q_norm") || has("ssm_a") || has("attn_qkv") || has("ssm_beta") {
                 return Architecture::Qwen3;
             }
             return Architecture::Llama;

@@ -124,6 +124,22 @@ impl CausalLMConfig {
             let k_out = src.raw_info("blk.0.attn_k.weight").map(|(_, d)| d[0]).unwrap_or(q_out);
             let h_dim = 128;
             (q_out / h_dim, k_out / h_dim, h_dim)
+        } else if let Some((_, dims)) = src.raw_info("blk.0.attn_qkv.weight") {
+            let total_out = dims.first().copied().unwrap_or(hidden_size);
+            // In Qwen GQA models, total_out = (num_heads + 2 * num_kv_heads) * head_dim.
+            // For standard 28-32 heads with 4-8 kv_heads:
+            let h_dim = 128;
+            let total_heads = total_out / h_dim;
+            let (num_h, num_kv) = if total_heads == 36 {
+                (28, 4) // Qwen 3B/7B GQA
+            } else if total_heads == 20 {
+                (16, 2) // Qwen 1.5B/2B GQA
+            } else if total_heads == 40 {
+                (32, 4) // Llama / Qwen
+            } else {
+                (total_heads.saturating_sub(4), 2)
+            };
+            (num_h, num_kv, h_dim)
         } else {
             (32, 8, 128)
         };
@@ -592,15 +608,25 @@ impl CausalLMPipeline {
         let in_norm = RmsNorm::new(in_norm_w, self.config.rms_norm_eps);
         let normed_x = in_norm.forward(x).map_err(LuminaError::Candle)?;
 
-        // Attention projections
-        let q_w = self.get_layer_weight(layer_idx, &["self_attn.q_proj.weight", "attn_q.weight"])?;
-        let k_w = self.get_layer_weight(layer_idx, &["self_attn.k_proj.weight", "attn_k.weight"])?;
-        let v_w = self.get_layer_weight(layer_idx, &["self_attn.v_proj.weight", "attn_v.weight"])?;
-        let o_w = self.get_layer_weight(layer_idx, &["self_attn.o_proj.weight", "attn_output.weight"])?;
-
-        let q = Self::matmul_linear(&normed_x, &q_w)?;
-        let k = Self::matmul_linear(&normed_x, &k_w)?;
-        let v = Self::matmul_linear(&normed_x, &v_w)?;
+        // Attention projections (support separate q/k/v or fused attn_qkv)
+        let (q, k, v) = if let Ok(qkv_w) = self.get_layer_weight(layer_idx, &["self_attn.qkv_proj.weight", "attn_qkv.weight"]) {
+            let qkv = Self::matmul_linear(&normed_x, &qkv_w)?;
+            let q_dim = self.config.num_attention_heads * self.config.head_dim;
+            let kv_dim = self.config.num_key_value_heads * self.config.head_dim;
+            let q = qkv.narrow(candle_core::D::Minus1, 0, q_dim)?;
+            let k = qkv.narrow(candle_core::D::Minus1, q_dim, kv_dim)?;
+            let v = qkv.narrow(candle_core::D::Minus1, q_dim + kv_dim, kv_dim)?;
+            (q, k, v)
+        } else {
+            let q_w = self.get_layer_weight(layer_idx, &["self_attn.q_proj.weight", "attn_q.weight"])?;
+            let k_w = self.get_layer_weight(layer_idx, &["self_attn.k_proj.weight", "attn_k.weight"])?;
+            let v_w = self.get_layer_weight(layer_idx, &["self_attn.v_proj.weight", "attn_v.weight"])?;
+            let q = Self::matmul_linear(&normed_x, &q_w)?;
+            let k = Self::matmul_linear(&normed_x, &k_w)?;
+            let v = Self::matmul_linear(&normed_x, &v_w)?;
+            (q, k, v)
+        };
+        let o_w = self.get_layer_weight(layer_idx, &["self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
 
         let b_sz = x.dim(0).map_err(LuminaError::Candle)?;
         let mut q = q.reshape((b_sz, seq_len, self.config.num_attention_heads, self.config.head_dim))?.transpose(1, 2)?;
@@ -723,8 +749,8 @@ impl CausalLMPipeline {
         let sin = angles.sin().map_err(LuminaError::Candle)?;
 
         // cos/sin: [1, 1, seq_len, head_dim] matching q/k shape [B, num_heads, seq_len, head_dim]
-        let cos = Tensor::cat(&[&cos, &cos], 1)?.unsqueeze(0)?.unsqueeze(0)?.to_dtype(q.dtype())?;
-        let sin = Tensor::cat(&[&sin, &sin], 1)?.unsqueeze(0)?.unsqueeze(0)?.to_dtype(q.dtype())?;
+        let cos = Tensor::cat(&[&cos, &cos], 1)?.unsqueeze(0)?.unsqueeze(1)?.to_dtype(q.dtype())?;
+        let sin = Tensor::cat(&[&sin, &sin], 1)?.unsqueeze(0)?.unsqueeze(1)?.to_dtype(q.dtype())?;
 
         let rotate = |x: &Tensor| -> CandleResult<Tensor> {
             let x1 = x.narrow(3, 0, half_dim)?;
