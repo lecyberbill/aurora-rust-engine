@@ -95,21 +95,16 @@ mod app {
                     ctx.set("telemetry", "⏳ Thinking & Generating on GPU…".to_string());
 
                     // Get history from both context and persistent Arc<Mutex<Vec<ChatMessage>>>
-                    let mut history = {
+                    let history = {
                         let mut guard = history_store.lock().unwrap();
-                        if guard.is_empty() {
-                            let ctx_hist: Vec<ChatMessage> = ctx.get("chat").unwrap_or_default();
-                            for m in ctx_hist {
-                                if !m.content.starts_with("Bonjour ! Je suis Qwen") {
-                                    guard.push(m);
-                                }
-                            }
-                        }
                         guard.push(ChatMessage::user(&prompt));
                         guard.clone()
                     };
 
-                    ctx.set("chat", history.clone());
+                    // Update UI chat view with user message
+                    let mut ui_chat: Vec<ChatMessage> = ctx.get("chat").unwrap_or_default();
+                    ui_chat.push(ChatMessage::user(&prompt));
+                    ctx.set("chat", ui_chat.clone());
                     ctx.set("prompt", "".to_string());
 
                     // Build multi-turn structured message list for native chat API
@@ -121,26 +116,17 @@ mod app {
                     };
                     for msg in history_window {
                         let role = msg.role.clone();
-                        let clean_content = if role == "assistant" {
-                            if let Some(pos) = msg.content.find("\n\n") {
-                                if msg.content.starts_with("> 🧠") {
-                                    msg.content[pos + 2..].trim().to_string()
-                                } else {
-                                    msg.content.trim().to_string()
-                                }
-                            } else {
-                                msg.content.trim().to_string()
-                            }
-                        } else {
-                            msg.content.trim().to_string()
-                        };
-
+                        let clean_content = msg.content.trim().to_string();
                         if !clean_content.is_empty() && !clean_content.starts_with("Bonjour ! Je suis Qwen") {
                             structured_messages.push((role, clean_content));
                         }
                     }
 
-                    println!("📝 [Chat Prompt Debug] Multi-turn structured messages: {}", structured_messages.len());
+                    println!("📝 [Chat Prompt Debug] Multi-turn structured messages (count: {}):", structured_messages.len());
+                    for (i, (r, c)) in structured_messages.iter().enumerate() {
+                        let preview = if c.len() > 60 { &c[..60] } else { c };
+                        println!("   [{i}] {r}: {preview}...");
+                    }
 
                     let t0 = Instant::now();
                     let result = {
@@ -155,6 +141,13 @@ mod app {
 
                     match result {
                         Ok((thinking, resp, tok_per_sec)) => {
+                            // 1. Store clean response in the model history store
+                            {
+                                let mut guard = history_store.lock().unwrap();
+                                guard.push(ChatMessage::assistant(&resp));
+                            }
+
+                            // 2. Format UI message with thinking quote if present
                             let formatted_message = if !thinking.is_empty() {
                                 format!(
                                     "> 🧠 **Pensée interne (<think>) :**\n> {}\n\n{}",
@@ -165,13 +158,8 @@ mod app {
                                 resp
                             };
 
-                            let assistant_msg = ChatMessage::assistant(&formatted_message);
-                            {
-                                let mut guard = history_store.lock().unwrap();
-                                guard.push(assistant_msg.clone());
-                            }
-                            history.push(assistant_msg);
-                            ctx.set("chat", history);
+                            ui_chat.push(ChatMessage::assistant(&formatted_message));
+                            ctx.set("chat", ui_chat);
                             ctx.set(
                                 "telemetry",
                                 format!(
