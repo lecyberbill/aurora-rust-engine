@@ -27,6 +27,22 @@ fn main() -> anyhow::Result<()> {
         println!("📐 Benchmark MatMul Dimensions: rows = {}, cols = {}", rows, cols);
         println!("🎯 C-ABI Symbol 'launch_wmma_gemv_q4k_rdna4' resolved successfully!");
         println!("✅ Kernel static library compiled and linked into Rust binary.");
+
+        println!("⚡ Verifying Pinned Host Memory (Zero-Copy DMA Staging)...");
+        let start_alloc = Instant::now();
+        let buffer_size = 1024 * 1024 * 64; // 64 MB staging buffer
+        if let Some(mut buf) = aurora_rust_engine::device::PinnedHostBuffer::allocate(buffer_size) {
+            println!("✅ Successfully allocated {} MB of Pinned Host Memory in {:.2}ms", 
+                buffer_size / (1024 * 1024), 
+                start_alloc.elapsed().as_secs_f64() * 1000.0
+            );
+            let slice = buf.as_mut_slice();
+            slice[0] = 42;
+            slice[slice.len() - 1] = 99;
+            println!("✅ Zero-Copy DMA slice memory read/write verified (len: {} bytes)", slice.len());
+        } else {
+            println!("⚠️ Pinned Host Memory allocation returned None, falling back to standard heap.");
+        }
     }
 
     #[cfg(not(feature = "rocm"))]

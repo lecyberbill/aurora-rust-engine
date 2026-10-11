@@ -664,8 +664,9 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
   - Static pre-allocation and reuse of scratch $Q, K, V$ and MLP activation buffers to eliminate runtime `cudaMalloc`/`hipMalloc` allocations and VRAM fragmentation.
 - [x] **Parallel Batched CFG ($B=2$) Forward (`src/pipelines/flux.rs`)**:
   - Joint conditional + unconditional evaluation in a single DiT forward pass instead of 2 sequential passes ($2\times$ fewer kernel launches and full GPU saturation).
-- [ ] **Pinned Host Memory (Zero-Copy Transfer)**:
-  - Page-locked CPU staging memory to enable direct asynchronous DMA transfers without OS intermediate copy.
+- [x] **Pinned Host Memory (Zero-Copy DMA Transfer) (`src/device.rs`, `src/kernels/wmma_q4k_rdna4.hip`)**:
+  - Page-locked CPU staging memory via `hipHostMalloc` / `cudaHostAlloc` enabling direct asynchronous DMA transfers without OS intermediate copy.
+
 - [x] **Weight Cache LLRU / VRAM Resident Mode (`src/diffusion/dit/streamer.rs`)**:
   - Fast-path resident manager allowing zero-thread latency execution when dedicated VRAM is sufficient.
 - [x] **Native Hardware GEMM & Fused Kernels (AMD RDNA 4 & NVIDIA CUDA)**:

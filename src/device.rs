@@ -49,6 +49,75 @@ pub fn auto_device() -> candle_core::Result<Device> {
     Ok(Device::Cpu)
 }
 
+/// Pinned Host Memory buffer (Page-Locked RAM) allowing zero-copy direct DMA transfers to GPU.
+pub struct PinnedHostBuffer {
+    ptr: *mut u8,
+    size: usize,
+}
+
+unsafe impl Send for PinnedHostBuffer {}
+unsafe impl Sync for PinnedHostBuffer {}
+
+impl PinnedHostBuffer {
+    pub fn allocate(size: usize) -> Option<Self> {
+        #[cfg(feature = "rocm")]
+        {
+            extern "C" {
+                fn hip_alloc_pinned_host(size: usize) -> *mut u8;
+            }
+            let ptr = unsafe { hip_alloc_pinned_host(size) };
+            if !ptr.is_null() {
+                return Some(Self { ptr, size });
+            }
+        }
+
+        // Standard CPU page-aligned fallback
+        let layout = std::alloc::Layout::from_size_align(size, 4096).ok()?;
+        let ptr = unsafe { std::alloc::alloc(layout) };
+        if !ptr.is_null() {
+            Some(Self { ptr, size })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size) }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.size) }
+    }
+
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+}
+
+impl Drop for PinnedHostBuffer {
+    fn drop(&mut self) {
+        #[cfg(feature = "rocm")]
+        {
+            extern "C" {
+                fn hip_free_pinned_host(ptr: *mut u8);
+            }
+            unsafe { hip_free_pinned_host(self.ptr) };
+            return;
+        }
+
+        #[allow(unreachable_code)]
+        {
+            if let Ok(layout) = std::alloc::Layout::from_size_align(self.size, 4096) {
+                unsafe { std::alloc::dealloc(self.ptr, layout) };
+            }
+        }
+    }
+}
+
 /// Explicit device selection helper with fallback.
 pub fn select_device(prefer_gpu: bool) -> candle_core::Result<Device> {
     if prefer_gpu {

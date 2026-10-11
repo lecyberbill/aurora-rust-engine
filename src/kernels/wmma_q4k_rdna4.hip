@@ -40,30 +40,34 @@ extern "C" __global__ void __launch_bounds__(64) wmma_gemv_q4k_rdna4_kernel(
         float d = __half2float(blk.d);
         float dmin = __half2float(blk.dmin);
 
+        // Each wave32 (tid 0..31) executes the native RDNA4 WMMA INT4 instruction
+        // __builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12
         // Sub-block offset based on lane ID
-        // In Q4_K: 8 sub-blocks of 32 weights = 256 weights total.
-        // Lane tid (0..31) handles elements in parallel.
         int sub_block = tid / 4; // 0..7
         int elem_in_sub = (tid % 4) * 8; // 8 weights per lane
 
         // Quantized nibbles: 128 bytes total -> 16 bytes per sub-block
         const uint8_t* qs_sub = blk.qs + sub_block * 16;
-        
-        // Extract 4-bit weights and multiply by x
-        float sub_acc = 0.0f;
-        #pragma unroll
-        for (int i = 0; i < 4; ++i) {
-            uint8_t packed_byte = qs_sub[(elem_in_sub / 2) + i];
-            int8_t w0 = (int8_t)(packed_byte & 0x0F);
-            int8_t w1 = (int8_t)(packed_byte >> 4);
 
-            float x0 = __half2float(x_blk[sub_block * 32 + elem_in_sub + i * 2]);
-            float x1 = __half2float(x_blk[sub_block * 32 + elem_in_sub + i * 2 + 1]);
+        // Pack 32 INT4 elements into int32x2_t (128 bits total: 8 bytes per 32-bit register)
+        int32x2_t a_vec = *(const int32x2_t*)(qs_sub + (tid % 2) * 8);
+        int32x2_t b_vec = *(const int32x2_t*)(x_blk + sub_block * 32);
 
-            sub_acc += ((float)w0) * x0 + ((float)w1) * x1;
-        }
+        int32x8_t c_vec = {0};
+        // Native RDNA4 hardware WMMA INT4 instruction:
+        int32x8_t wmma_res = __builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12(
+            true,   // A signedness
+            a_vec,
+            false,  // B signedness
+            b_vec,
+            c_vec,
+            false   // clamp
+        );
 
-        // Intra-wave reduction via shuffle
+        // Sum the hardware WMMA accumulator output lanes
+        float sub_acc = (float)(wmma_res[0] + wmma_res[1] + wmma_res[2] + wmma_res[3]);
+
+        // Intra-wave reduction via shuffle across the 32 lanes of the wave
         #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2) {
             sub_acc += __shfl_down(sub_acc, offset, 32);
@@ -104,3 +108,20 @@ extern "C" void launch_wmma_gemv_q4k_rdna4(
         rows
     );
 }
+
+// Pinned Host Memory (Zero-Copy DMA Transfer) allocation & deallocation
+extern "C" void* hip_alloc_pinned_host(size_t size) {
+    void* ptr = nullptr;
+    hipError_t err = hipHostMalloc(&ptr, size, hipHostMallocDefault);
+    if (err != hipSuccess) {
+        return nullptr;
+    }
+    return ptr;
+}
+
+extern "C" void hip_free_pinned_host(void* ptr) {
+    if (ptr) {
+        hipHostFree(ptr);
+    }
+}
+
