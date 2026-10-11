@@ -52,6 +52,19 @@ pub fn downcast_model<M: AnyModel + 'static>(m: &mut dyn AnyModel) -> Option<&mu
 /// Text-to-text generator (the CausalLM use case). Implemented by a decoder-only pipeline.
 pub trait GenerationModel: AnyModel {
     fn generate(&mut self, prompt: &str, max_tokens: usize, temperature: f64) -> Result<String>;
+
+    /// Generation with explicit reasoning effort (0.0 = low/none, 0.5 = medium, 1.0 = high).
+    /// Returns (thinking_text, response_text, tokens_per_sec).
+    fn generate_with_reasoning(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f64,
+        _reasoning_effort: f64,
+    ) -> Result<(String, String, f64)> {
+        let full = self.generate(prompt, max_tokens, temperature)?;
+        Ok((String::new(), full, 0.0))
+    }
 }
 
 /// Text-encoder (conditioning) use case: prompt -> embedding tensor.

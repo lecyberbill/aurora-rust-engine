@@ -101,30 +101,61 @@ impl EncodeModel for TextModel {
 
 impl GenerationModel for TextModel {
     fn generate(&mut self, prompt: &str, max_tokens: usize, temperature: f64) -> Result<String> {
+        let (thinking, resp, _) = self.generate_with_reasoning(prompt, max_tokens, temperature, 0.5)?;
+        if resp.is_empty() {
+            Ok(thinking)
+        } else if thinking.is_empty() {
+            Ok(resp)
+        } else {
+            Ok(format!("<think>\n{}\n</think>\n\n{}", thinking, resp))
+        }
+    }
+
+    fn generate_with_reasoning(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f64,
+        reasoning_effort: f64,
+    ) -> Result<(String, String, f64)> {
         match &mut self.inner {
             TextBackend::CausalLM(pipeline) => {
                 let mut params = TextGenParams::default();
                 params.max_tokens = max_tokens;
                 params.temperature = temperature;
-                pipeline.generate(prompt, &params)
+                let text = pipeline.generate(prompt, &params)?;
+                Ok((String::new(), text, 0.0))
             }
             TextBackend::NativeAccelerated { model_tag, endpoint, .. } => {
+                let mut options = serde_json::json!({
+                    "num_predict": max_tokens,
+                    "temperature": temperature,
+                    "num_gpu": 99,
+                    "num_thread": 8,
+                    "low_vram": false,
+                });
+
+                // Map reasoning effort to prompt shaping / context settings
+                let adjusted_prompt = if reasoning_effort <= 0.1 {
+                    // Fast / direct response without deep thinking
+                    format!("Direct concise answer without internal monologue:\n{prompt}")
+                } else if reasoning_effort >= 0.8 {
+                    // Deep thorough reasoning
+                    format!("Think deeply step-by-step before answering thoroughly:\n{prompt}")
+                } else {
+                    prompt.to_string()
+                };
+
                 let payload = serde_json::json!({
                     "model": model_tag,
-                    "prompt": prompt,
+                    "prompt": adjusted_prompt,
                     "stream": false,
-                    "options": {
-                        "num_predict": max_tokens,
-                        "temperature": temperature,
-                        "num_gpu": 99,
-                        "num_thread": 8,
-                        "low_vram": false,
-                    }
+                    "options": options
                 });
 
                 let url = format!("{}/api/generate", endpoint.trim_end_matches('/'));
                 let response = ureq::post(&url)
-                    .timeout(std::time::Duration::from_secs(120))
+                    .timeout(std::time::Duration::from_secs(180))
                     .send_json(payload)
                     .map_err(|e| LuminaError::Context {
                         context: format!("Native ROCm Engine generation failed at {url}: {e}"),
@@ -136,12 +167,13 @@ impl GenerationModel for TextModel {
                     source: Box::new(LuminaError::Config(e.to_string())),
                 })?;
 
+                let mut tok_per_sec = 0.0;
                 if let (Some(eval_count), Some(eval_duration)) = (
                     res_json.get("eval_count").and_then(|v| v.as_u64()),
                     res_json.get("eval_duration").and_then(|v| v.as_u64()),
                 ) {
                     if eval_duration > 0 {
-                        let tok_per_sec = (eval_count as f64) / (eval_duration as f64 / 1e9);
+                        tok_per_sec = (eval_count as f64) / (eval_duration as f64 / 1e9);
                         println!(
                             "⚡ GPU Eval Engine: {} tokens in {:.2}s ({:.2} tok/s)",
                             eval_count,
@@ -153,20 +185,14 @@ impl GenerationModel for TextModel {
 
                 let resp = res_json.get("response")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                    .unwrap_or("")
+                    .to_string();
                 let thinking = res_json.get("thinking")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                    .unwrap_or("")
+                    .to_string();
 
-                let text = if resp.is_empty() {
-                    thinking.to_string()
-                } else if thinking.is_empty() {
-                    resp.to_string()
-                } else {
-                    format!("<think>\n{}\n</think>\n\n{}", thinking, resp)
-                };
-
-                Ok(text)
+                Ok((thinking, resp, tok_per_sec))
             }
             _ => Err(LuminaError::UnsupportedOp("This model is a text encoder only, not a CausalLM".into())),
         }
