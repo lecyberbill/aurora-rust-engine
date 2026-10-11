@@ -674,4 +674,19 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
   - Direct Q4_K_M matrix-vector dequantization and multiplication on dedicated hardware units reaching physical GPU limits (~74.5 tok/s in 27B decoding and ~148–216 tok/s in prefill).
   - Strict preservation of NVIDIA CUDA cross-platform compatibility (`--features cuda`) with zero API regression.
 
+---
+
+## 🚀 Milestone 27: Next-Generation Flagship Architecture Integration (Gemma 4 & Unified SOTA LLMs)
+
+**Goal.** Expand `AutoModel` zero-configuration loader and `GenerationModel` multi-turn inference pipeline to support next-generation open foundation models, including Google Gemma 4, deep reasoning variants, and unified multimodal backends:
+
+- [ ] **Google Gemma 4 Architecture Support (`src/models/text/causal.rs`, `src/models/auto.rs`)**:
+  - Implement Gemma 4 sliding window attention, dual-norm scaling (RMSNorm with unit-offset), and logit soft-capping ($tanh$).
+  - Fast tokenization integration via native HuggingFace / SentencePiece tokenizers.
+- [ ] **Multi-Model Auto-Discovery & Hot-Swapping (`src/models/auto.rs`)**:
+  - Automatic architecture identification from GGUF metadata (`general.architecture = "gemma4"`, `"qwen3"`, `"deepseek"`) and SafeTensors configs.
+  - Transparent hardware dispatch to native AMD WMMA RDNA 4 / NVIDIA Tensor Core acceleration.
+- [ ] **Unified Grio Studio Model Switcher (`src/bin/grio_qwen_reasoning.rs`)**:
+  - Dynamic model selector in the Grio UI (Qwen3.8-27B, Gemma 4, DeepSeek V3) with live KV-cache reset and VRAM telemetry.
+
 
