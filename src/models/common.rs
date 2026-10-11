@@ -65,6 +65,23 @@ pub trait GenerationModel: AnyModel {
         let full = self.generate(prompt, max_tokens, temperature)?;
         Ok((String::new(), full, 0.0))
     }
+
+    /// Chat generation accepting a sequence of role/content pairs.
+    /// Returns (thinking_text, response_text, tokens_per_sec).
+    fn generate_chat(
+        &mut self,
+        messages: &[(String, String)],
+        max_tokens: usize,
+        temperature: f64,
+        reasoning_effort: f64,
+    ) -> Result<(String, String, f64)> {
+        let mut prompt = String::new();
+        for (role, content) in messages {
+            prompt.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
+        }
+        prompt.push_str("<|im_start|>assistant\n");
+        self.generate_with_reasoning(&prompt, max_tokens, temperature, reasoning_effort)
+    }
 }
 
 /// Text-encoder (conditioning) use case: prompt -> embedding tensor.

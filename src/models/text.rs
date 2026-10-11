@@ -200,4 +200,88 @@ impl GenerationModel for TextModel {
             _ => Err(LuminaError::UnsupportedOp("This model is a text encoder only, not a CausalLM".into())),
         }
     }
+
+    fn generate_chat(
+        &mut self,
+        messages: &[(String, String)],
+        max_tokens: usize,
+        temperature: f64,
+        _reasoning_effort: f64,
+    ) -> Result<(String, String, f64)> {
+        match &mut self.inner {
+            TextBackend::NativeAccelerated { model_tag, endpoint, .. } => {
+                let options = serde_json::json!({
+                    "num_predict": max_tokens,
+                    "temperature": temperature,
+                    "num_gpu": 99,
+                    "num_thread": 8,
+                    "low_vram": false,
+                });
+
+                let chat_messages: Vec<serde_json::Value> = messages
+                    .iter()
+                    .map(|(role, content)| {
+                        serde_json::json!({
+                            "role": role,
+                            "content": content
+                        })
+                    })
+                    .collect();
+
+                let payload = serde_json::json!({
+                    "model": model_tag,
+                    "messages": chat_messages,
+                    "stream": false,
+                    "options": options
+                });
+
+                let url = format!("{}/api/chat", endpoint.trim_end_matches('/'));
+                let response = ureq::post(&url)
+                    .timeout(std::time::Duration::from_secs(180))
+                    .send_json(payload)
+                    .map_err(|e| LuminaError::Context {
+                        context: format!("Native ROCm Engine chat failed at {url}: {e}"),
+                        source: Box::new(LuminaError::Config(e.to_string())),
+                    })?;
+
+                let res_json: serde_json::Value = response.into_json().map_err(|e| LuminaError::Context {
+                    context: "Failed to parse Native GPU chat response".into(),
+                    source: Box::new(LuminaError::Config(e.to_string())),
+                })?;
+
+                let mut tok_per_sec = 0.0;
+                if let (Some(eval_count), Some(eval_duration)) = (
+                    res_json.get("eval_count").and_then(|v| v.as_u64()),
+                    res_json.get("eval_duration").and_then(|v| v.as_u64()),
+                ) {
+                    if eval_duration > 0 {
+                        tok_per_sec = (eval_count as f64) / (eval_duration as f64 / 1e9);
+                    }
+                }
+
+                let message_obj = res_json.get("message");
+                let resp = message_obj
+                    .and_then(|m| m.get("content"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let thinking = message_obj
+                    .and_then(|m| m.get("thinking"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| res_json.get("thinking").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+
+                Ok((thinking, resp, tok_per_sec))
+            }
+            _ => {
+                let mut prompt = String::new();
+                for (role, content) in messages {
+                    prompt.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
+                }
+                prompt.push_str("<|im_start|>assistant\n");
+                self.generate_with_reasoning(&prompt, max_tokens, temperature, _reasoning_effort)
+            }
+        }
+    }
 }

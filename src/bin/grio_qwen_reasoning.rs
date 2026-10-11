@@ -112,40 +112,35 @@ mod app {
                     ctx.set("chat", history.clone());
                     ctx.set("prompt", "".to_string());
 
-                    // Build multi-turn contextual prompt from history
-                    let mut contextual_prompt = String::new();
+                    // Build multi-turn structured message list for native chat API
+                    let mut structured_messages: Vec<(String, String)> = Vec::new();
                     let history_window = if history.len() > 10 {
                         &history[history.len() - 10..]
                     } else {
                         &history[..]
                     };
                     for msg in history_window {
-                        let role = msg.role.as_str();
+                        let role = msg.role.clone();
                         let clean_content = if role == "assistant" {
                             if let Some(pos) = msg.content.find("\n\n") {
                                 if msg.content.starts_with("> 🧠") {
-                                    msg.content[pos + 2..].trim()
+                                    msg.content[pos + 2..].trim().to_string()
                                 } else {
-                                    msg.content.trim()
+                                    msg.content.trim().to_string()
                                 }
                             } else {
-                                msg.content.trim()
+                                msg.content.trim().to_string()
                             }
                         } else {
-                            msg.content.trim()
+                            msg.content.trim().to_string()
                         };
 
                         if !clean_content.is_empty() && !clean_content.starts_with("Bonjour ! Je suis Qwen") {
-                            if role == "user" {
-                                contextual_prompt.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", clean_content));
-                            } else if role == "assistant" {
-                                contextual_prompt.push_str(&format!("<|im_start|>assistant\n{}<|im_end|>\n", clean_content));
-                            }
+                            structured_messages.push((role, clean_content));
                         }
                     }
-                    contextual_prompt.push_str("<|im_start|>assistant\n");
 
-                    println!("📝 [Chat Prompt Debug] Multi-turn length: {} chars, turns: {}", contextual_prompt.len(), history.len());
+                    println!("📝 [Chat Prompt Debug] Multi-turn structured messages: {}", structured_messages.len());
 
                     let t0 = Instant::now();
                     let result = {
@@ -153,7 +148,7 @@ mod app {
                         let mut model_guard = lock.lock().unwrap();
                         let text_model = downcast_model::<TextModel>(&mut *model_guard)
                             .ok_or_else(|| anyhow::anyhow!("Failed to downcast model to TextModel"))?;
-                        text_model.generate_with_reasoning(&contextual_prompt, max_tokens as usize, temperature, reasoning_effort)
+                        text_model.generate_chat(&structured_messages, max_tokens as usize, temperature, reasoning_effort)
                     };
 
                     let total_elapsed = t0.elapsed().as_secs_f64();
