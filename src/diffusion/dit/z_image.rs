@@ -877,11 +877,11 @@ impl ZImageTransformer {
             println!("      📊 Embeddings: img_std={:.4}, txt_std={:.4}, tvec_std={:.4}", img_std, txt_std, tv_std);
         }
 
-        // 4. Position IDs: text tokens at (0, 0, 0), image tokens at (frame=0, row, col) matching axes [32, 48, 48]
+        // 4. Position IDs: text tokens at (t_idx, 0, 0), image tokens at (frame=0, row, col) matching axes [32, 48, 48]
         let mut pos_vec = Vec::with_capacity(total_len * 3);
-        // Text pos IDs: Frame = 0, Row = 0, Col = 0 (context invariance scheme)
-        for _ in 0..txt_len {
-            pos_vec.push(0f32);
+        // Text pos IDs: Frame/Seq = t_idx, Row = 0, Col = 0
+        for t_idx in 0..txt_len {
+            pos_vec.push(t_idx as f32);
             pos_vec.push(0f32);
             pos_vec.push(0f32);
         }

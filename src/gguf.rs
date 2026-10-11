@@ -45,22 +45,23 @@ impl WeightsSource for GgufWeights {
     fn get_tensor(&self, name: &str, device: &Device, dtype: DType) -> Result<Tensor> {
         let q: QTensor = self
             .content
-            .tensor(&mut std::io::BufReader::new(&self.file), name, device)
+            .tensor(&mut std::io::BufReader::new(&self.file), name, &Device::Cpu)
             .map_err(|e| LuminaError::Context {
                 context: format!("failed to decode GGUF tensor '{name}': {e}"),
                 source: Box::new(crate::error::LuminaError::Candle(e)),
             })?;
         let t = q
-            .dequantize(device)
+            .dequantize(&Device::Cpu)
             .map_err(|e| LuminaError::Context {
                 context: format!("failed to dequantize GGUF tensor '{name}': {e}"),
                 source: Box::new(crate::error::LuminaError::Candle(e)),
             })?;
-        if t.dtype() == dtype {
-            Ok(t)
+        let t_converted = if t.dtype() == dtype {
+            t
         } else {
-            t.to_dtype(dtype).map_err(crate::error::LuminaError::Candle)
-        }
+            t.to_dtype(dtype).map_err(crate::error::LuminaError::Candle)?
+        };
+        t_converted.to_device(device).map_err(crate::error::LuminaError::Candle)
     }
 
     fn contains(&self, name: &str) -> bool {

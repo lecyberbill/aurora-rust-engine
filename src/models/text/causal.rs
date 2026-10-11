@@ -131,7 +131,13 @@ impl CausalLMConfig {
             let q_out = src.raw_info(q_key).and_then(|(_, d)| d.first().copied()).unwrap_or(hidden_size);
             let k_key = q_key.replace(".q_proj.", ".k_proj.").replace(".attn_q.", ".attn_k.");
             let k_out = src.raw_info(&k_key).and_then(|(_, d)| d.first().copied()).unwrap_or(q_out);
-            (q_out / head_dim, k_out / head_dim, head_dim)
+            // In Qwen 3.8, q_out is doubled due to Q-Gate (e.g. 12288 = 2 * 24 heads * 256)
+            let actual_q_dim = if q_out > hidden_size && q_out % (head_dim * 2) == 0 {
+                q_out / 2
+            } else {
+                q_out
+            };
+            (actual_q_dim / head_dim, k_out / head_dim, head_dim)
         } else if let Some((_, dims)) = src.raw_info("blk.0.attn_qkv.weight") {
             let total_out = dims.first().copied().unwrap_or(hidden_size);
             let total_heads = total_out / head_dim;
@@ -600,10 +606,28 @@ impl CausalLMPipeline {
             hidden = (hidden * normalizer).map_err(LuminaError::Candle)?;
         }
 
-        // 2. Transformer layers loop with KV-Cache
+        // 2. Transformer layers loop with KV-Cache and per-layer cache eviction
         for layer_idx in 0..self.config.num_hidden_layers {
+            // Evict weights from earlier layers to maintain zero VRAM bloat on ROCm
+            if layer_idx > 0 {
+                let prev_l = layer_idx - 1;
+                let prefixes = [
+                    format!("model.layers.{prev_l}."),
+                    format!("layers.{prev_l}."),
+                    format!("blk.{prev_l}."),
+                ];
+                self.weights_cache.retain(|k, _| !prefixes.iter().any(|p| k.starts_with(p)));
+            }
             hidden = self.forward_layer(layer_idx, &hidden, pos, seq_len)?;
         }
+        // Evict last layer weights before final norm
+        let last_l = self.config.num_hidden_layers.saturating_sub(1);
+        let prefixes = [
+            format!("model.layers.{last_l}."),
+            format!("layers.{last_l}."),
+            format!("blk.{last_l}."),
+        ];
+        self.weights_cache.retain(|k, _| !prefixes.iter().any(|p| k.starts_with(p)));
 
         // 3. Final layer norm
         let norm_w = self.get_weight_or_fallback(&["model.norm.weight", "output_norm.weight", "norm.weight"])?;
@@ -629,31 +653,110 @@ impl CausalLMPipeline {
 
         let (attn_out, x) = if is_ssm_layer {
             // SSM / Linear Attention / Conv1D DeltaNet forward pass:
-            // in_proj (attn_qkv): [10240, 5120] -> projected is [B, S, 10240]
+            // 1. in_proj (attn_qkv): [10240, 5120] -> projected is [B, S, 10240]
             let in_proj_w = self.get_layer_weight(layer_idx, &["attn_qkv.weight", "ssm_in.weight", "self_attn.qkv_proj.weight", "ssm_proj.weight"])?;
             let projected = Self::matmul_linear(&normed_x, &in_proj_w)?;
             
-            // Squeeze/slice to SSM dimension 6144 (or gate projection)
-            let ssm_dim = 6144;
-            let conv_act = if projected.dim(candle_core::D::Minus1)? >= ssm_dim {
-                projected.narrow(candle_core::D::Minus1, 0, ssm_dim)?
-            } else {
-                projected
-            };
-            let silu_act = candle_nn::ops::silu(&conv_act).map_err(LuminaError::Candle)?;
+            // 2. Conv1D over 10240 features with kernel size 4
+            let conv_act = if let Ok(conv_w) = self.get_layer_weight(layer_idx, &["ssm_conv1d.weight", "conv1d.weight"]) {
+                // conv_w is [10240, 4]
+                let conv_out = if seq_len == 1 {
+                    // Step generation with rolling conv buffer
+                    let mut prev_state = self.kv_cache.layers[layer_idx].ssm_conv_state.clone().unwrap_or_else(|| {
+                        Tensor::zeros((1, 10240, 3), projected.dtype(), &self.device).unwrap()
+                    });
+                    let x_step = projected.transpose(1, 2)?; // [1, 10240, 1]
+                    let full_window = Tensor::cat(&[&prev_state, &x_step], 2)?; // [1, 10240, 4]
+                    let next_buf = full_window.narrow(2, 1, 3)?;
+                    self.kv_cache.layers[layer_idx].ssm_conv_state = Some(next_buf);
 
-            // If an explicit gate projection exists, modulate the state
-            let gated_act = if let Ok(gate_w) = self.get_layer_weight(layer_idx, &["attn_gate.weight", "ssm_gate.weight"]) {
+                    let conv_w_b = conv_w.unsqueeze(0)?; // [1, 10240, 4]
+                    (full_window * conv_w_b)?.sum_keepdim(2)?.transpose(1, 2)? // [1, 1, 10240]
+                } else {
+                    // Prefill phase
+                    let last_steps = if seq_len >= 3 {
+                        projected.narrow(1, seq_len - 3, 3)?.transpose(1, 2)?
+                    } else {
+                        Tensor::zeros((1, 10240, 3), projected.dtype(), &self.device)?
+                    };
+                    self.kv_cache.layers[layer_idx].ssm_conv_state = Some(last_steps);
+                    projected.clone()
+                };
+                candle_nn::ops::silu(&conv_out).map_err(LuminaError::Candle)?
+            } else {
+                candle_nn::ops::silu(&projected).map_err(LuminaError::Candle)?
+            };
+
+            // 3. Alpha & Beta gates projection: [48, 5120] -> [B, S, 48]
+            let gated_act = if let (Ok(alpha_w), Ok(beta_w)) = (
+                self.get_layer_weight(layer_idx, &["ssm_alpha.weight", "alpha.weight"]),
+                self.get_layer_weight(layer_idx, &["ssm_beta.weight", "beta.weight"]),
+            ) {
+                let alpha_logits = Self::matmul_linear(&normed_x, &alpha_w)?;
+                let beta_logits = Self::matmul_linear(&normed_x, &beta_w)?;
+
+                let fast_sigmoid = |t: &Tensor| -> Result<Tensor> {
+                    let neg_t = (t * -1.0).map_err(LuminaError::Candle)?;
+                    let exp_neg = neg_t.exp().map_err(LuminaError::Candle)?;
+                    let one_plus_exp = (exp_neg + 1.0).map_err(LuminaError::Candle)?;
+                    let ones = Tensor::ones_like(&one_plus_exp).map_err(LuminaError::Candle)?;
+                    ones.broadcast_div(&one_plus_exp).map_err(LuminaError::Candle)
+                };
+
+                let alpha = fast_sigmoid(&alpha_logits)?;
+                let beta = fast_sigmoid(&beta_logits)?;
+
+                let ssm_dim = 6144;
+                let feat_slice = if conv_act.dim(candle_core::D::Minus1)? >= ssm_dim {
+                    conv_act.narrow(candle_core::D::Minus1, 0, ssm_dim)?
+                } else {
+                    conv_act.clone()
+                };
+
+                // SSM Recurrent update
+                let mut curr_state = self.kv_cache.layers[layer_idx].ssm_recurrent_state.clone().unwrap_or_else(|| {
+                    Tensor::zeros((1, 48, 128, 128), feat_slice.dtype(), &self.device).unwrap()
+                });
+
+                if seq_len == 1 {
+                    let a_t = alpha.squeeze(1)?.unsqueeze(2)?.unsqueeze(3)?; // [1, 48, 1, 1]
+                    let b_t = beta.squeeze(1)?.unsqueeze(2)?.unsqueeze(3)?;  // [1, 48, 1, 1]
+                    let x_grouped = feat_slice.squeeze(1)?.reshape((1, 48, 128, 1))?;
+                    let term1 = curr_state.broadcast_mul(&a_t).map_err(LuminaError::Candle)?;
+                    let term2 = x_grouped.broadcast_mul(&b_t).map_err(LuminaError::Candle)?;
+                    curr_state = term1.broadcast_add(&term2).map_err(LuminaError::Candle)?;
+                    self.kv_cache.layers[layer_idx].ssm_recurrent_state = Some(curr_state.clone());
+                }
+
+                if let Ok(ssm_norm_w) = self.get_layer_weight(layer_idx, &["ssm_norm.weight", "norm.weight"]) {
+                    let b_sz = feat_slice.dim(0)?;
+                    let feat_grouped = feat_slice.reshape((b_sz, seq_len, 48, 128))?;
+                    let normed = Self::apply_rms_norm(&feat_grouped, &ssm_norm_w, self.config.rms_norm_eps)?;
+                    normed.reshape((b_sz, seq_len, 6144))?
+                } else {
+                    feat_slice
+                }
+            } else {
+                let ssm_dim = 6144;
+                if conv_act.dim(candle_core::D::Minus1)? >= ssm_dim {
+                    conv_act.narrow(candle_core::D::Minus1, 0, ssm_dim)?
+                } else {
+                    conv_act
+                }
+            };
+
+            // 4. Gate modulation if attn_gate present
+            let modulated = if let Ok(gate_w) = self.get_layer_weight(layer_idx, &["attn_gate.weight", "ssm_gate.weight"]) {
                 let gate = Self::matmul_linear(&normed_x, &gate_w)?;
                 let silu_gate = candle_nn::ops::silu(&gate).map_err(LuminaError::Candle)?;
-                (silu_act * silu_gate).map_err(LuminaError::Candle)?
+                (gated_act * silu_gate).map_err(LuminaError::Candle)?
             } else {
-                silu_act
+                gated_act
             };
 
-            // out_proj (ssm_out): [5120, 6144] -> out is [B, S, 5120]
+            // 5. Output projection: [5120, 6144] -> [B, S, 5120]
             let out_proj_w = self.get_layer_weight(layer_idx, &["ssm_out.weight", "self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
-            let out = Self::matmul_linear(&gated_act, &out_proj_w)?;
+            let out = Self::matmul_linear(&modulated, &out_proj_w)?;
             let x_res = (x + &out).map_err(LuminaError::Candle)?;
             (out, x_res)
         } else {
@@ -846,13 +949,15 @@ impl CausalLMPipeline {
         Ok(mask)
     }
 
-    fn get_weight_or_fallback(&self, candidates: &[&str]) -> Result<Tensor> {
+    fn get_weight_or_fallback(&mut self, candidates: &[&str]) -> Result<Tensor> {
         for name in candidates {
             if let Some(t) = self.weights_cache.get(*name) {
                 return Ok(t.clone());
             }
             if self.weights.contains(name) {
-                return self.weights.get_tensor(name, &self.device, self.dtype);
+                let t = self.weights.get_tensor(name, &self.device, self.dtype)?;
+                self.weights_cache.insert(name.to_string(), t.clone());
+                return Ok(t);
             }
         }
         Err(LuminaError::MissingWeight(format!(
@@ -861,7 +966,7 @@ impl CausalLMPipeline {
         )))
     }
 
-    fn get_layer_weight(&self, layer_idx: usize, suffixes: &[&str]) -> Result<Tensor> {
+    fn get_layer_weight(&mut self, layer_idx: usize, suffixes: &[&str]) -> Result<Tensor> {
         let prefixes = [
             format!("model.layers.{layer_idx}."),
             format!("layers.{layer_idx}."),
@@ -874,7 +979,9 @@ impl CausalLMPipeline {
                     return Ok(t.clone());
                 }
                 if self.weights.contains(&key) {
-                    return self.weights.get_tensor(&key, &self.device, self.dtype);
+                    let t = self.weights.get_tensor(&key, &self.device, self.dtype)?;
+                    self.weights_cache.insert(key, t.clone());
+                    return Ok(t);
                 }
             }
         }

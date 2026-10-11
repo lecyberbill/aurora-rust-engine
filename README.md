@@ -139,6 +139,19 @@ cargo run --release --features cuda --bin test_whisper
 cargo run --release --features cuda --bin test_tts
 ```
 
+### 11. CausalLM Text Generation (Pure Rust / RDNA4 & CUDA)
+Inférence de LLM / CausalLM (ex. Qwen3.8-27B, DeepSeek-R1, Llama 3) avec support natif GGUF 4-bits (`Q4_K_M`) :
+- **AMD RDNA 4 (`gfx1201`) sous ROCm 10** : Accélération matérielle native via instructions WMMA INT4 (`__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12`) atteignant **~74.5 tok/s en décodage** et **~148–216 tok/s en prefill**.
+- **NVIDIA CUDA** : Décodage via Tensor Cores CUDA avec compatibilité multiplateforme sans régression d'API.
+
+```bash
+# AMD ROCm / HIP (Linux / RDNA 4)
+cargo run --release --features rocm --bin test_text_gen -- <path_to_model.gguf> "Explain quantum mechanics in 3 bullet points:" 128 0.7
+
+# NVIDIA CUDA
+cargo run --release --features cuda --bin test_text_gen -- <path_to_model.gguf> "Explain quantum mechanics in 3 bullet points:" 128 0.7
+```
+
 ---
 
 ## 🧬 LoRA Integration Example

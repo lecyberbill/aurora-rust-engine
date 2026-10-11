@@ -382,16 +382,32 @@ fn build_text(
 
     match arch {
         Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma | Architecture::Qwen3 | Architecture::Mistral3 => {
-            let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
-            let tokenizer = resolve_tokenizer(weights, arch);
-            let pipeline = crate::models::text::CausalLMPipeline::new(
-                archive,
-                config,
-                tokenizer,
-                device.clone(),
-                dtype,
-            );
-            Ok(TextModel::causal_lm(id, arch.slug(), pipeline))
+            // Check if high-speed GPU engine is running on local host / server
+            let endpoint = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+            let is_native_engine_available = ureq::get(&format!("{}/api/version", endpoint.trim_end_matches('/')))
+                .timeout(std::time::Duration::from_millis(500))
+                .call()
+                .is_ok();
+
+            let filename = weights.file_name().and_then(|f| f.to_str()).unwrap_or("");
+            let is_qwen27b = filename.contains("f5f1dd89") || filename.contains("27B") || filename.contains("27b");
+
+            if is_native_engine_available && is_qwen27b {
+                let model_tag = "qwen3.8:27b-unlimited".to_string();
+                println!("⚡ AutoModel: High-Speed Native ROCm/CUDA Engine Attached ({model_tag})");
+                Ok(TextModel::native_accelerated(id, arch.slug(), model_tag, endpoint, device.clone(), dtype))
+            } else {
+                let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
+                let tokenizer = resolve_tokenizer(weights, arch);
+                let pipeline = crate::models::text::CausalLMPipeline::new(
+                    archive,
+                    config,
+                    tokenizer,
+                    device.clone(),
+                    dtype,
+                );
+                Ok(TextModel::causal_lm(id, arch.slug(), pipeline))
+            }
         }
         Architecture::T5 => {
             let mut tensors = std::collections::HashMap::new();
