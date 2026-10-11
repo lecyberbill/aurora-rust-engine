@@ -136,7 +136,10 @@ impl GenerationModel for TextModel {
                 });
 
                 // Map reasoning effort to prompt shaping / context settings
-                let adjusted_prompt = if reasoning_effort <= 0.1 {
+                let adjusted_prompt = if prompt.contains("<|im_start|>") {
+                    // Already formatted as a multi-turn chat template (ChatML)
+                    prompt.to_string()
+                } else if reasoning_effort <= 0.1 {
                     // Fast / direct response without deep thinking
                     format!("Direct concise answer without internal monologue:\n{prompt}")
                 } else if reasoning_effort >= 0.8 {
