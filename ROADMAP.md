@@ -676,17 +676,17 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 
 ---
 
-## 🚀 Milestone 27: Next-Generation Flagship Architecture Integration (Gemma 4 & Unified SOTA LLMs)
+## 🚀 Milestone 27: Universal Multi-Format & Multi-Modal Inference Engine (GGUF, SafeTensors, ONNX, Native)
 
-**Goal.** Expand `AutoModel` zero-configuration loader and `GenerationModel` multi-turn inference pipeline to support next-generation open foundation models, including Google Gemma 4, deep reasoning variants, and unified multimodal backends:
+**Goal.** Solidify Aurora Rust Engine as a true universal, high-performance, multi-format and multi-modal runtime across Text (CausalLM / Reasoning), Vision (DiT / Flux / SDXL), Audio (Whisper / TTS), and Multimodal (VLM):
 
-- [ ] **Google Gemma 4 Architecture Support (`src/models/text/causal.rs`, `src/models/auto.rs`)**:
-  - Implement Gemma 4 sliding window attention, dual-norm scaling (RMSNorm with unit-offset), and logit soft-capping ($tanh$).
-  - Fast tokenization integration via native HuggingFace / SentencePiece tokenizers.
-- [ ] **Multi-Model Auto-Discovery & Hot-Swapping (`src/models/auto.rs`)**:
-  - Automatic architecture identification from GGUF metadata (`general.architecture = "gemma4"`, `"qwen3"`, `"deepseek"`) and SafeTensors configs.
-  - Transparent hardware dispatch to native AMD WMMA RDNA 4 / NVIDIA Tensor Core acceleration.
-- [ ] **Unified Grio Studio Model Switcher (`src/bin/grio_qwen_reasoning.rs`)**:
-  - Dynamic model selector in the Grio UI (Qwen3.8-27B, Gemma 4, DeepSeek V3) with live KV-cache reset and VRAM telemetry.
+- [ ] **Universal Multi-Container Zero-Copy Loader (`src/weights/`)**:
+  - Unified memory-mapped abstraction across GGUF (v2/v3), SafeTensors shards, quantized AWQ/GPTQ, and raw ONNX weights without runtime format conversion.
+  - Zero-copy tensor slice extraction directly mapped to host/GPU pinned virtual memory buffers.
+- [ ] **Next-Gen SOTA Text & Reasoning Architecture Support (`src/models/text/causal.rs`, `src/models/auto.rs`)**:
+  - Comprehensive kernel support for Google Gemma 4 (sliding window attention, soft-capping $tanh$, unit-offset RMSNorm) and DeepSeek V3/R1 (sparse MoE dynamic routing).
+  - Multi-turn unified dialog API independent of any specific UI, consumable via native Rust crate, C ABI, or headless gRPC/HTTP inference servers.
+- [ ] **Cross-Modal Tensor Routing & Shared Pipeline Cache**:
+  - Unified execution engine sharing VRAM allocation pools across Vision (Flux / SDXL), Vision-Language (Qwen-VL / PaliGemma), and Text (Qwen / Gemma / LLaMA) with deterministic KV-cache eviction.
 
 
