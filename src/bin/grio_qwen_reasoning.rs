@@ -95,13 +95,48 @@ mod app {
                     ctx.set("chat", history.clone());
                     ctx.set("prompt", "".to_string());
 
+                    // Build multi-turn contextual prompt from history
+                    let mut contextual_prompt = String::new();
+                    // Retain up to last 10 messages for rich conversational memory
+                    let history_window = if history.len() > 10 {
+                        &history[history.len() - 10..]
+                    } else {
+                        &history[..]
+                    };
+                    for msg in history_window {
+                        let role = msg.role.as_str();
+                        let clean_content = if role == "assistant" {
+                            // Strip thinking quote block if present to feed clean answer back into model
+                            if let Some(pos) = msg.content.find("\n\n") {
+                                if msg.content.starts_with("> 🧠") {
+                                    msg.content[pos + 2..].trim()
+                                } else {
+                                    msg.content.trim()
+                                }
+                            } else {
+                                msg.content.trim()
+                            }
+                        } else {
+                            msg.content.trim()
+                        };
+
+                        if !clean_content.is_empty() {
+                            if role == "user" {
+                                contextual_prompt.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", clean_content));
+                            } else if role == "assistant" {
+                                contextual_prompt.push_str(&format!("<|im_start|>assistant\n{}<|im_end|>\n", clean_content));
+                            }
+                        }
+                    }
+                    contextual_prompt.push_str("<|im_start|>assistant\n");
+
                     let t0 = Instant::now();
                     let result = {
                         let lock = state.lock().unwrap();
                         let mut model_guard = lock.lock().unwrap();
                         let text_model = downcast_model::<TextModel>(&mut *model_guard)
                             .ok_or_else(|| anyhow::anyhow!("Failed to downcast model to TextModel"))?;
-                        text_model.generate_with_reasoning(&prompt, max_tokens as usize, temperature, reasoning_effort)
+                        text_model.generate_with_reasoning(&contextual_prompt, max_tokens as usize, temperature, reasoning_effort)
                     };
 
                     let total_elapsed = t0.elapsed().as_secs_f64();
