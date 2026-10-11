@@ -30,6 +30,10 @@ mod app {
         let model_state = Arc::new(Mutex::new(boxed_model));
         let state_clone = Arc::clone(&model_state);
 
+        let chat_history = Arc::new(Mutex::new(Vec::<ChatMessage>::new()));
+        let chat_history_clone = Arc::clone(&chat_history);
+        let chat_history_clear = Arc::clone(&chat_history);
+
         let app = App::new("Aurora Qwen 27B Chat Studio")
             .subtitle("100% Pure Rust Chatbot · Native AMD ROCm RDNA4 / CUDA · Thinking Monologue & History")
             .theme(Theme::dark().primary("#8b5cf6").radius("12px"))
@@ -76,6 +80,7 @@ mod app {
             .item(Output::new("telemetry").label("⚡ Hardware Telemetry & Throughput"))
             .on_click("send", {
                 let state = Arc::clone(&state_clone);
+                let history_store = Arc::clone(&chat_history_clone);
                 move |ctx| {
                     let prompt: String = ctx.get("prompt").unwrap_or_default();
                     if prompt.trim().is_empty() {
@@ -89,15 +94,26 @@ mod app {
                     ctx.set_prop("send", "disabled", true);
                     ctx.set("telemetry", "⏳ Thinking & Generating on GPU…".to_string());
 
-                    // Append user message immediately
-                    let mut history: Vec<ChatMessage> = ctx.get("chat").unwrap_or_default();
-                    history.push(ChatMessage::user(&prompt));
+                    // Get history from both context and persistent Arc<Mutex<Vec<ChatMessage>>>
+                    let mut history = {
+                        let mut guard = history_store.lock().unwrap();
+                        if guard.is_empty() {
+                            let ctx_hist: Vec<ChatMessage> = ctx.get("chat").unwrap_or_default();
+                            for m in ctx_hist {
+                                if !m.content.starts_with("Bonjour ! Je suis Qwen") {
+                                    guard.push(m);
+                                }
+                            }
+                        }
+                        guard.push(ChatMessage::user(&prompt));
+                        guard.clone()
+                    };
+
                     ctx.set("chat", history.clone());
                     ctx.set("prompt", "".to_string());
 
                     // Build multi-turn contextual prompt from history
                     let mut contextual_prompt = String::new();
-                    // Retain up to last 10 messages for rich conversational memory
                     let history_window = if history.len() > 10 {
                         &history[history.len() - 10..]
                     } else {
@@ -106,7 +122,6 @@ mod app {
                     for msg in history_window {
                         let role = msg.role.as_str();
                         let clean_content = if role == "assistant" {
-                            // Strip thinking quote block if present to feed clean answer back into model
                             if let Some(pos) = msg.content.find("\n\n") {
                                 if msg.content.starts_with("> 🧠") {
                                     msg.content[pos + 2..].trim()
@@ -120,7 +135,7 @@ mod app {
                             msg.content.trim()
                         };
 
-                        if !clean_content.is_empty() {
+                        if !clean_content.is_empty() && !clean_content.starts_with("Bonjour ! Je suis Qwen") {
                             if role == "user" {
                                 contextual_prompt.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", clean_content));
                             } else if role == "assistant" {
@@ -129,6 +144,8 @@ mod app {
                         }
                     }
                     contextual_prompt.push_str("<|im_start|>assistant\n");
+
+                    println!("📝 [Chat Prompt Debug] Multi-turn length: {} chars, turns: {}", contextual_prompt.len(), history.len());
 
                     let t0 = Instant::now();
                     let result = {
@@ -153,7 +170,12 @@ mod app {
                                 resp
                             };
 
-                            history.push(ChatMessage::assistant(&formatted_message));
+                            let assistant_msg = ChatMessage::assistant(&formatted_message);
+                            {
+                                let mut guard = history_store.lock().unwrap();
+                                guard.push(assistant_msg.clone());
+                            }
+                            history.push(assistant_msg);
                             ctx.set("chat", history);
                             ctx.set(
                                 "telemetry",
@@ -172,12 +194,19 @@ mod app {
                     Ok(())
                 }
             })
-            .on_click("clear", |ctx| {
-                let empty: Vec<ChatMessage> = Vec::new();
-                ctx.set("chat", empty);
-                ctx.set("prompt", "".to_string());
-                ctx.set("telemetry", "Chat réinitialisé.".to_string());
-                Ok(())
+            .on_click("clear", {
+                let history_store = Arc::clone(&chat_history_clear);
+                move |ctx| {
+                    {
+                        let mut guard = history_store.lock().unwrap();
+                        guard.clear();
+                    }
+                    let empty: Vec<ChatMessage> = Vec::new();
+                    ctx.set("chat", empty);
+                    ctx.set("prompt", "".to_string());
+                    ctx.set("telemetry", "Chat réinitialisé.".to_string());
+                    Ok(())
+                }
             });
 
         let bind_addr = std::env::var("STUDIO_BIND").unwrap_or_else(|_| "0.0.0.0:7865".to_string());
