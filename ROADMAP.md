@@ -652,24 +652,25 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 
 ## 🚀 Milestone 26: Cross-Platform Performance & Kernel Optimizations (CUDA, ROCm, Metal, CPU)
 
-**Goal.** Maximiser le débit d'inférence, minimiser l'empreinte VRAM et éliminer les temps morts I/O sur l'ensemble des architectures matérielles supportées (NVIDIA CUDA, AMD ROCm / HIP, Apple Silicon Metal, CPU multi-cœurs) :
+**Goal.** Maximize inference throughput, minimize VRAM footprint, and eliminate I/O stalls across all supported hardware architectures (NVIDIA CUDA, AMD ROCm / HIP, Apple Silicon Metal, multi-core CPU):
 
 - [x] **Async Double-Buffering & Host-to-Device Prefetcher (`src/diffusion/dit/streamer.rs`)**:
-  - Thread worker d'arrière-plan avec ring-buffer MPSC pour charger, désérialiser et déquantifier le bloc $N+1$ en mémoire d'hôte pendant l'exécution GPU du bloc $N$.
-  - Masquage complet de la latence I/O et des transferts PCIe.
+  - Background worker thread with MPSC ring-buffer to load, deserialize, and dequantize block $N+1$ in host memory concurrently with block $N$ GPU execution.
+  - Complete masking of PCIe bus latency and disk I/O.
 - [x] **Universal Tiled Scaled Dot-Product Attention (`src/device.rs`, `src/diffusion/dit/blocks.rs`)**:
-  - Algorithme d'attention par tuiles (chunking de 512 tokens + online softmax) évitant l'allocation quadratique $O(N^2)$.
-  - Support natif garanti et vérifié sur ROCm, CUDA, Metal et CPU sans dépendance C++/CUDA restrictive.
+  - Tiled attention algorithm (512-token chunks + online softmax) preventing quadratic $O(N^2)$ memory spikes.
+  - Native cross-platform support verified on ROCm, CUDA, Metal, and CPU without proprietary C++/CUDA lock-in.
 - [x] **In-place Operations & Activation Buffer Reuse**:
-  - Pré-allocation statique et réutilisation des buffers temporaires $Q, K, V$ et MLP pour éliminer le coût des `cudaMalloc`/`hipMalloc` et la fragmentation VRAM.
+  - Static pre-allocation and reuse of scratch $Q, K, V$ and MLP activation buffers to eliminate runtime `cudaMalloc`/`hipMalloc` allocations and VRAM fragmentation.
 - [x] **Parallel Batched CFG ($B=2$) Forward (`src/pipelines/flux.rs`)**:
-  - Évaluation conjointe conditionnée + inconditionnelle en une seule passe DiT au lieu de 2 passes séquentielles ($2\times$ moins d'appels noyau et saturation GPU).
+  - Joint conditional + unconditional evaluation in a single DiT forward pass instead of 2 sequential passes ($2\times$ fewer kernel launches and full GPU saturation).
 - [ ] **Pinned Host Memory (Zero-Copy Transfer)**:
-  - Staging CPU en mémoire verrouillée (*page-locked*) pour permettre les transferts DMA asynchrones directs sans copie intermédiaire OS.
+  - Page-locked CPU staging memory to enable direct asynchronous DMA transfers without OS intermediate copy.
 - [x] **Weight Cache LLRU / VRAM Resident Mode (`src/diffusion/dit/streamer.rs`)**:
-  - Gestionnaire de rétention VRAM avec fast-path d'exécution directe sans latence de threads lorsque la VRAM est suffisante.
+  - Fast-path resident manager allowing zero-thread latency execution when dedicated VRAM is sufficient.
 - [x] **Native Hardware GEMM & Fused Kernels (AMD RDNA 4 & NVIDIA CUDA)**:
-  - Intégration du noyau matériel HIP WMMA INT4 (`__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12`) pour architecture AMD RDNA 4 (`gfx1201`) sous ROCm 10.0 (`src/kernels/wmma_q4k_rdna4.hip`).
-  - Déquantification et multiplication matricielle Q4_K_M directes en instructions matérielles atteignant le débit physique GPU (~74.5 tok/s en décodage 27B et ~148–216 tok/s en prefill).
-  - Préservation stricte de la compatibilité multiplateforme NVIDIA CUDA (`--features cuda`) sans régression d'API.
+  - Integrated native HIP WMMA INT4 kernel (`__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12`) for AMD RDNA 4 (`gfx1201`) on ROCm 10.0 (`src/kernels/wmma_q4k_rdna4.hip`).
+  - Direct Q4_K_M matrix-vector dequantization and multiplication on dedicated hardware units reaching physical GPU limits (~74.5 tok/s in 27B decoding and ~148–216 tok/s in prefill).
+  - Strict preservation of NVIDIA CUDA cross-platform compatibility (`--features cuda`) with zero API regression.
+
 
