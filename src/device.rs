@@ -233,28 +233,40 @@ pub fn tiled_scaled_dot_product_attention(
             let v_c = v.contiguous()?;
             let out = candle_core::Tensor::zeros((b, h, l_q, d), orig_dtype, q.device())?;
 
-            if let (Some(q_ptr), Some(k_ptr), Some(v_ptr), Some(out_ptr)) = (
-                q_c.storage_and_layout().0.as_cuda_slice::<half::f16>().ok(),
-                k_c.storage_and_layout().0.as_cuda_slice::<half::f16>().ok(),
-                v_c.storage_and_layout().0.as_cuda_slice::<half::f16>().ok(),
-                out.storage_and_layout().0.as_cuda_slice::<half::f16>().ok(),
-            ) {
-                unsafe {
-                    launch_hip_fused_sdpa_f16(
-                        q_ptr.device_ptr() as *const _,
-                        k_ptr.device_ptr() as *const _,
-                        v_ptr.device_ptr() as *const _,
-                        out_ptr.device_ptr() as *mut _,
-                        b as i32,
-                        h as i32,
-                        l_q as i32,
-                        l_k as i32,
-                        d as i32,
-                        scale as f32,
-                        std::ptr::null_mut(),
-                    );
+            let (q_st, _) = q_c.storage_and_layout();
+            let (k_st, _) = k_c.storage_and_layout();
+            let (v_st, _) = v_c.storage_and_layout();
+            let (out_st, _) = out.storage_and_layout();
+
+            if let (
+                candle_core::Storage::Cuda(q_cuda),
+                candle_core::Storage::Cuda(k_cuda),
+                candle_core::Storage::Cuda(v_cuda),
+                candle_core::Storage::Cuda(out_cuda),
+            ) = (&*q_st, &*k_st, &*v_st, &*out_st) {
+                if let (Ok(q_slice), Ok(k_slice), Ok(v_slice), Ok(out_slice)) = (
+                    q_cuda.as_cuda_slice::<half::f16>(),
+                    k_cuda.as_cuda_slice::<half::f16>(),
+                    v_cuda.as_cuda_slice::<half::f16>(),
+                    out_cuda.as_cuda_slice::<half::f16>(),
+                ) {
+                    unsafe {
+                        launch_hip_fused_sdpa_f16(
+                            *q_slice.device_ptr() as *const _,
+                            *k_slice.device_ptr() as *const _,
+                            *v_slice.device_ptr() as *const _,
+                            *out_slice.device_ptr() as *mut _,
+                            b as i32,
+                            h as i32,
+                            l_q as i32,
+                            l_k as i32,
+                            d as i32,
+                            scale as f32,
+                            std::ptr::null_mut(),
+                        );
+                    }
+                    return Ok(out);
                 }
-                return Ok(out);
             }
         }
     }
