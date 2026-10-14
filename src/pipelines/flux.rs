@@ -619,6 +619,48 @@ impl FluxPipeline {
         })
     }
 
+    /// Load Flux.1 / Flux.2 / SD3.5 pipeline from a HuggingFace repository ID with automatic download and caching.
+    pub fn from_pretrained(
+        repo_id: &str,
+        file_name: Option<&str>,
+        device: Device,
+    ) -> crate::error::Result<Self> {
+        let api = hf_hub::api::sync::Api::new()
+            .map_err(|e| crate::error::LuminaError::Config(format!("Failed to init HuggingFace API: {}", e)))?;
+        let repo = api.model(repo_id.to_string());
+
+        let target_file = file_name.unwrap_or("flux1-schnell.safetensors");
+        println!("📥 Downloading/Loading checkpoint '{}' from HuggingFace repo '{}'...", target_file, repo_id);
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        let checkpoint_path = repo.get(target_file)
+            .map_err(|e| crate::error::LuminaError::MissingWeight(format!("Failed to fetch '{}' from HF repo '{}': {}", target_file, repo_id, e)))?;
+
+        println!("✅ Checkpoint cached at: {}", checkpoint_path.to_string_lossy());
+        Self::from_single_file_streaming(checkpoint_path, device)
+    }
+
+    /// Load Flux.1 / Flux.2 / SD3.5 pipeline in full GPU VRAM memory mode directly from HuggingFace Hub.
+    pub fn from_pretrained_in_memory(
+        repo_id: &str,
+        file_name: Option<&str>,
+        device: Device,
+    ) -> crate::error::Result<Self> {
+        let api = hf_hub::api::sync::Api::new()
+            .map_err(|e| crate::error::LuminaError::Config(format!("Failed to init HuggingFace API: {}", e)))?;
+        let repo = api.model(repo_id.to_string());
+
+        let target_file = file_name.unwrap_or("flux1-schnell.safetensors");
+        println!("📥 Downloading/Loading checkpoint '{}' from HuggingFace repo '{}'...", target_file, repo_id);
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        let checkpoint_path = repo.get(target_file)
+            .map_err(|e| crate::error::LuminaError::MissingWeight(format!("Failed to fetch '{}' from HF repo '{}': {}", target_file, repo_id, e)))?;
+
+        println!("✅ Checkpoint cached at: {}", checkpoint_path.to_string_lossy());
+        Self::from_single_file_in_memory(checkpoint_path, device)
+    }
+
     /// Load Flux.1 pipeline from a local single-file checkpoint (.safetensors)
     pub fn from_single_file<P: AsRef<Path>>(checkpoint_path: P, device: Device) -> crate::error::Result<Self> {
         Self::from_single_file_streaming(checkpoint_path, device)
@@ -1022,6 +1064,230 @@ impl FluxPipeline {
         };
 
         Ok((image, metrics))
+    }
+
+    /// High-Throughput Batched Multi-Image Generation for Flux / SD3.5 architectures.
+    ///
+    /// Executes all images in a unified batch [B, Seq, Dim] through the MMDiT transformer
+    /// and VAE decoder, maximizing GPU Tensor Core utilization and saturating PCIe memory bus.
+    pub fn generate_batch_with_metrics<F>(
+        &mut self,
+        params: DiffusionParams,
+        batch_size: usize,
+        progress_cb: Option<F>,
+    ) -> crate::error::Result<(Vec<image::RgbImage>, GenerationMetrics)>
+    where
+        F: Fn(usize, usize, &Tensor),
+    {
+        if batch_size <= 1 {
+            let (img, m) = self.generate_with_metrics(params, progress_cb)?;
+            return Ok((vec![img], m));
+        }
+
+        let t_total = Instant::now();
+        let num_steps = params.num_steps;
+        let h_patches = (params.height + 15) / 16;
+        let w_patches = (params.width + 15) / 16;
+        let image_seq_len = h_patches * w_patches;
+        self.scheduler.set_timesteps_with_seq_len(num_steps, image_seq_len)?;
+
+        let in_channels = self.transformer.config.in_channels;
+        let c = in_channels / 4;
+        let ph = 2;
+        let pw = 2;
+
+        let mut latents_vec = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            let single_latent = if in_channels == 128 {
+                let raw_diff_noise = Tensor::randn(0f32, 1f32, (1, 128, h_patches, w_patches), &self.device)?.to_dtype(self.dtype)?;
+                raw_diff_noise.reshape((1, 128, h_patches * w_patches))?.permute((0, 2, 1))?.contiguous()?
+            } else {
+                let raw_noise = Tensor::randn(0f32, 1f32, (1, c, h_patches * ph, w_patches * pw), &self.device)?.to_dtype(self.dtype)?;
+                let reshaped = raw_noise.reshape((1, c, h_patches, ph, w_patches, pw))?;
+                let permuted = reshaped.permute((0, 2, 4, 1, 3, 5))?.contiguous()?;
+                permuted.reshape((1, h_patches * w_patches, in_channels))?
+            };
+            latents_vec.push(single_latent);
+        }
+        let latents_refs: Vec<&Tensor> = latents_vec.iter().collect();
+        let mut latents = Tensor::cat(&latents_refs, 0)?; // [B, Seq, in_channels]
+
+        // Prepare text tokens for batch
+        let sd35_cond = if self.is_sd35() {
+            Some(self.encode_sd35(params.prompt)?)
+        } else {
+            None
+        };
+
+        let raw_txt_tokens = if let Some((ctx, _)) = &sd35_cond {
+            ctx.clone()
+        } else if let Some(ref mut mistral) = self.mistral {
+            let txt_dim = if in_channels == 128 {
+                if self.transformer.config.hidden_size == 4096 { 4096 } else { 5120 }
+            } else { 0 };
+            let mistral_emb = if txt_dim == 0 {
+                mistral.encode(params.prompt, 512)?
+            } else {
+                mistral.encode_dim(params.prompt, 512, txt_dim)?
+            };
+            mistral_emb.to_device(&self.device)?.to_dtype(self.dtype)?
+        } else if let Some(ref mut qwen) = self.qwen3 {
+            let qwen_emb = qwen.encode(params.prompt, 512)?;
+            qwen_emb.to_device(&self.device)?.to_dtype(self.dtype)?
+        } else if let Some(ref mut t5) = self.t5xxl {
+            let t5_emb = t5.encode(params.prompt, 256)?;
+            t5_emb.to_device(&self.device)?.to_dtype(self.dtype)?
+        } else {
+            let dim = if in_channels == 128 { 7680 } else { 4096 };
+            (Tensor::randn(0f32, 1.0f32, (1, 256, dim), &self.device)? * 0.1)?.to_dtype(self.dtype)?
+        };
+
+        let expected_txt_dim = if self.transformer.config.in_channels == 128 {
+            self.transformer.txt_in_expected_in()
+        } else {
+            4096
+        };
+
+        let align_txt = |t: &Tensor| -> Result<Tensor> {
+            if t.dim(2)? < expected_txt_dim {
+                let pad = Tensor::zeros((t.dim(0)?, t.dim(1)?, expected_txt_dim - t.dim(2)?), self.dtype, &self.device)?;
+                Tensor::cat(&[t, &pad], 2)?.contiguous()
+            } else if t.dim(2)? > expected_txt_dim {
+                t.narrow(2, 0, expected_txt_dim)?.contiguous()
+            } else {
+                t.contiguous()
+            }
+        };
+
+        let single_txt = align_txt(&raw_txt_tokens)?;
+        let txt_refs: Vec<&Tensor> = (0..batch_size).map(|_| &single_txt).collect();
+        let txt_tokens = Tensor::cat(&txt_refs, 0)?; // [B, Seq_txt, Dim]
+
+        let y_vec = if let Some((_, pooled)) = &sd35_cond {
+            let y_refs: Vec<&Tensor> = (0..batch_size).map(|_| pooled).collect();
+            Some(Tensor::cat(&y_refs, 0)?)
+        } else if let Some(ref mut clip) = self.clip_l {
+            if !clip.has_tokenizer() {
+                let _ = clip.load_tokenizer("clip_tokenizer.json");
+            }
+            match clip.encode_pooled(params.prompt) {
+                Ok(vec) => {
+                    let y_single = vec.to_device(&self.device)?.to_dtype(self.dtype)?;
+                    let y_refs: Vec<&Tensor> = (0..batch_size).map(|_| &y_single).collect();
+                    Some(Tensor::cat(&y_refs, 0)?)
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        println!("⚡ Executing Flux Batched Multi-Image Forward (Batch: {}, {} steps)...", batch_size, num_steps);
+        let t_unet_start = Instant::now();
+
+        let guidance_tensor = if self.transformer.config.guidance_embed {
+            let g = params.guidance_scale as f32;
+            let g_slice = vec![g; batch_size];
+            Some(Tensor::from_slice(&g_slice, (batch_size,), &self.device)?.to_dtype(self.dtype)?)
+        } else {
+            None
+        };
+
+        let timesteps: Vec<usize> = self.scheduler.timesteps().to_vec();
+        let sigmas: Vec<f64> = self.scheduler.sigmas().to_vec();
+
+        for (step_idx, &t) in timesteps.iter().enumerate() {
+            let sigma = if step_idx < sigmas.len() { sigmas[step_idx] } else { 0.0 };
+            let t_slice = vec![sigma as f32; batch_size];
+            let t_tensor = Tensor::from_slice(&t_slice, (batch_size,), &self.device)?.to_dtype(self.dtype)?;
+
+            let velocity = self.transformer.forward_with_streamer(
+                &latents,
+                &txt_tokens,
+                &t_tensor,
+                y_vec.as_ref(),
+                guidance_tensor.as_ref(),
+                self.streamer.as_ref(),
+            )?;
+
+            latents = self.scheduler.step(&velocity, t, &latents)?;
+
+            if let Some(ref cb) = progress_cb {
+                cb(step_idx + 1, num_steps, &latents);
+            }
+        }
+
+        let unet_duration = t_unet_start.elapsed();
+        let unet_total_ms = unet_duration.as_secs_f64() * 1000.0;
+        let unet_it_per_sec = (num_steps * batch_size) as f64 / unet_duration.as_secs_f64();
+        let unet_step_avg_ms = unet_total_ms / num_steps as f64;
+
+        // Decode each batch item
+        let t_vae_start = Instant::now();
+        let mut decoded_images = Vec::with_capacity(batch_size);
+
+        for b in 0..batch_size {
+            let single_latent = latents.narrow(0, b, 1)?;
+            let unpatchified = if in_channels == 128 {
+                let grid_4d = single_latent.reshape((1, h_patches, w_patches, 128))?.permute((0, 3, 1, 2))?.contiguous()?;
+                let destandardized = if let Some(ref vae) = self.vae {
+                    if let (Some(mean), Some(var)) = (vae.bn_mean(), vae.bn_var()) {
+                        let mean_f32 = mean.to_dtype(DType::F32)?.reshape((1, 128, 1, 1))?;
+                        let var_f32 = var.to_dtype(DType::F32)?.reshape((1, 128, 1, 1))?;
+                        let std_f32 = (var_f32 + 1e-4)?.sqrt()?;
+                        let grid_f32 = grid_4d.to_dtype(DType::F32)?;
+                        let normed = grid_f32.broadcast_mul(&std_f32)?.broadcast_add(&mean_f32)?;
+                        normed.to_dtype(self.dtype)?
+                    } else {
+                        grid_4d
+                    }
+                } else {
+                    grid_4d
+                };
+                let spatial_first = destandardized.permute((0, 2, 3, 1))?.contiguous()?;
+                let reshaped = spatial_first.reshape((1, h_patches, w_patches, 32, 2, 2))?;
+                let permuted = reshaped.permute((0, 3, 1, 4, 2, 5))?.contiguous()?;
+                permuted.reshape((1, 32, h_patches * 2, w_patches * 2))?
+            } else if self.is_sd35() {
+                sd3_unpatchify(&single_latent, params.height, params.width)?
+            } else {
+                let normalized = if let Some(ref vae) = self.vae {
+                    if let (Some(mean), Some(var)) = (vae.bn_mean(), vae.bn_var()) {
+                        let mean_f32 = mean.to_dtype(DType::F32)?;
+                        let var_f32 = var.to_dtype(DType::F32)?;
+                        let std = (var_f32 + 1e-5)?.sqrt()?;
+                        let mean_bc = mean_f32.unsqueeze(0)?.unsqueeze(1)?;
+                        let std_bc = std.unsqueeze(0)?.unsqueeze(1)?;
+                        let latents_f32 = single_latent.to_dtype(DType::F32)?;
+                        let destandardized = latents_f32.broadcast_mul(&std_bc)?.broadcast_add(&mean_bc)?;
+                        destandardized.to_dtype(self.dtype)?
+                    } else {
+                        single_latent.clone()
+                    }
+                } else {
+                    single_latent.clone()
+                };
+                unpatchify(&normalized, params.height, params.width)?
+            };
+
+            let img = self.decode_final_latents(&unpatchified)?;
+            decoded_images.push(img);
+        }
+
+        let vae_decode_ms = t_vae_start.elapsed().as_secs_f64() * 1000.0;
+        let total_wallclock_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+        let metrics = GenerationMetrics {
+            prompt_encode_ms: 0.0,
+            unet_steps: num_steps,
+            unet_total_ms,
+            unet_it_per_sec,
+            unet_step_avg_ms,
+            vae_decode_ms,
+            total_wallclock_ms,
+        };
+
+        Ok((decoded_images, metrics))
     }
 
     /// Image-to-Image (Img2Img) Generation for Rectified Flow matching models.

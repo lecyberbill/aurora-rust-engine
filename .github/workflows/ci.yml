@@ -1,0 +1,158 @@
+# [WFGY] Zone: SAFE | λ: 0.1 | Fallbacks: 0 | Action: GitHub Actions Matrix CI/CD Cross-Compilation Workflow
+name: Aurora Engine CI/CD Matrix
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test-native:
+    name: Native Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-native-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-native-
+
+      - name: Run Cargo Check
+        run: cargo check --all-targets
+
+      - name: Run Unit Tests
+        run: cargo test --lib --verbose
+
+  build-cuda:
+    name: Build CUDA 12.x (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install CUDA Toolkit 12.4
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+
+      - name: Cache Cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ubuntu-cuda12-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-cuda12-
+
+      - name: Check CUDA Feature Build
+        run: cargo check --features cuda --all-targets
+
+      - name: Build CUDA Tests (No GPU execution)
+        run: cargo test --lib --features cuda --no-run
+
+  build-rocm:
+    name: Build ROCm 6.x / HIP (Ubuntu)
+    runs-on: ubuntu-latest
+    container:
+      image: rocm/dev-ubuntu-22.04:6.2
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Prerequisites
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            curl \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            ca-certificates
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Check ROCm Feature Build
+        env:
+          ROCM_PATH: /opt/rocm
+          HIP_PATH: /opt/rocm
+          HSA_OVERRIDE_GFX_VERSION: "12.0.1"
+        run: |
+          $HOME/.cargo/bin/cargo check --features rocm --all-targets
+
+      - name: Build ROCm Tests (No GPU execution)
+        env:
+          ROCM_PATH: /opt/rocm
+          HIP_PATH: /opt/rocm
+        run: |
+          $HOME/.cargo/bin/cargo test --lib --features rocm --no-run
+
+  release-package:
+    name: Release Binaries (${{ matrix.os }})
+    needs: [ test-native, build-cuda, build-rocm ]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Release Engine
+        run: cargo build --release --bins
+
+      - name: Archive Artifacts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          cp target/release/aurora_server dist/ || true
+          cp target/release/test_* dist/ || true
+          tar -czvf aurora-engine-linux-x86_64.tar.gz dist/
+
+      - name: Archive Artifacts (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Get-ChildItem target/release/*.exe | Copy-Item -Destination dist/
+          Compress-Archive -Path dist/* -DestinationPath aurora-engine-windows-x86_64.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurora-engine-${{ runner.os }}
+          path: |
+            aurora-engine-*.tar.gz
+            aurora-engine-*.zip

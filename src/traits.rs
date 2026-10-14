@@ -133,3 +133,21 @@ pub trait TextToImagePipeline {
 pub trait TextGenerationPipeline {
     fn generate(&mut self, prompt: &str, max_tokens: usize, temperature: f64) -> Result<String>;
 }
+
+/// Unified trait for Speech-to-Text / Audio Transcription models (Whisper, Moonshine).
+pub trait AudioTranscriptionModel {
+    /// Transcribe raw PCM audio samples into a text transcript.
+    fn transcribe_pcm(
+        &mut self,
+        samples: &[f32],
+        sample_rate: u32,
+        language: Option<&str>,
+    ) -> Result<String>;
+
+    /// Transcribe WAV audio bytes into a text transcript.
+    fn transcribe_wav_bytes(
+        &mut self,
+        wav_bytes: &[u8],
+        language: Option<&str>,
+    ) -> Result<String>;
+}

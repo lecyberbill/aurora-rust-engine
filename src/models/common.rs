@@ -10,6 +10,9 @@ use crate::traits::{DiffusionParams, Img2ImgParams, InpaintParams};
 /// Progress callback (step_index, total_steps, latent). Used object-safe (boxed, not generic).
 pub type ProgressFn<'a> = &'a mut (dyn FnMut(usize, usize, &Tensor) + 'a);
 
+/// Token generation callback (token_str) returning whether generation should continue.
+pub type TokenCallback<'a> = &'a mut (dyn FnMut(&str) -> bool + 'a);
+
 
 /// The broad category a loaded model belongs to. Mirrors the way HuggingFace groups
 /// `AutoModelForCausalLM`, `DiffusionPipeline`, `AutoModelForImageClassification`, etc.
@@ -81,6 +84,40 @@ pub trait GenerationModel: AnyModel {
         }
         prompt.push_str("<|im_start|>assistant\n");
         self.generate_with_reasoning(&prompt, max_tokens, temperature, reasoning_effort)
+    }
+
+    /// Streaming token generation with early-abort callback.
+    fn generate_stream(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f64,
+        on_token: Option<TokenCallback>,
+    ) -> Result<String> {
+        let full = self.generate(prompt, max_tokens, temperature)?;
+        if let Some(cb) = on_token {
+            cb(&full);
+        }
+        Ok(full)
+    }
+
+    /// Streaming chat generation with early-abort callback.
+    fn generate_chat_stream(
+        &mut self,
+        messages: &[(String, String)],
+        max_tokens: usize,
+        temperature: f64,
+        reasoning_effort: f64,
+        on_token: Option<TokenCallback>,
+    ) -> Result<(String, String, f64)> {
+        let (thinking, resp, tok_s) = self.generate_chat(messages, max_tokens, temperature, reasoning_effort)?;
+        if let Some(cb) = on_token {
+            if !thinking.is_empty() {
+                cb(&format!("<think>{thinking}</think>"));
+            }
+            cb(&resp);
+        }
+        Ok((thinking, resp, tok_s))
     }
 }
 

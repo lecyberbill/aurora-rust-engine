@@ -5,36 +5,49 @@ fn main() {
     #[cfg(feature = "rocm")]
     {
         let out_dir = std::env::var("OUT_DIR").unwrap();
-        let hip_source = "src/kernels/wmma_q4k_rdna4.hip";
-        let out_obj = format!("{out_dir}/wmma_q4k_rdna4.o");
-        let out_lib = format!("{out_dir}/libwmma_q4k_rdna4.a");
+        let kernels = [
+            ("src/kernels/wmma_q4k_rdna4.hip", "wmma_q4k_rdna4"),
+            ("src/kernels/fused_sdpa_rdna4.hip", "fused_sdpa_rdna4"),
+        ];
 
-        if std::path::Path::new(hip_source).exists() {
-            println!("cargo:rerun-if-changed={hip_source}");
-            let status = std::process::Command::new("/opt/rocm/bin/hipcc")
-                .args([
-                    "-c",
-                    hip_source,
-                    "-o",
-                    &out_obj,
-                    "--offload-arch=gfx1201",
-                    "-O3",
-                    "-fPIC",
-                    "-D__HIP_PLATFORM_AMD__",
-                ])
-                .status();
+        let mut compiled_objs = Vec::new();
 
-            if let Ok(st) = status {
-                if st.success() {
-                    let ar_status = std::process::Command::new("ar")
-                        .args(["rcs", &out_lib, &out_obj])
-                        .status();
-                    if let Ok(ar_st) = ar_status {
-                        if ar_st.success() {
-                            println!("cargo:rustc-link-search=native={out_dir}");
-                            println!("cargo:rustc-link-lib=static=wmma_q4k_rdna4");
-                        }
+        for (source, name) in kernels {
+            if std::path::Path::new(source).exists() {
+                println!("cargo:rerun-if-changed={source}");
+                let out_obj = format!("{out_dir}/{name}.o");
+                let status = std::process::Command::new("/opt/rocm/bin/hipcc")
+                    .args([
+                        "-c",
+                        source,
+                        "-o",
+                        &out_obj,
+                        "--offload-arch=gfx1201",
+                        "-O3",
+                        "-fPIC",
+                        "-D__HIP_PLATFORM_AMD__",
+                    ])
+                    .status();
+
+                if let Ok(st) = status {
+                    if st.success() {
+                        compiled_objs.push(out_obj);
                     }
+                }
+            }
+        }
+
+        if !compiled_objs.is_empty() {
+            let out_lib = format!("{out_dir}/libaurora_rocm_kernels.a");
+            let mut ar_args = vec!["rcs".to_string(), out_lib];
+            ar_args.extend(compiled_objs);
+            let ar_status = std::process::Command::new("ar")
+                .args(&ar_args)
+                .status();
+            if let Ok(ar_st) = ar_status {
+                if ar_st.success() {
+                    println!("cargo:rustc-link-search=native={out_dir}");
+                    println!("cargo:rustc-link-lib=static=aurora_rocm_kernels");
                 }
             }
         }

@@ -208,6 +208,57 @@ pub fn tiled_scaled_dot_product_attention(
     let (_bk, _hk, l_k, _dk) = k.dims4()?;
     let orig_dtype = q.dtype();
 
+    #[cfg(feature = "rocm")]
+    {
+        extern "C" {
+            fn launch_hip_fused_sdpa_f16(
+                q: *const std::ffi::c_void,
+                k: *const std::ffi::c_void,
+                v: *const std::ffi::c_void,
+                out: *mut std::ffi::c_void,
+                batch_size: i32,
+                num_heads: i32,
+                seq_q: i32,
+                seq_k: i32,
+                head_dim: i32,
+                scale: f32,
+                stream: *mut std::ffi::c_void,
+            );
+        }
+
+        // On ROCm device with F16, dispatch to native fused kernel
+        if q.device().is_rocm() && orig_dtype == candle_core::DType::F16 && d <= 128 {
+            let q_c = q.contiguous()?;
+            let k_c = k.contiguous()?;
+            let v_c = v.contiguous()?;
+            let out = candle_core::Tensor::zeros((b, h, l_q, d), orig_dtype, q.device())?;
+
+            if let (Some(q_ptr), Some(k_ptr), Some(v_ptr), Some(out_ptr)) = (
+                q_c.storage_and_layout().0.as_cuda_slice::<half::f16>().ok(),
+                k_c.storage_and_layout().0.as_cuda_slice::<half::f16>().ok(),
+                v_c.storage_and_layout().0.as_cuda_slice::<half::f16>().ok(),
+                out.storage_and_layout().0.as_cuda_slice::<half::f16>().ok(),
+            ) {
+                unsafe {
+                    launch_hip_fused_sdpa_f16(
+                        q_ptr.device_ptr() as *const _,
+                        k_ptr.device_ptr() as *const _,
+                        v_ptr.device_ptr() as *const _,
+                        out_ptr.device_ptr() as *mut _,
+                        b as i32,
+                        h as i32,
+                        l_q as i32,
+                        l_k as i32,
+                        d as i32,
+                        scale as f32,
+                        std::ptr::null_mut(),
+                    );
+                }
+                return Ok(out);
+            }
+        }
+    }
+
     // If sequence length is small (e.g. <= 1024), standard matmul is already fast
     if l_q <= chunk_q && l_k <= 1024 {
         let q_f32 = (q.to_dtype(candle_core::DType::F32)? * scale)?;

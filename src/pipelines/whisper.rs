@@ -183,3 +183,33 @@ impl WhisperPipeline {
         })
     }
 }
+
+impl crate::traits::AudioTranscriptionModel for WhisperPipeline {
+    fn transcribe_pcm(
+        &mut self,
+        samples: &[f32],
+        sample_rate: u32,
+        language: Option<&str>,
+    ) -> crate::error::Result<String> {
+        let audio = WavAudio {
+            samples: samples.to_vec(),
+            sample_rate,
+            channels: 1,
+        };
+        let res = self.transcribe(&audio, language, false)
+            .map_err(|e| crate::error::LuminaError::Config(e.to_string()))?;
+        Ok(res.text)
+    }
+
+    fn transcribe_wav_bytes(
+        &mut self,
+        wav_bytes: &[u8],
+        language: Option<&str>,
+    ) -> crate::error::Result<String> {
+        let audio = WavAudio::from_wav_bytes(wav_bytes)
+            .map_err(|e| crate::error::LuminaError::Config(e.to_string()))?;
+        let res = self.transcribe(&audio, language, false)
+            .map_err(|e| crate::error::LuminaError::Config(e.to_string()))?;
+        Ok(res.text)
+    }
+}

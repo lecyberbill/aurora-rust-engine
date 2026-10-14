@@ -1,7 +1,7 @@
 // [WFGY] Zone: SAFE | λ: 0.15 | Fallbacks: 0 | Action: Pure Rust WAV PCM16 / IEEE-Float32 Audio Encoder & Decoder
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use anyhow::{bail, Context, Result};
 
@@ -147,6 +147,11 @@ impl WavAudio {
     pub fn load_wav<P: AsRef<Path>>(path: P) -> Result<Self> {
         read_wav_pcm(path)
     }
+
+    /// Decode WAV audio directly from in-memory bytes.
+    pub fn from_wav_bytes(bytes: &[u8]) -> Result<Self> {
+        read_wav_pcm_from_bytes(bytes)
+    }
 }
 
 /// Write 16-bit signed PCM WAV to a file.
@@ -202,8 +207,16 @@ pub fn write_wav_pcm16<P: AsRef<Path>>(
 pub fn read_wav_pcm<P: AsRef<Path>>(path: P) -> Result<WavAudio> {
     let file = File::open(path.as_ref())
         .with_context(|| format!("Failed to open WAV file at {:?}", path.as_ref()))?;
-    let mut reader = BufReader::new(file);
+    read_wav_pcm_from_reader(BufReader::new(file))
+}
 
+/// Read WAV audio from in-memory byte slice into normalized f32 samples.
+pub fn read_wav_pcm_from_bytes(bytes: &[u8]) -> Result<WavAudio> {
+    read_wav_pcm_from_reader(Cursor::new(bytes))
+}
+
+/// Read a WAV stream from any seekable reader into normalized f32 samples.
+pub fn read_wav_pcm_from_reader<R: Read + Seek>(mut reader: R) -> Result<WavAudio> {
     let mut riff = [0u8; 4];
     reader.read_exact(&mut riff)?;
     if &riff != b"RIFF" {
@@ -366,5 +379,24 @@ mod tests {
             let diff = (a - b).abs();
             assert!(diff < 0.0001, "Sample diff too large: {} vs {}", a, b);
         }
+    }
+
+    #[test]
+    fn test_wav_from_bytes_roundtrip() {
+        let sample_rate = 16000;
+        let channels = 1;
+        let samples = vec![0.0f32, 0.5, -0.5, 0.25, -0.25];
+        let audio = WavAudio::new(samples.clone(), sample_rate, channels);
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("aurora_test_audio_bytes.wav");
+
+        audio.save_wav(&test_path).expect("Failed to write WAV");
+        let bytes = std::fs::read(&test_path).expect("Failed to read WAV bytes");
+        let loaded = WavAudio::from_wav_bytes(&bytes).expect("Failed to decode WAV from bytes");
+        let _ = std::fs::remove_file(&test_path);
+
+        assert_eq!(loaded.sample_rate, sample_rate);
+        assert_eq!(loaded.channels, channels);
+        assert_eq!(loaded.samples.len(), samples.len());
     }
 }

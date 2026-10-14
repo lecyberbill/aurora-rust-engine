@@ -126,6 +126,16 @@ impl<'a> ZeroCopyTensorSlice<'a> {
                 let bf16_vec: Vec<bf16> = slice.iter().map(|&x| bf16::from_f32(x)).collect();
                 Ok(Tensor::from_vec(bf16_vec, shape, device).map_err(LuminaError::Candle)?)
             }
+            (safetensors::Dtype::BF16, DType::F16) => {
+                let slice = cast_slice::<bf16>(self.data);
+                let f16_vec: Vec<f16> = slice.iter().map(|&x| f16::from_f32(x.to_f32())).collect();
+                Ok(Tensor::from_vec(f16_vec, shape, device).map_err(LuminaError::Candle)?)
+            }
+            (safetensors::Dtype::F16, DType::BF16) => {
+                let slice = cast_slice::<f16>(self.data);
+                let bf16_vec: Vec<bf16> = slice.iter().map(|&x| bf16::from_f32(x.to_f32())).collect();
+                Ok(Tensor::from_vec(bf16_vec, shape, device).map_err(LuminaError::Candle)?)
+            }
             (safetensors::Dtype::I32, DType::I64) => {
                 let slice = cast_slice::<i32>(self.data);
                 let i64_vec: Vec<i64> = slice.iter().map(|&x| x as i64).collect();

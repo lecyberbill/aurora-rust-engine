@@ -5,7 +5,7 @@ pub mod causal;
 use candle_core::{DType, Device, Tensor};
 use crate::error::{LuminaError, Result};
 use crate::text::{Mistral3TextEncoder, Qwen3TextEncoder, T5TextEncoder};
-pub use causal::{CausalLMConfig, CausalLMPipeline, TextGenParams};
+pub use causal::{CausalLM, CausalLMConfig, CausalLMPipeline, ChatMessage, ChatRole, TextGenParams};
 use super::common::{AnyModel, EncodeModel, GenerationModel, ModelKind};
 
 /// A text backend boxed into one type.
@@ -127,7 +127,7 @@ impl GenerationModel for TextModel {
                 Ok((String::new(), text, 0.0))
             }
             TextBackend::NativeAccelerated { model_tag, endpoint, .. } => {
-                let mut options = serde_json::json!({
+                let options = serde_json::json!({
                     "num_predict": max_tokens,
                     "temperature": temperature,
                     "num_gpu": 99,
@@ -281,6 +281,30 @@ impl GenerationModel for TextModel {
                 }
                 prompt.push_str("<|im_start|>assistant\n");
                 self.generate_with_reasoning(&prompt, max_tokens, temperature, _reasoning_effort)
+            }
+        }
+    }
+
+    fn generate_stream(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f64,
+        on_token: Option<crate::models::common::TokenCallback>,
+    ) -> Result<String> {
+        match &mut self.inner {
+            TextBackend::CausalLM(pipeline) => {
+                let mut params = TextGenParams::default();
+                params.max_tokens = max_tokens;
+                params.temperature = temperature;
+                pipeline.generate_with_callback(prompt, &params, on_token)
+            }
+            _ => {
+                let text = self.generate(prompt, max_tokens, temperature)?;
+                if let Some(cb) = on_token {
+                    cb(&text);
+                }
+                Ok(text)
             }
         }
     }

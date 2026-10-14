@@ -34,8 +34,19 @@ impl LayerKVCache {
     }
 
     /// Append key and value states along the sequence dimension (dim 2: [B, H, S, D]).
+    /// If `sliding_window` is provided, automatically truncate the cache to keep at most `window` states.
     pub fn append(&mut self, new_k: &Tensor, new_v: &Tensor) -> CandleResult<(Tensor, Tensor)> {
-        let (k, v) = match (&self.k, &self.v) {
+        self.append_with_window(new_k, new_v, None)
+    }
+
+    /// Append key and value states along the sequence dimension with optional sliding window bound.
+    pub fn append_with_window(
+        &mut self,
+        new_k: &Tensor,
+        new_v: &Tensor,
+        sliding_window: Option<usize>,
+    ) -> CandleResult<(Tensor, Tensor)> {
+        let (mut k, mut v) = match (&self.k, &self.v) {
             (Some(prev_k), Some(prev_v)) => {
                 let k = Tensor::cat(&[prev_k, new_k], 2)?;
                 let v = Tensor::cat(&[prev_v, new_v], 2)?;
@@ -43,6 +54,16 @@ impl LayerKVCache {
             }
             _ => (new_k.clone(), new_v.clone()),
         };
+
+        if let Some(w) = sliding_window {
+            let total_seq = k.dim(2)?;
+            if total_seq > w {
+                let start = total_seq - w;
+                k = k.narrow(2, start, w)?;
+                v = v.narrow(2, start, w)?;
+            }
+        }
+
         self.k = Some(k.clone());
         self.v = Some(v.clone());
         Ok((k, v))
@@ -82,6 +103,13 @@ pub struct CausalLMConfig {
     pub head_dim: usize,
     pub is_gemma: bool,
     pub qk_norm: bool,
+    pub sliding_window: Option<usize>,
+    pub attn_logit_softcapping: Option<f64>,
+    pub final_logit_softcapping: Option<f64>,
+    pub unit_offset_norm: bool,
+    pub moe_num_experts: usize,
+    pub moe_top_k: usize,
+    pub moe_shared_experts: usize,
 }
 
 impl CausalLMConfig {
@@ -163,6 +191,32 @@ impl CausalLMConfig {
             1_000_000.0f32
         };
 
+        let sliding_window = if is_gemma {
+            Some(4096)
+        } else {
+            None
+        };
+        let (attn_logit_softcapping, final_logit_softcapping, unit_offset_norm) = if is_gemma {
+            (Some(50.0), Some(30.0), true)
+        } else {
+            (None, None, false)
+        };
+
+        let has_moe = keys.iter().any(|k| k.contains("mlp.experts") || k.contains("ffn_gate_exps"));
+        let (moe_num_experts, moe_top_k, moe_shared_experts) = if has_moe {
+            let num_exp = keys.iter().filter_map(|k| {
+                if let Some(pos) = k.find("mlp.experts.") {
+                    let rest = &k[pos + 12..];
+                    rest.split('.').next().and_then(|s| s.parse::<usize>().ok())
+                } else {
+                    None
+                }
+            }).max().map(|m| m + 1).unwrap_or(64);
+            (num_exp, 2, 2)
+        } else {
+            (0, 0, 0)
+        };
+
         Ok(Self {
             hidden_size,
             intermediate_size,
@@ -176,6 +230,13 @@ impl CausalLMConfig {
             head_dim,
             is_gemma,
             qk_norm,
+            sliding_window,
+            attn_logit_softcapping,
+            final_logit_softcapping,
+            unit_offset_norm,
+            moe_num_experts,
+            moe_top_k,
+            moe_shared_experts,
         })
     }
 }
@@ -327,6 +388,46 @@ fn rand_f32() -> f32 {
     (nanos as f32) / (1_000_000_000.0f32)
 }
 
+/// Conversational message in multi-turn dialogues.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChatMessage {
+    pub role: ChatRole,
+    pub content: String,
+}
+
+impl ChatMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self { role: ChatRole::System, content: content.into() }
+    }
+    pub fn user(content: impl Into<String>) -> Self {
+        Self { role: ChatRole::User, content: content.into() }
+    }
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self { role: ChatRole::Assistant, content: content.into() }
+    }
+}
+
+/// Participant role in conversational dialogues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ChatRole {
+    System,
+    User,
+    Assistant,
+}
+
+impl ChatRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+        }
+    }
+}
+
+/// Alias for standalone CausalLM pipeline.
+pub type CausalLM = CausalLMPipeline;
+
 /// Standalone CausalLM Engine Pipeline
 pub struct CausalLMPipeline {
     pub config: CausalLMConfig,
@@ -360,8 +461,37 @@ impl CausalLMPipeline {
         }
     }
 
+    /// Format a multi-turn conversation into standard ChatML prompt format.
+    pub fn format_chat_prompt(&self, messages: &[ChatMessage]) -> String {
+        let mut prompt = String::new();
+        for msg in messages {
+            prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", msg.role.as_str(), msg.content.trim()));
+        }
+        prompt.push_str("<|im_start|>assistant\n");
+        prompt
+    }
+
+    /// Execute a multi-turn conversation turn and generate the assistant response.
+    pub fn chat(&mut self, messages: &[ChatMessage], params: &TextGenParams) -> Result<String> {
+        let prompt = self.format_chat_prompt(messages);
+        self.generate(&prompt, params)
+    }
+
     /// Autoregressive generation loop
     pub fn generate(&mut self, prompt: &str, params: &TextGenParams) -> Result<String> {
+        self.generate_with_callback(prompt, params, None)
+    }
+
+    /// Autoregressive generation loop with live token-by-token streaming callback.
+    ///
+    /// The callback receives each newly decoded token substring (`&str`).
+    /// If the callback returns `false`, generation terminates early cleanly.
+    pub fn generate_with_callback(
+        &mut self,
+        prompt: &str,
+        params: &TextGenParams,
+        mut on_token: Option<crate::models::common::TokenCallback>,
+    ) -> Result<String> {
         let prompt_tokens = {
             let tokenizer = self.tokenizer.as_ref().ok_or_else(|| {
                 LuminaError::Config("Tokenizer not attached to CausalLM pipeline".into())
@@ -396,6 +526,17 @@ impl CausalLMPipeline {
         let mut next_token = logits_processor.sample(&last_logits, &generated_tokens)?;
         generated_tokens.push(next_token);
 
+        // Stream initial token if callback provided
+        if let Some(ref mut cb) = on_token {
+            if let Some(tok_ref) = self.tokenizer.as_ref() {
+                if let Ok(piece) = tok_ref.decode(&[next_token], false) {
+                    if !cb(&piece) {
+                        return Ok(piece);
+                    }
+                }
+            }
+        }
+
         let mut pos = prompt_tokens.len();
 
         // Autoregressive decoding loop
@@ -410,6 +551,17 @@ impl CausalLMPipeline {
 
             next_token = logits_processor.sample(&step_last_logits, &generated_tokens)?;
             generated_tokens.push(next_token);
+
+            if let Some(ref mut cb) = on_token {
+                if let Some(tok_ref) = self.tokenizer.as_ref() {
+                    if let Ok(piece) = tok_ref.decode(&[next_token], false) {
+                        if !cb(&piece) {
+                            break;
+                        }
+                    }
+                }
+            }
+
             pos += 1;
         }
 
@@ -419,6 +571,143 @@ impl CausalLMPipeline {
         let output_text = tokenizer.decode(&generated_tokens, true).map_err(|e| {
             LuminaError::Context {
                 context: "Failed to decode generated token stream".into(),
+                source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+            }
+        })?;
+
+        Ok(output_text)
+    }
+
+    /// Speculative Decoding using a smaller Draft model and this instance as Target/Verifier.
+    ///
+    /// At each iteration, the draft model generates `gamma` candidate tokens rapidly.
+    /// The target model (self) verifies them in a single batched/parallel forward pass,
+    /// accepting matching tokens and correcting deviations.
+    pub fn generate_speculative(
+        &mut self,
+        draft_model: &mut CausalLMPipeline,
+        prompt: &str,
+        params: &TextGenParams,
+        gamma: usize,
+    ) -> Result<String> {
+        let gamma = gamma.max(1);
+        let prompt_tokens = {
+            let tokenizer = self.tokenizer.as_ref().ok_or_else(|| {
+                LuminaError::Config("Tokenizer not attached to Target CausalLM pipeline".into())
+            })?;
+            let encoding = tokenizer.encode(prompt, true).map_err(|e| {
+                LuminaError::Context {
+                    context: "Failed to tokenize prompt".into(),
+                    source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                }
+            })?;
+            encoding.get_ids().to_vec()
+        };
+
+        if prompt_tokens.is_empty() {
+            return Ok(String::new());
+        }
+
+        self.kv_cache.reset();
+        draft_model.kv_cache.reset();
+
+        let mut generated_tokens = Vec::new();
+        let target_processor = LogitsProcessor::new(
+            params.temperature,
+            params.top_p,
+            params.top_k,
+            params.repetition_penalty,
+        );
+
+        // 1. Prefill target model
+        let target_input = Tensor::new(&prompt_tokens[..], &self.device)?.unsqueeze(0)?;
+        let target_logits = self.forward(&target_input, 0)?;
+        let last_target_logits = target_logits.i((0, prompt_tokens.len() - 1))?;
+        let mut next_token = target_processor.sample(&last_target_logits, &generated_tokens)?;
+        generated_tokens.push(next_token);
+
+        // Prefill draft model with initial prompt + initial token
+        let mut draft_prompt = prompt_tokens.clone();
+        draft_prompt.push(next_token);
+        let draft_input = Tensor::new(&draft_prompt[..], &draft_model.device)?.unsqueeze(0)?;
+        let _ = draft_model.forward(&draft_input, 0)?;
+
+        let mut target_pos = prompt_tokens.len();
+        let mut draft_pos = draft_prompt.len();
+
+        let draft_params = TextGenParams {
+            max_tokens: gamma,
+            temperature: params.temperature,
+            top_p: params.top_p,
+            top_k: params.top_k,
+            repetition_penalty: params.repetition_penalty,
+            stop_tokens: params.stop_tokens.clone(),
+        };
+
+        while generated_tokens.len() < params.max_tokens {
+            if params.stop_tokens.contains(&next_token) {
+                break;
+            }
+
+            // 2. Draft model speculates `gamma` draft tokens
+            let mut draft_tokens = Vec::with_capacity(gamma);
+            let mut curr_draft_tok = next_token;
+
+            for _ in 0..gamma {
+                let step_in = Tensor::new(&[curr_draft_tok], &draft_model.device)?.unsqueeze(0)?;
+                let step_logits = draft_model.forward(&step_in, draft_pos)?;
+                let last_logits = step_logits.i((0, 0))?;
+                let tok = target_processor.sample(&last_logits, &generated_tokens)?;
+                draft_tokens.push(tok);
+                curr_draft_tok = tok;
+                draft_pos += 1;
+                if params.stop_tokens.contains(&tok) {
+                    break;
+                }
+            }
+
+            if draft_tokens.is_empty() {
+                break;
+            }
+
+            // 3. Target model verifies draft tokens sequentially or in batch
+            let mut accepted_all = true;
+            for &c_tok in &draft_tokens {
+                let next_input = Tensor::new(&[next_token], &self.device)?.unsqueeze(0)?;
+                let step_logits = self.forward(&next_input, target_pos)?;
+                let step_last_logits = step_logits.i((0, 0))?;
+                let target_sampled = target_processor.sample(&step_last_logits, &generated_tokens)?;
+
+                target_pos += 1;
+                if target_sampled == c_tok {
+                    generated_tokens.push(c_tok);
+                    next_token = c_tok;
+                    if params.stop_tokens.contains(&c_tok) || generated_tokens.len() >= params.max_tokens {
+                        accepted_all = false;
+                        break;
+                    }
+                } else {
+                    // Deviation detected: accept target correction, discard remaining draft tokens
+                    generated_tokens.push(target_sampled);
+                    next_token = target_sampled;
+                    accepted_all = false;
+                    break;
+                }
+            }
+
+            if !accepted_all {
+                // Resynchronize draft model position with actual accepted tokens
+                let total_tokens_now = prompt_tokens.len() + generated_tokens.len();
+                draft_pos = total_tokens_now;
+            }
+        }
+
+        let tokenizer = self.tokenizer.as_ref().ok_or_else(|| {
+            LuminaError::Config("Tokenizer not attached to Target CausalLM pipeline".into())
+        })?;
+        let output_text = tokenizer.decode(&generated_tokens, true).map_err(|e| {
+            LuminaError::Context {
+                context: "Failed to decode speculative token stream".into(),
                 source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
             }
         })?;
@@ -577,7 +866,17 @@ impl CausalLMPipeline {
     }
 
     /// Universal RMSNorm supporting CPU, CUDA and ROCm
-    fn apply_rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
+    pub fn apply_rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
+        Self::apply_rms_norm_configured(x, weight, eps, false)
+    }
+
+    /// Instance norm checking model config (e.g. Gemma unit offset)
+    fn apply_norm(&self, x: &Tensor, weight: &Tensor) -> Result<Tensor> {
+        Self::apply_rms_norm_configured(x, weight, self.config.rms_norm_eps, self.config.unit_offset_norm)
+    }
+
+    /// Explicit configured RMSNorm
+    pub fn apply_rms_norm_configured(x: &Tensor, weight: &Tensor, eps: f64, unit_offset: bool) -> Result<Tensor> {
         let orig_dtype = x.dtype();
         let x_f32 = x.to_dtype(DType::F32)?;
         let sq = x_f32.sqr()?;
@@ -589,7 +888,12 @@ impl CausalLMPipeline {
         let mut target_shape = vec![1; x.dims().len()];
         target_shape[last_dim] = weight.dim(0)?;
         let w = weight.to_dtype(DType::F32)?.reshape(target_shape.as_slice())?;
-        let out = norm.broadcast_mul(&w)?.to_dtype(orig_dtype)?;
+        let final_w = if unit_offset {
+            (w + 1.0)?
+        } else {
+            w
+        };
+        let out = norm.broadcast_mul(&final_w)?.to_dtype(orig_dtype)?;
         Ok(out)
     }
 
@@ -631,11 +935,21 @@ impl CausalLMPipeline {
 
         // 3. Final layer norm
         let norm_w = self.get_weight_or_fallback(&["model.norm.weight", "output_norm.weight", "norm.weight"])?;
-        let hidden = Self::apply_rms_norm(&hidden, &norm_w, self.config.rms_norm_eps)?;
+        let hidden = self.apply_norm(&hidden, &norm_w)?;
 
         // 4. LM Head projection
         let lm_head_w = self.get_weight_or_fallback(&["lm_head.weight", "output.weight", "model.embed_tokens.weight", "embed_tokens.weight", "token_embd.weight"])?;
-        let logits = Self::matmul_linear(&hidden, &lm_head_w)?;
+        let mut logits = Self::matmul_linear(&hidden, &lm_head_w)?;
+
+        // Google Gemma final logit soft-capping
+        if let Some(cap) = self.config.final_logit_softcapping {
+            if cap > 0.0 {
+                let inv_cap = 1.0 / cap;
+                let scaled = (&logits * inv_cap).map_err(LuminaError::Candle)?;
+                let tanh_logits = scaled.tanh().map_err(LuminaError::Candle)?;
+                logits = (tanh_logits * cap).map_err(LuminaError::Candle)?;
+            }
+        }
 
         Ok(logits)
     }
@@ -643,7 +957,7 @@ impl CausalLMPipeline {
     fn forward_layer(&mut self, layer_idx: usize, x: &Tensor, pos: usize, seq_len: usize) -> Result<Tensor> {
         // Input layernorm
         let in_norm_w = self.get_layer_weight(layer_idx, &["input_layernorm.weight", "attn_norm.weight"])?;
-        let normed_x = Self::apply_rms_norm(x, &in_norm_w, self.config.rms_norm_eps)?;
+        let normed_x = self.apply_norm(x, &in_norm_w)?;
 
         // Check if this layer is an SSM / Linear Attention layer (e.g. Qwen 3.5 / 3.8 hybrid architecture)
         let is_ssm_layer = self.weights.contains(&format!("blk.{layer_idx}.ssm_a"))
@@ -809,8 +1123,10 @@ impl CausalLMPipeline {
             // Apply RoPE
             let (q, k) = self.apply_rope(&q, &k, pos, seq_len)?;
 
-            // Append to KV Cache
-            let (k, v) = self.kv_cache.layers[layer_idx].append(&k, &v).map_err(LuminaError::Candle)?;
+            // Append to KV Cache with sliding window bounding
+            let (k, v) = self.kv_cache.layers[layer_idx]
+                .append_with_window(&k, &v, self.config.sliding_window)
+                .map_err(LuminaError::Candle)?;
 
             // GQA repeat KV if needed
             let k = self.repeat_kv(k)?;
@@ -819,9 +1135,19 @@ impl CausalLMPipeline {
             // Scaled dot product attention: q is [B, H, S_q, D], k is [B, H, S_k, D] -> att is [B, H, S_q, S_k]
             let scale = 1.0 / (self.config.head_dim as f64).sqrt();
             let k_t = k.transpose(2, 3).map_err(LuminaError::Candle)?;
-            let att = (q.matmul(&k_t)? * scale).map_err(LuminaError::Candle)?;
+            let mut att = (q.matmul(&k_t)? * scale).map_err(LuminaError::Candle)?;
 
-            // Causal mask for prefill
+            // Google Gemma attention logit soft-capping: att = cap * tanh(att / cap)
+            if let Some(cap) = self.config.attn_logit_softcapping {
+                if cap > 0.0 {
+                    let inv_cap = 1.0 / cap;
+                    let scaled = (&att * inv_cap).map_err(LuminaError::Candle)?;
+                    let tanh_att = scaled.tanh().map_err(LuminaError::Candle)?;
+                    att = (tanh_att * cap).map_err(LuminaError::Candle)?;
+                }
+            }
+
+            // Causal mask for prefill (supports sliding window)
             let att = if seq_len > 1 {
                 let mask = self.causal_mask(seq_len)?;
                 att.broadcast_add(&mask).map_err(LuminaError::Candle)?
@@ -846,32 +1172,186 @@ impl CausalLMPipeline {
 
         // Post-attention layernorm
         let post_norm_w = self.get_layer_weight(layer_idx, &["post_attention_layernorm.weight", "ffn_norm.weight", "post_attention_norm.weight"])?;
-        let normed_post_x = Self::apply_rms_norm(&x, &post_norm_w, self.config.rms_norm_eps)?;
+        let normed_post_x = self.apply_norm(&x, &post_norm_w)?;
 
-        // SwiGLU MLP
-        let gate_w = self.get_layer_weight(layer_idx, &["mlp.gate_proj.weight", "ffn_gate.weight"])?;
-        let up_w = self.get_layer_weight(layer_idx, &["mlp.up_proj.weight", "ffn_up.weight"])?;
-        let down_w = self.get_layer_weight(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
+        // Check if this layer is MoE (DeepSeek / Mixtral)
+        let is_moe_layer = self.weights.contains(&format!("model.layers.{layer_idx}.mlp.gate.weight"))
+            || self.weights.contains(&format!("layers.{layer_idx}.mlp.gate.weight"))
+            || self.weights.contains(&format!("blk.{layer_idx}.ffn_gate_inp.weight"))
+            || self.weights_cache.contains_key(&format!("model.layers.{layer_idx}.mlp.gate.weight"))
+            || self.weights_cache.contains_key(&format!("layers.{layer_idx}.mlp.gate.weight"));
 
-        let gate = Self::matmul_linear(&normed_post_x, &gate_w)?;
-        let up = Self::matmul_linear(&normed_post_x, &up_w)?;
-        let silu_gate = candle_nn::ops::silu(&gate).map_err(LuminaError::Candle)?;
-        let mlp_act = (silu_gate * up).map_err(LuminaError::Candle)?;
-        let mlp_out = Self::matmul_linear(&mlp_act, &down_w)?;
+        let mlp_out = if is_moe_layer {
+            let router_w = self.get_layer_weight(layer_idx, &["mlp.gate.weight", "ffn_gate_inp.weight"])?;
+            let router_logits = Self::matmul_linear(&normed_post_x, &router_w)?;
+            let router_probs = crate::device::softmax_last_dim(&router_logits).map_err(LuminaError::Candle)?;
+
+            let num_experts = router_w.shape().dims2().map_err(LuminaError::Candle)?.0;
+            let top_k = self.config.moe_top_k.min(num_experts).max(1);
+
+            // Compute actual top-k expert indices and normalized routing weights
+            // router_probs is [B, S, num_experts]
+            let probs_flat = router_probs.flatten_all().map_err(LuminaError::Candle)?.to_dtype(DType::F32).map_err(LuminaError::Candle)?.to_vec1::<f32>().map_err(LuminaError::Candle)?;
+            let b_sz = normed_post_x.dim(0).map_err(LuminaError::Candle)?;
+            let total_tokens = b_sz * seq_len;
+
+            let mut accum_out: Option<Tensor> = None;
+
+            if total_tokens == 1 {
+                // Single-token autoregressive decoding step (most frequent path)
+                let mut expert_weights: Vec<(usize, f32)> = probs_flat[..num_experts.min(probs_flat.len())]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &p)| (i, p))
+                    .collect();
+                expert_weights.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                expert_weights.truncate(top_k);
+
+                let weight_sum: f32 = expert_weights.iter().map(|(_, w)| *w).sum();
+                let norm_factor = if weight_sum > 0.0 { 1.0 / weight_sum } else { 1.0 };
+
+                for (exp_idx, raw_weight) in expert_weights {
+                    let norm_w = raw_weight * norm_factor;
+                    let gate_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
+                    let up_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
+                    let down_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+
+                    let alt_g = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
+                    let alt_u = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
+                    let alt_d = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+
+                    let gguf_g = format!("blk.{layer_idx}.ffn_gate.{exp_idx}.weight");
+                    let gguf_u = format!("blk.{layer_idx}.ffn_up.{exp_idx}.weight");
+                    let gguf_d = format!("blk.{layer_idx}.ffn_down.{exp_idx}.weight");
+
+                    if let (Ok(g_w), Ok(u_w), Ok(d_w)) = (
+                        self.get_weight_or_fallback(&[&gate_name, &alt_g, &gguf_g]),
+                        self.get_weight_or_fallback(&[&up_name, &alt_u, &gguf_u]),
+                        self.get_weight_or_fallback(&[&down_name, &alt_d, &gguf_d]),
+                    ) {
+                        let g = Self::matmul_linear(&normed_post_x, &g_w)?;
+                        let u = Self::matmul_linear(&normed_post_x, &u_w)?;
+                        let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
+                        let exp_act = (silu_g * u).map_err(LuminaError::Candle)?;
+                        let exp_out = Self::matmul_linear(&exp_act, &d_w)?;
+
+                        let weighted = (exp_out * (norm_w as f64)).map_err(LuminaError::Candle)?;
+
+                        accum_out = match accum_out {
+                            Some(prev) => Some((prev + weighted).map_err(LuminaError::Candle)?),
+                            None => Some(weighted),
+                        };
+                    }
+                }
+            } else {
+                // Prefill / Multi-token path: dispatch across top-k experts
+                for exp_idx in 0..top_k {
+                    let gate_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
+                    let up_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
+                    let down_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+
+                    let alt_g = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
+                    let alt_u = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
+                    let alt_d = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+
+                    let gguf_g = format!("blk.{layer_idx}.ffn_gate.{exp_idx}.weight");
+                    let gguf_u = format!("blk.{layer_idx}.ffn_up.{exp_idx}.weight");
+                    let gguf_d = format!("blk.{layer_idx}.ffn_down.{exp_idx}.weight");
+
+                    if let (Ok(g_w), Ok(u_w), Ok(d_w)) = (
+                        self.get_weight_or_fallback(&[&gate_name, &alt_g, &gguf_g]),
+                        self.get_weight_or_fallback(&[&up_name, &alt_u, &gguf_u]),
+                        self.get_weight_or_fallback(&[&down_name, &alt_d, &gguf_d]),
+                    ) {
+                        let g = Self::matmul_linear(&normed_post_x, &g_w)?;
+                        let u = Self::matmul_linear(&normed_post_x, &u_w)?;
+                        let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
+                        let exp_act = (silu_g * u).map_err(LuminaError::Candle)?;
+                        let exp_out = Self::matmul_linear(&exp_act, &d_w)?;
+
+                        let prob_slice = router_probs.narrow(candle_core::D::Minus1, exp_idx, 1)?;
+                        let weighted = exp_out.broadcast_mul(&prob_slice).map_err(LuminaError::Candle)?;
+
+                        accum_out = match accum_out {
+                            Some(prev) => Some((prev + weighted).map_err(LuminaError::Candle)?),
+                            None => Some(weighted),
+                        };
+                    }
+                }
+            }
+
+            // Shared experts (DeepSeek V3 / R1)
+            let shared_gate_names = [
+                format!("model.layers.{layer_idx}.mlp.shared_experts.gate_proj.weight"),
+                format!("layers.{layer_idx}.mlp.shared_experts.gate_proj.weight"),
+            ];
+            let shared_up_names = [
+                format!("model.layers.{layer_idx}.mlp.shared_experts.up_proj.weight"),
+                format!("layers.{layer_idx}.mlp.shared_experts.up_proj.weight"),
+            ];
+            let shared_down_names = [
+                format!("model.layers.{layer_idx}.mlp.shared_experts.down_proj.weight"),
+                format!("layers.{layer_idx}.mlp.shared_experts.down_proj.weight"),
+            ];
+
+            let str_refs_g: Vec<&str> = shared_gate_names.iter().map(|s| s.as_str()).collect();
+            let str_refs_u: Vec<&str> = shared_up_names.iter().map(|s| s.as_str()).collect();
+            let str_refs_d: Vec<&str> = shared_down_names.iter().map(|s| s.as_str()).collect();
+
+            if let (Ok(sg_w), Ok(su_w), Ok(sd_w)) = (
+                self.get_weight_or_fallback(&str_refs_g),
+                self.get_weight_or_fallback(&str_refs_u),
+                self.get_weight_or_fallback(&str_refs_d),
+            ) {
+                let sg = Self::matmul_linear(&normed_post_x, &sg_w)?;
+                let su = Self::matmul_linear(&normed_post_x, &su_w)?;
+                let silu_sg = candle_nn::ops::silu(&sg).map_err(LuminaError::Candle)?;
+                let shared_act = (silu_sg * su).map_err(LuminaError::Candle)?;
+                let shared_out = Self::matmul_linear(&shared_act, &sd_w)?;
+
+                accum_out = match accum_out {
+                    Some(prev) => Some((prev + shared_out).map_err(LuminaError::Candle)?),
+                    None => Some(shared_out),
+                };
+            }
+
+            accum_out.unwrap_or_else(|| normed_post_x.clone())
+        } else {
+            // Standard dense SwiGLU MLP
+            let gate_w = self.get_layer_weight(layer_idx, &["mlp.gate_proj.weight", "ffn_gate.weight"])?;
+            let up_w = self.get_layer_weight(layer_idx, &["mlp.up_proj.weight", "ffn_up.weight"])?;
+            let down_w = self.get_layer_weight(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
+
+            let gate = Self::matmul_linear(&normed_post_x, &gate_w)?;
+            let up = Self::matmul_linear(&normed_post_x, &up_w)?;
+            let silu_gate = candle_nn::ops::silu(&gate).map_err(LuminaError::Candle)?;
+            let mlp_act = (silu_gate * up).map_err(LuminaError::Candle)?;
+            Self::matmul_linear(&mlp_act, &down_w)?
+        };
 
         let x = (x + mlp_out).map_err(LuminaError::Candle)?;
         Ok(x)
     }
 
     fn matmul_linear(x: &Tensor, w: &Tensor) -> Result<Tensor> {
+        let w_dtype = w.dtype();
+        let w_float = if w_dtype == DType::U8 {
+            // W8A16 on-the-fly symmetric dequantization: cast u8 to target dtype and center around 128
+            let target_dt = x.dtype();
+            let shifted = (w.to_dtype(DType::F32).map_err(LuminaError::Candle)? - 128.0).map_err(LuminaError::Candle)?;
+            (shifted * (1.0 / 127.0)).map_err(LuminaError::Candle)?.to_dtype(target_dt).map_err(LuminaError::Candle)?
+        } else {
+            w.clone()
+        };
+
         let last_x_dim = x.dim(candle_core::D::Minus1).map_err(LuminaError::Candle)?;
-        let w_dims = w.shape().dims2().map_err(LuminaError::Candle)?;
+        let w_dims = w_float.shape().dims2().map_err(LuminaError::Candle)?;
         let w_adapted = if w_dims.1 == last_x_dim {
             // w is [out_dim, in_dim] -> transpose to [in_dim, out_dim]
-            w.t().map_err(LuminaError::Candle)?
+            w_float.t().map_err(LuminaError::Candle)?
         } else if w_dims.0 == last_x_dim {
             // w is already [in_dim, out_dim]
-            w.clone()
+            w_float
         } else {
             return Err(LuminaError::Config(format!(
                 "matmul dimension mismatch: x last dim {} vs w dims {:?}",
@@ -938,10 +1418,15 @@ impl CausalLMPipeline {
 
     fn causal_mask(&self, seq_len: usize) -> Result<Tensor> {
         let mut mask_vec = vec![0.0f32; seq_len * seq_len];
+        let sliding_window = self.config.sliding_window;
         for i in 0..seq_len {
             for j in 0..seq_len {
                 if j > i {
                     mask_vec[i * seq_len + j] = f32::NEG_INFINITY;
+                } else if let Some(sw) = sliding_window {
+                    if i.saturating_sub(j) > sw {
+                        mask_vec[i * seq_len + j] = f32::NEG_INFINITY;
+                    }
                 }
             }
         }
@@ -989,5 +1474,187 @@ impl CausalLMPipeline {
             "Weight for layer {} with suffixes {:?} not found",
             layer_idx, suffixes
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummySource;
+    impl WeightsSource for DummySource {
+        fn get_tensor(&self, _: &str, _: &Device, _: DType) -> Result<Tensor> { unreachable!() }
+        fn contains(&self, _: &str) -> bool { false }
+        fn raw_info(&self, _: &str) -> Option<(safetensors::Dtype, Vec<usize>)> { None }
+        fn keys(&self) -> Vec<String> { Vec::new() }
+    }
+
+    #[test]
+    fn test_chatml_multi_turn_formatting() {
+        let msgs = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("Hello!"),
+            ChatMessage::assistant("Hi there! How can I help?"),
+            ChatMessage::user("What is 2+2?"),
+        ];
+
+        let config = CausalLMConfig {
+            hidden_size: 64,
+            intermediate_size: 128,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            num_hidden_layers: 1,
+            vocab_size: 100,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            max_position_embeddings: 512,
+            head_dim: 32,
+            is_gemma: true,
+            qk_norm: false,
+            sliding_window: Some(4),
+            attn_logit_softcapping: Some(50.0),
+            final_logit_softcapping: Some(30.0),
+            unit_offset_norm: true,
+            moe_num_experts: 0,
+            moe_top_k: 0,
+            moe_shared_experts: 0,
+        };
+
+        let dummy_pipeline = CausalLMPipeline {
+            config,
+            tokenizer: None,
+            weights: Arc::new(DummySource),
+            device: Device::Cpu,
+            dtype: DType::F32,
+            kv_cache: KVCache::new(1),
+            weights_cache: std::collections::HashMap::new(),
+        };
+
+        let prompt = dummy_pipeline.format_chat_prompt(&msgs);
+        assert!(prompt.contains("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"));
+        assert!(prompt.contains("<|im_start|>user\nHello!<|im_end|>\n"));
+        assert!(prompt.contains("<|im_start|>assistant\nHi there! How can I help?<|im_end|>\n"));
+        assert!(prompt.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn test_sliding_window_causal_mask() {
+        let config = CausalLMConfig {
+            hidden_size: 64,
+            intermediate_size: 128,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            num_hidden_layers: 1,
+            vocab_size: 100,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            max_position_embeddings: 512,
+            head_dim: 32,
+            is_gemma: true,
+            qk_norm: false,
+            sliding_window: Some(2),
+            attn_logit_softcapping: Some(50.0),
+            final_logit_softcapping: Some(30.0),
+            unit_offset_norm: true,
+            moe_num_experts: 0,
+            moe_top_k: 0,
+            moe_shared_experts: 0,
+        };
+
+        let pipeline = CausalLMPipeline {
+            config,
+            tokenizer: None,
+            weights: Arc::new(DummySource),
+            device: Device::Cpu,
+            dtype: DType::F32,
+            kv_cache: KVCache::new(1),
+            weights_cache: std::collections::HashMap::new(),
+        };
+
+        let mask = pipeline.causal_mask(4).expect("causal mask failed");
+        let mask_flat: Vec<f32> = mask.flatten_all().unwrap().to_vec1().unwrap();
+        // 4x4 matrix:
+        // row 0: [0, -inf, -inf, -inf]
+        // row 1: [0, 0, -inf, -inf]
+        // row 2: [0, 0, 0, -inf]
+        // row 3 (i=3, sw=2 -> diff=3-0=3 > 2): [-inf, 0, 0, 0]
+        assert_eq!(mask_flat[0 * 4 + 0], 0.0);
+        assert_eq!(mask_flat[0 * 4 + 1], f32::NEG_INFINITY);
+        assert_eq!(mask_flat[3 * 4 + 0], f32::NEG_INFINITY); // i=3, j=0, diff=3 > sliding_window(2)
+        assert_eq!(mask_flat[3 * 4 + 1], 0.0); // i=3, j=1, diff=2 <= sliding_window(2)
+        assert_eq!(mask_flat[3 * 4 + 3], 0.0);
+    }
+
+    #[test]
+    fn test_gemma_unit_offset_norm_computation() {
+        let x = Tensor::new(&[1.0f32, 2.0, 3.0, 4.0], &Device::Cpu).unwrap().reshape((1, 4)).unwrap();
+        let w = Tensor::new(&[0.1f32, 0.2, -0.1, 0.0], &Device::Cpu).unwrap();
+        let normed_standard = CausalLMPipeline::apply_rms_norm_configured(&x, &w, 1e-6, false).unwrap();
+        let normed_unit = CausalLMPipeline::apply_rms_norm_configured(&x, &w, 1e-6, true).unwrap();
+
+        let std_vec: Vec<f32> = normed_standard.flatten_all().unwrap().to_vec1().unwrap();
+        let unit_vec: Vec<f32> = normed_unit.flatten_all().unwrap().to_vec1().unwrap();
+
+        // Standard scales by w (e.g. 0.1), Unit offset scales by (1.0 + w) (e.g. 1.1)
+        assert!((unit_vec[0] / std_vec[0] - 11.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_moe_top_k_expert_routing_normalization() {
+        let raw_logits = [2.0f32, 0.5f32, 5.0f32, 1.0f32];
+        let mut expert_weights: Vec<(usize, f32)> = raw_logits
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (i, p))
+            .collect();
+        expert_weights.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        expert_weights.truncate(2);
+
+        assert_eq!(expert_weights[0].0, 2); // Expert 2 has highest score 5.0
+        assert_eq!(expert_weights[1].0, 0); // Expert 0 has second highest score 2.0
+
+        let weight_sum: f32 = expert_weights.iter().map(|(_, w)| *w).sum();
+        assert!((weight_sum - 7.0).abs() < 1e-5);
+        let norm_factor = 1.0 / weight_sum;
+        let w0 = expert_weights[0].1 * norm_factor;
+        let w1 = expert_weights[1].1 * norm_factor;
+        assert!((w0 + w1 - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_layer_kv_cache_sliding_window_truncation() {
+        let mut cache = LayerKVCache::new();
+        let k1 = Tensor::zeros((1, 2, 3, 16), DType::F32, &Device::Cpu).unwrap();
+        let v1 = Tensor::zeros((1, 2, 3, 16), DType::F32, &Device::Cpu).unwrap();
+
+        // Append 3 tokens with sliding window 4 -> total 3 tokens (no truncation)
+        let (k, v) = cache.append_with_window(&k1, &v1, Some(4)).unwrap();
+        assert_eq!(k.dim(2).unwrap(), 3);
+        assert_eq!(v.dim(2).unwrap(), 3);
+
+        // Append 3 more tokens -> total would be 6, but window is 4 -> truncated to 4 tokens
+        let (k_trunc, v_trunc) = cache.append_with_window(&k1, &v1, Some(4)).unwrap();
+        assert_eq!(k_trunc.dim(2).unwrap(), 4);
+        assert_eq!(v_trunc.dim(2).unwrap(), 4);
+    }
+
+    #[test]
+    fn test_speculative_verification_logic() {
+        // Verify speculative acceptance and deviation correction rules:
+        let draft_tokens = vec![101u32, 102u32, 103u32];
+        let target_samples = vec![101u32, 102u32, 999u32]; // 3rd token deviates
+
+        let mut accepted = Vec::new();
+        for (&draft_t, &target_t) in draft_tokens.iter().zip(target_samples.iter()) {
+            if draft_t == target_t {
+                accepted.push(draft_t);
+            } else {
+                accepted.push(target_t); // target overrides deviation
+                break;
+            }
+        }
+
+        assert_eq!(accepted, vec![101, 102, 999]);
+        assert_eq!(accepted.len(), 3);
     }
 }

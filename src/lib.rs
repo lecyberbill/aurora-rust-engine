@@ -25,11 +25,13 @@ pub use models::{
     VlmDecoderConfig, VlmModel,
 };
 pub use lora::{LoRALoader, LoRAManager, LoRAMerger, LoRAPair, LoRATarget, LoadedLoRA};
-pub use traits::{ControlNetParams, DiffusionParams, Img2ImgParams, InpaintParams, TextGenerationPipeline, TextToImagePipeline};
+pub use traits::{AudioTranscriptionModel, ControlNetParams, DiffusionParams, Img2ImgParams, InpaintParams, TextGenerationPipeline, TextToImagePipeline};
 pub use weights::{SafeTensorsArchive, WeightRouter};
 pub use server::{build_router, run_server, AppState, GenerateRequest, GenerateResponse, HealthResponse};
 
 pub use diffusion::controlnet::{ControlNetModel, MultiControlNet, compute_canny_edge_map};
+pub use diffusion::controlnet_mmdit::{MMDiTControlNetAdapter, MMDiTControlNetManager};
+pub use diffusion::ip_adapter::{IPAdapter, IPAdapterCrossAttention, ImageProjModel};
 pub use diffusion::schedulers::{
     DDIMConfig, DDIMScheduler, DPMSolverMultistepConfig, DPMSolverMultistepScheduler,
     EulerDiscreteScheduler, EulerSchedulerConfig, PredictionType, Scheduler,
@@ -40,8 +42,8 @@ pub use audio::{read_wav_pcm, write_wav_pcm16, Vocos, VocosConfig, WavAudio};
 pub use pipelines::{
     AudioDiffusionPipeline, AudioGenerationMetrics, ChatTtsParams, ChatTtsPipeline, FluxPipeline,
     StableDiffusionPipeline, StableDiffusionXLPipeline, TranscriptionResult, TtsPipeline,
-    UpscaleModel, UpscaleParams, UpscalePipeline, VlmParams, VlmPipeline, WhisperPipeline,
-    ZImageTurboPipeline,
+    UpscaleModel, UpscaleParams, UpscalePipeline, VideoGenerationMetrics, VideoPipeline,
+    VlmParams, VlmPipeline, WhisperPipeline, ZImageTurboPipeline,
 };
 pub use text::{ClipTextEncoder, OpenClipTextEncoder, T5TextEncoder};
 

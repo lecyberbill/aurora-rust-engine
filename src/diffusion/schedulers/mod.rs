@@ -6,11 +6,13 @@ pub mod euler;
 pub mod ddim;
 pub mod dpm_solver;
 pub mod flow_match;
+pub mod cogvideox_ddim;
 
 pub use euler::{EulerDiscreteScheduler, EulerSchedulerConfig, PredictionType};
 pub use ddim::{DDIMScheduler, DDIMConfig};
 pub use dpm_solver::{DPMSolverMultistepScheduler, DPMSolverMultistepConfig};
 pub use flow_match::{FlowMatchEulerScheduler, FlowMatchEulerConfig};
+pub use cogvideox_ddim::{CogVideoXDDIMScheduler, CogVideoXDDIMConfig};
 
 /// Mathematical scheduler contract for stepping iterative noise diffusion models.
 pub trait Scheduler: Send + Sync {

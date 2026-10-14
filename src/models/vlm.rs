@@ -43,6 +43,158 @@ impl Default for VisionTransformerConfig {
     }
 }
 
+impl VisionTransformerConfig {
+    pub fn qwen_vl() -> Self {
+        Self::default()
+    }
+
+    pub fn qwen2_5_vl() -> Self {
+        Self {
+            image_size: 448,
+            patch_size: 14,
+            num_channels: 3,
+            embed_dim: 1280,
+            num_layers: 32,
+            num_heads: 16,
+            intermediate_size: 5120,
+            spatial_merge_size: 2,
+            act_type: VisionActivation::Gelu,
+            layer_norm_eps: 1e-6,
+        }
+    }
+
+    pub fn smol_vlm() -> Self {
+        Self {
+            image_size: 384,
+            patch_size: 14,
+            num_channels: 3,
+            embed_dim: 768,
+            num_layers: 12,
+            num_heads: 12,
+            intermediate_size: 3072,
+            spatial_merge_size: 2,
+            act_type: VisionActivation::Gelu,
+            layer_norm_eps: 1e-6,
+        }
+    }
+
+    pub fn moondream2() -> Self {
+        Self {
+            image_size: 378,
+            patch_size: 14,
+            num_channels: 3,
+            embed_dim: 1152,
+            num_layers: 27,
+            num_heads: 16,
+            intermediate_size: 4304,
+            spatial_merge_size: 1,
+            act_type: VisionActivation::QuickGelu,
+            layer_norm_eps: 1e-6,
+        }
+    }
+}
+
+/// Compute optimal dynamic patch grid (target_h, target_w) preserving aspect ratio
+pub fn compute_dynamic_patch_grid(
+    orig_h: usize,
+    orig_w: usize,
+    patch_size: usize,
+    spatial_merge_size: usize,
+    min_patches: usize,
+    max_patches: usize,
+) -> (usize, usize) {
+    let step = spatial_merge_size.max(1);
+    let factor = patch_size * step;
+    let aspect_ratio = orig_w as f64 / orig_h.max(1) as f64;
+
+    let mut best_h = factor;
+    let mut best_w = factor;
+    let mut best_diff = f64::MAX;
+
+    for h_grid in (step..=128).step_by(step) {
+        let w_grid = ((h_grid as f64 * aspect_ratio).round() as usize).max(step);
+        let w_grid = (w_grid / step) * step;
+        let total_patches = h_grid * w_grid;
+        if total_patches >= min_patches && total_patches <= max_patches {
+            let current_ar = w_grid as f64 / h_grid as f64;
+            let diff = (current_ar - aspect_ratio).abs();
+            if diff < best_diff {
+                best_diff = diff;
+                best_h = h_grid * patch_size;
+                best_w = w_grid * patch_size;
+            }
+        }
+    }
+
+    if best_diff == f64::MAX {
+        let h = ((orig_h / factor).clamp(1, 32)) * factor;
+        let w = ((orig_w / factor).clamp(1, 32)) * factor;
+        (h, w)
+    } else {
+        (best_h, best_w)
+    }
+}
+
+/// 2D Spatial Rotary Position Embedding for dynamic resolution Vision Transformers
+#[derive(Debug, Clone)]
+pub struct VisionRoPE2D {
+    head_dim: usize,
+    theta: f32,
+}
+
+impl VisionRoPE2D {
+    pub fn new(head_dim: usize, theta: f32) -> Self {
+        Self { head_dim, theta }
+    }
+
+    /// Compute 2D (cos, sin) tensors for spatial grid (grid_h, grid_w)
+    /// Returns (cos, sin) of shape [grid_h * grid_w, head_dim]
+    pub fn precompute_2d(&self, grid_h: usize, grid_w: usize, device: &Device) -> Result<(Tensor, Tensor)> {
+        let half = self.head_dim / 2;
+        let q_dim = half / 2; // half for Y, half for X
+        let mut freqs = Vec::with_capacity(q_dim);
+        for i in 0..q_dim {
+            freqs.push((-((self.theta).ln() * (i as f32) / (q_dim as f32))).exp());
+        }
+        let freqs_t = Tensor::from_vec(freqs, (1, q_dim), device)?;
+
+        // Y positions: [grid_h, 1]
+        let y_pos: Vec<f32> = (0..grid_h).map(|y| y as f32).collect();
+        let y_t = Tensor::from_vec(y_pos, (grid_h, 1), device)?;
+        let angles_y = y_t.matmul(&freqs_t)?; // [grid_h, q_dim]
+
+        // X positions: [grid_w, 1]
+        let x_pos: Vec<f32> = (0..grid_w).map(|x| x as f32).collect();
+        let x_t = Tensor::from_vec(x_pos, (grid_w, 1), device)?;
+        let angles_x = x_t.matmul(&freqs_t)?; // [grid_w, q_dim]
+
+        // Combine into 2D grid: [grid_h, grid_w, half]
+        let angles_y_grid = angles_y.unsqueeze(1)?.broadcast_as((grid_h, grid_w, q_dim))?;
+        let angles_x_grid = angles_x.unsqueeze(0)?.broadcast_as((grid_h, grid_w, q_dim))?;
+        let angles_2d = Tensor::cat(&[&angles_y_grid, &angles_x_grid], 2)?
+            .reshape((grid_h * grid_w, half))?;
+
+        let cos = Tensor::cat(&[&angles_2d.cos()?, &angles_2d.cos()?], 1)?;
+        let sin = Tensor::cat(&[&angles_2d.sin()?, &angles_2d.sin()?], 1)?;
+
+        Ok((cos, sin))
+    }
+
+    /// Apply 2D RoPE rotation to Q or K of shape [B, Heads, Seq_Len, Head_Dim]
+    pub fn apply(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        let (b, h, s, d) = x.dims4()?;
+        let cos_b = cos.unsqueeze(0)?.unsqueeze(1)?.broadcast_as((b, h, s, d))?;
+        let sin_b = sin.unsqueeze(0)?.unsqueeze(1)?.broadcast_as((b, h, s, d))?;
+
+        let half = d / 2;
+        let x1 = x.narrow(3, 0, half)?;
+        let x2 = x.narrow(3, half, half)?;
+        let x_rot = Tensor::cat(&[&x2.neg()?, &x1], 3)?;
+
+        x.broadcast_mul(&cos_b)? + x_rot.broadcast_mul(&sin_b)?
+    }
+}
+
 /// Vision Attention Block (supports both Fused QKV and Split Q/K/V)
 #[derive(Debug, Clone)]
 pub enum VisionQkv {
@@ -93,8 +245,12 @@ impl VisionAttention {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        self.forward_with_rope(x, None)
+    }
+
+    pub fn forward_with_rope(&self, x: &Tensor, rope: Option<(&Tensor, &Tensor)>) -> Result<Tensor> {
         let (b, s, d) = x.dims3()?;
-        let (q, k, v) = match &self.qkv {
+        let (mut q, mut k, v) = match &self.qkv {
             VisionQkv::Fused(lin) => {
                 let qkv = lin.forward(x)?;
                 let qkv = qkv.reshape((b, s, 3, self.num_heads, self.head_dim))?;
@@ -110,6 +266,11 @@ impl VisionAttention {
                 (q, k, v)
             }
         };
+
+        if let Some((cos, sin)) = rope {
+            q = VisionRoPE2D::apply(&q, cos, sin)?;
+            k = VisionRoPE2D::apply(&k, cos, sin)?;
+        }
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let attn_weights = (q.matmul(&k.transpose(2, 3)?.contiguous()?)? * scale)?;
@@ -187,7 +348,11 @@ impl VisionBlock {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let h = (x + self.attn.forward(&self.norm1.forward(x)?)?)?;
+        self.forward_with_rope(x, None)
+    }
+
+    pub fn forward_with_rope(&self, x: &Tensor, rope: Option<(&Tensor, &Tensor)>) -> Result<Tensor> {
+        let h = (x + self.attn.forward_with_rope(&self.norm1.forward(x)?, rope)?)?;
         let out = (&h + self.mlp.forward(&self.norm2.forward(&h)?)?)?;
         Ok(out)
     }
@@ -340,6 +505,40 @@ impl VisionTransformer {
             Ok(x)
         }
     }
+
+    /// Forward with dynamic resolution (arbitrary H, W) using 2D spatial RoPE
+    pub fn forward_dynamic(&self, pixel_values: &Tensor) -> Result<Tensor> {
+        let (b, _c, _h, _w) = pixel_values.dims4()?;
+        let patches = self.patch_embed.forward(pixel_values)?;
+        let (_, embed_dim, grid_h, grid_w) = patches.dims4()?;
+
+        let mut x = patches.permute((0, 2, 3, 1))?.contiguous()?.reshape((b, grid_h * grid_w, embed_dim))?;
+
+        let head_dim = embed_dim / self.blocks.first().map(|b| b.attn.num_heads).unwrap_or(16);
+        let rope2d = VisionRoPE2D::new(head_dim, 10000.0);
+        let (cos, sin) = rope2d.precompute_2d(grid_h, grid_w, pixel_values.device())?;
+
+        for block in &self.blocks {
+            x = block.forward_with_rope(&x, Some((&cos, &sin)))?;
+        }
+        let x = if let Some(ref norm) = self.post_norm {
+            norm.forward(&x)?
+        } else {
+            x
+        };
+
+        if self.spatial_merge_size > 1 {
+            let m = self.spatial_merge_size;
+            let merged_h = grid_h / m;
+            let merged_w = grid_w / m;
+            let x = x.reshape((b, merged_h, m, merged_w, m, embed_dim))?;
+            let x = x.permute((0, 1, 3, 2, 4, 5))?.contiguous()?;
+            let x = x.reshape((b, merged_h * merged_w, m * m * embed_dim))?;
+            Ok(x)
+        } else {
+            Ok(x)
+        }
+    }
 }
 
 /// Multimodal Projector (supports Single Linear and 2-layer MLP Projector)
@@ -416,6 +615,40 @@ impl Default for VlmDecoderConfig {
             rms_norm_eps: 1e-6,
             rope_theta: 1_000_000.0,
             max_position_embeddings: 8192,
+        }
+    }
+}
+
+impl VlmDecoderConfig {
+    pub fn qwen_vl() -> Self {
+        Self::default()
+    }
+
+    pub fn smol_vlm() -> Self {
+        Self {
+            vocab_size: 49152,
+            hidden_size: 2048,
+            intermediate_size: 8192,
+            num_hidden_layers: 24,
+            num_attention_heads: 32,
+            num_key_value_heads: 32,
+            rms_norm_eps: 1e-5,
+            rope_theta: 100000.0,
+            max_position_embeddings: 8192,
+        }
+    }
+
+    pub fn moondream2() -> Self {
+        Self {
+            vocab_size: 51200,
+            hidden_size: 2048,
+            intermediate_size: 8192,
+            num_hidden_layers: 24,
+            num_attention_heads: 32,
+            num_key_value_heads: 32,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+            max_position_embeddings: 2048,
         }
     }
 }
@@ -799,6 +1032,49 @@ impl VlmModel {
             self.language_model.forward_with_embeds(&input_embeds, pos, &mut self.kv_caches)
         }
     }
+
+    /// Encode dynamic resolution image to projected LLM token space
+    pub fn encode_image_dynamic(&self, pixel_values: &Tensor) -> Result<Tensor> {
+        let feats = self.vision_encoder.forward_dynamic(pixel_values)?;
+        self.projector.forward(&feats)
+    }
+
+    /// Forward pass with dynamic resolution multimodal tokens and KV-Cache
+    pub fn forward_dynamic(
+        &mut self,
+        input_ids: &Tensor,
+        pixel_values: Option<&Tensor>,
+        pos: usize,
+    ) -> Result<Tensor> {
+        if let Some(pixels) = pixel_values {
+            let visual_embeds = self.encode_image_dynamic(pixels)?;
+            let text_embeds = self.language_model.embed_tokens(input_ids)?;
+
+            let (b, seq_len, hidden_dim) = text_embeds.dims3()?;
+            let (_, num_visual_tokens, _) = visual_embeds.dims3()?;
+
+            let tokens = input_ids.squeeze(0)?.to_vec1::<u32>()?;
+            let mut merged_data = text_embeds.flatten_all()?.to_vec1::<f32>()?;
+            let visual_data = visual_embeds.flatten_all()?.to_vec1::<f32>()?;
+
+            let mut v_idx = 0;
+            for (t_idx, &tok) in tokens.iter().enumerate() {
+                if tok == self.image_token_id && v_idx < num_visual_tokens {
+                    let dst_start = t_idx * hidden_dim;
+                    let src_start = v_idx * hidden_dim;
+                    merged_data[dst_start..dst_start + hidden_dim]
+                        .copy_from_slice(&visual_data[src_start..src_start + hidden_dim]);
+                    v_idx += 1;
+                }
+            }
+
+            let input_embeds = Tensor::from_vec(merged_data, (b, seq_len, hidden_dim), input_ids.device())?;
+            self.language_model.forward_with_embeds(&input_embeds, pos, &mut self.kv_caches)
+        } else {
+            let input_embeds = self.language_model.embed_tokens(input_ids)?;
+            self.language_model.forward_with_embeds(&input_embeds, pos, &mut self.kv_caches)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -871,6 +1147,62 @@ mod tests {
         let step_logits = vlm.forward(&next_tok, None, 3)?;
         assert_eq!(step_logits.dims3()?, (1, 1, 100));
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_dynamic_patch_grid_and_2d_rope() -> Result<()> {
+        let dev = Device::Cpu;
+        let (h, w) = compute_dynamic_patch_grid(1080, 1920, 14, 2, 16, 256);
+        assert_eq!(h % 28, 0);
+        assert_eq!(w % 28, 0);
+        assert!(w > h); // Preserves landscape aspect ratio
+
+        let rope2d = VisionRoPE2D::new(32, 10000.0);
+        let (cos, sin) = rope2d.precompute_2d(2, 4, &dev)?;
+        assert_eq!(cos.dims2()?, (8, 32));
+        assert_eq!(sin.dims2()?, (8, 32));
+
+        let q = Tensor::zeros((1, 2, 8, 32), DType::F32, &dev)?;
+        let q_rot = VisionRoPE2D::apply(&q, &cos, &sin)?;
+        assert_eq!(q_rot.dims4()?, (1, 2, 8, 32));
+        Ok(())
+    }
+
+    #[test]
+    fn test_vlm_dynamic_forward_e2e() -> Result<()> {
+        let dev = Device::Cpu;
+        let vb = VarBuilder::zeros(DType::F32, &dev);
+        let vision_cfg = VisionTransformerConfig {
+            image_size: 28,
+            patch_size: 14,
+            num_channels: 3,
+            embed_dim: 32,
+            num_layers: 1,
+            num_heads: 2,
+            intermediate_size: 64,
+            spatial_merge_size: 2,
+            act_type: VisionActivation::Gelu,
+            layer_norm_eps: 1e-5,
+        };
+        let decoder_cfg = VlmDecoderConfig {
+            vocab_size: 100,
+            hidden_size: 64,
+            intermediate_size: 128,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            num_key_value_heads: 2,
+            ..VlmDecoderConfig::moondream2()
+        };
+
+        let mut vlm = VlmModel::new(&vision_cfg, &decoder_cfg, 99, vb)?;
+
+        // Non-square dynamic resolution image: 28 x 56 -> 2x4 = 8 patches -> 1x2 = 2 merged tokens
+        let pixels = Tensor::zeros((1, 3, 28, 56), DType::F32, &dev)?;
+        let input_ids = Tensor::new(&[1u32, 99, 99, 2], &dev)?.unsqueeze(0)?;
+
+        let logits = vlm.forward_dynamic(&input_ids, Some(&pixels), 0)?;
+        assert_eq!(logits.dims3()?, (1, 4, 100));
         Ok(())
     }
 }

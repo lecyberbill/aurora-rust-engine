@@ -3,7 +3,7 @@
 > **Pure Rust inference engine for image, text, speech & music generation — zero Python**
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
-[![CUDA](https://img.shields.io/badge/cuda-12.x-green.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![CUDA](https://img.shields.io/badge/cuda-12.x%20%2F%2013.x-green.svg)](https://developer.nvidia.com/cuda-toolkit)
 [![ROCm](https://img.shields.io/badge/ROCm-10.0%20%2F%20HIP-red.svg)](docs/ROCM_SETUP.md)
 [![FlashAttention](https://img.shields.io/badge/FlashAttention-2-orange.svg)](https://github.com/Dao-AILab/flash-attention)
 [![License](https://img.shields.io/badge/license-Apache--2.0%20%2F%20MIT-blue.svg)](LICENSE)
@@ -24,6 +24,7 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 | Modality | Models |
 |---|---|
 | **Image (Diffusion)** | SDXL / Pony XL (all single-file checkpoints), FLUX.1 `[dev/schnell]`, FLUX.2-Klein-4B / Klein-9B / Dev, Z-Image Turbo (S3-DiT 6B) |
+| **Video (DiT 3D)** | **CogVideoX-2B** (3D Spatio-Temporal DiT + Causal RoPE + Flow Matching ODE) |
 | **Super-Resolution / Upscaling** | **Real-ESRGAN** (x2/x4/x8), **4x-UltraSharp**, **NMKD**, **SRVGGNetCompact** (Anime-6B) with Bounded Tiling & Seam Blending |
 | **Vision-Language (VLM)** | **Qwen2-VL**, **Qwen2.5-VL**, **Qwen3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, **SmolVLM** |
 | **Text (CausalLM)** | Qwen 2.5/3(.5), Llama 3, Mistral, Gemma 2/3, DeepSeek — GGUF (Q4_K_M/Q8_0) & SafeTensors |
@@ -38,9 +39,12 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 ## ✨ Features
 
 - **Pure Rust Native Inference**: Zero Python dependencies, zero PyTorch overhead, compiled directly to a native standalone executable.
+- **Universal Multi-Container Zero-Copy Loader**: Direct mmap and slice-based ingestion across **GGUF (v2/v3)**, **SafeTensors**, and **ONNX Initializers** with zero external Protobuf runtime dependencies and alignment-safe zero-copy buffers (`Cow<'_, [T]>`).
 - **Unified HuggingFace AutoModel Facade**: Standard `AutoModel::from_local` and `AutoModel::from_pretrained` interface supporting both generative diffusion pipelines and autoregressive text models.
 - **Vision-Language Multimodal Understanding (Pure Rust VLM)**: Complete SigLIP/ViT visual encoder + Multimodal MLP Projector + Causal LLM decoder supporting **Qwen2/2.5/3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, and **SmolVLM** for Visual Question Answering (VQA) and dense image captioning.
-- **CausalLM Text-to-Text Generation (Pure Rust)**: Autoregressive text generation with GPU KV-Cache supporting **Llama 3 / DeepSeek**, **Qwen 2.5/3.5**, **Gemma 2/3**, and **Mistral** in both **GGUF** (quantized Q4_K_M, Q8_0) and **SafeTensors** formats.
+- **CausalLM Text-to-Text Generation (Pure Rust)**: Autoregressive text generation with GPU KV-Cache supporting **Llama 3 / DeepSeek V3/R1**, **Qwen 2.5/3.5**, **Gemma 2/4** (with unit-offset RMSNorm & attention logit softcapping), and **Mistral** in both **GGUF** (quantized Q4_K_M, Q8_0) and **SafeTensors** formats.
+- **Token-by-Token Native Streaming Callback**: Clean zero-overhead streaming via `TokenCallback` without pulling web/async dependencies into the inference core.
+- **Dynamic Sparse MoE Top-K Routing**: Normalized Top-K dispatch across independent and shared experts for DeepSeek V3/R1 and Mixtral architectures.
 - **Super-Resolution & Neural Upscaling (Real-ESRGAN & 4x-UltraSharp)**: High-speed pure Rust neural upscaling (x2, x4, x8) powered by `RRDBNet` and `SRVGGNetCompact` with bounded-memory tiled processing, seam blending, and transparency preservation.
 - **Flux.1 & Flux.2 Family Full Support**: Native implementation of Multimodal Diffusion Transformers (MMDiT) for **Flux.1 [dev/schnell]**, **Flux.2-Klein-4B**, **Flux.2-Klein-9B**, and **Flux.2-Dev Scaled** with exact 3D/4D Rotary Position Embeddings (RoPE).
 - **Z-Image Turbo Realtime DiT (S3-DiT 6B)**: 100% pure Rust 4-step real-time inference with native FlashAttention-2, Qwen3-4B text conditioning, 16-channel VAE, and dynamic shift timestep scheduling.
@@ -71,7 +75,7 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 
 ### 1. Prerequisites
 - **Rust 1.80+** (`cargo`)
-- **NVIDIA GPU**: CUDA Toolkit 12.x + MSVC Build Tools (Windows) or GCC/Clang (Linux)
+- **NVIDIA GPU**: CUDA Toolkit 12.x / 13.x + MSVC Build Tools (Windows) or GCC/Clang (Linux)
 - **AMD GPU (Linux)**: ROCm 10.0+ / HIP toolchain (see [docs/ROCM_SETUP.md](docs/ROCM_SETUP.md))
 
 ### 2. Build
@@ -314,15 +318,19 @@ cargo run --release --bin server --features cuda,flash-attn
 | Pure Rust Canny Edge Extraction | N/A | **< 12 ms** | Real-time |
 | Inference VRAM Allocation | 7.6 GB | 7.6 GB | **0 MB LoRA overhead** |
 
-### 🎵 Audio & Music (RTX 4070 Ti 12 GB, `--release`, bf16)
+### 🎵 Audio, Speech & Multimodal Benchmarks (RTX 4070 Ti 12 GB, `--release`)
 
-| Task | Config | Result |
-|---|---|---|
-| ACE-Step 1.5 **Turbo** | 5 s, 8 steps | real-time |
-| ACE-Step 1.5 **Turbo** | 180 s (3 min), 8 steps | **116.7 s end-to-end (1.54× real-time)** |
-| ACE-Step 1.5 **Base** (CFG/APG) | 10 s, 30 steps | 2.7 s |
-| Whisper STT | bit-exact vs reference | native Mel + encoder/decoder |
-| Export | 48 kHz stereo | WAV · OGG Vorbis 192 kb/s · MP3 192 kb/s |
+| Modality & Task | Model & Configuration | Empirical Result | Hardware / Notes |
+|---|---|---|---|
+| **Super-Resolution (4x)** | RealESRGAN_x4 (66.8 Mo, tiled 256px) | **5.51 s** (512² → 2048²) | CUDA (RTX 4070 Ti), 0.14s load |
+| **Speech-to-Text (ASR)** | Moonshine Tiny (108 Mo, 48k samples) | **1.60 s** | CUDA (RTX 4070 Ti), bit-exact |
+| **Speech-to-Text (ASR)** | Whisper Large-v3 / Turbo | Bit-exact vs PyTorch | Native Slaney Mel + greedy/beam |
+| **Text Generation (LLM)** | TinyLlama-1.1B-Chat (2.2 Go F16) | **5.38 tok/s** (2.06s load) | CUDA (RTX 4070 Ti), KV-cache |
+| **Image Synthesis (DiT)** | FLUX.2-Klein-4B (4 steps, 1024²) | **25.85 s** ODE, 3.64s VAE | CUDA (RTX 4070 Ti), 1.88 Mo output |
+| ACE-Step 1.5 **Turbo** | 5 s, 8 steps | Real-time | CUDA / ROCm |
+| ACE-Step 1.5 **Turbo** | 180 s (3 min), 8 steps | **116.7 s (1.54× real-time)** | CUDA / ROCm |
+| ACE-Step 1.5 **Base** | 10 s, 30 steps (CFG/APG) | 2.7 s | CUDA / ROCm |
+| Audio Export | 48 kHz stereo | WAV · OGG · MP3 | Zero C/FFmpeg dependencies |
 
 ---
 
@@ -345,13 +353,14 @@ See [`ROADMAP.md`](ROADMAP.md) for full technical specifications and development
 - [x] **Milestone 14**: FLUX.2 Multi-Image Reference Conditioning / Mode Édition (4D RoPE)
 - [x] **Milestone 16**: CausalLM LLM Text Generation & AutoModel Facade (Llama, DeepSeek, Qwen, Gemma, Mistral in GGUF/Safetensors)
 - [x] **Milestone 17**: Z-Image Turbo S3-DiT 6B Pure Rust Realtime Pipeline with FlashAttention-2
-- [x] **Milestone 20**: Audio-to-Text & Speech Transcription — Whisper Large-v3 / Turbo (native Slaney Mel, bit-exact)
-- [x] **Milestone 21**: Text-to-Audio & Music — ACE-Step 1.5 Turbo/Base/XL 1D DiT + Oobleck 48 kHz VAE + APG guidance + 5Hz Qwen3 LM planner + WAV/OGG/MP3 ([spec](docs/ACESTEP_AUDIO_SPEC.md))
-- [x] **Milestone 22**: Neural Text-to-Speech — Parler-TTS (Kokoro-82M in progress)
-- [ ] **Milestone 15** (proposed): LoRA Training Engine (pure Rust)
-- [ ] **Milestone 18** (proposed): Vision-Language & Multimodal Models (VLM)
-- [ ] **Milestone 19** (proposed): Spatio-Temporal Video Diffusion (Text-to-Video / Image-to-Video)
-- [x] **Milestone 21 (rest)**: Stable Audio Open (T5 + timing + DiT + EDM/SDE DPM-Solver++ + Oobleck) & MusicGen (T5 + AR decoder + EnCodec 32 kHz) backends
+- [x] **Milestone 20**: Audio-to-Text & Speech Transcription — Whisper Large-v3 / Turbo & Moonshine
+- [x] **Milestone 21**: Text-to-Audio & Music — ACE-Step 1.5 Turbo/Base/XL 1D DiT, Stable Audio Open & MusicGen
+- [x] **Milestone 22**: Neural Text-to-Speech — Parler-TTS, Kokoro-82M & ChatTTS
+- [x] **Milestone 23**: Super-Resolution & Neural Upscaling — Real-ESRGAN, 4x-UltraSharp, SRVGGNetCompact
+- [x] **Milestone 24**: Vision-Language & Multimodal Models (VLM) — Qwen2/2.5/3-VL, PaliGemma 2, SmolVLM
+- [x] **Milestone 25**: Linux & AMD ROCm / HIP Acceleration (Cross-Platform Deployment)
+- [x] **Milestone 26**: Cross-Platform Performance & Kernel Optimizations (CUDA, ROCm, Metal, CPU, RDNA4 WMMA)
+- [x] **Milestone 27**: Universal Multi-Format & Multi-Modal Inference Engine (Zero-Copy Slicing, Gemma/DeepSeek, Cross-Modal Cache)
 
 ---
 

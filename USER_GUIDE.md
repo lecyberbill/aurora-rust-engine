@@ -31,12 +31,19 @@
    - [Text-to-Music — MusicGen (Meta, pure Rust)](#text-to-music--musicgen-meta-pure-rust)
    - [Text-to-Music (ACE-Step 1.5 — Turbo / Base / XL)](#text-to-music-ace-step-15--turbo--base--xl)
    - [Music Editing & Source-Audio Tasks (Cover / Repaint / Extract / Lego / Complete)](#music-editing--source-audio-tasks-cover--repaint--extract--lego--complete)
-   - [Text-to-Speech (TTS / Parler-TTS & Kokoro-82M)](#text-to-speech-tts--parler-tts--kokoro-82m)
+   - [Text-to-Speech (TTS / Parler-TTS, Kokoro-82M & ChatTTS)](#text-to-speech-tts--parler-tts--kokoro-82m)
+   - [Super-Resolution & Neural Upscaling (Real-ESRGAN & 4x-UltraSharp)](#super-resolution--neural-upscaling-real-esrgan--4x-ultrasharp)
+   - [Vision-Language Models (VLM) & Multimodal Understanding](#vision-language-models-vlm--multimodal-understanding)
+   - [Universal Multi-Container Zero-Copy Loader](#universal-multi-container-zero-copy-loader)
+   - [CausalLM Multi-Turn Dialogue & Next-Gen Architectures](#causallm-multi-turn-dialogue--next-gen-architectures)
+   - [Cross-Modal Shared VRAM Cache](#cross-modal-shared-vram-cache)
 5. [REST API & WebSocket Server Reference](#5-rest-api--websocket-server-reference)
    - [Endpoints & JSON Payload Schema](#endpoints--json-payload-schema)
    - [Live Latent Preview via WebSocket](#live-latent-preview-via-websocket)
 6. [CLI Binaries & Benchmark Suite](#6-cli-binaries--benchmark-suite)
 7. [Hardware & Performance Tuning Guide](#7-hardware--performance-tuning-guide)
+   - [CUDA 13.x & MSVC Environment Configuration](#cuda-13x--msvc-environment-configuration)
+   - [Empirical Multi-Modal Benchmarks (RTX 4070 Ti)](#empirical-multi-modal-benchmarks-rtx-4070-ti)
 
 ---
 
@@ -427,9 +434,12 @@ use candle_core::Device;
 
 let device = Device::new_cuda(0)?;
 
-// 1. Load Flux.2-Klein Checkpoint with Sequential Block Streaming (< 7.5GB VRAM Peak)
+// 1. Option A: Load Flux.2-Klein Checkpoint with Sequential Block Streaming (< 7.5GB VRAM Peak)
 let mut flux_pipeline = FluxPipeline::from_single_file_streaming("<MODELS_DIR>/flux/fluxKlein4BPro_v10.safetensors", device.clone())?;
 flux_pipeline.enable_flash_attn();
+
+// Option B: Download & cache automatically from Hugging Face Hub (100% Pure Rust)
+// let mut flux_pipeline = FluxPipeline::from_pretrained("black-forest-labs/FLUX.1-schnell", Some("flux1-schnell.safetensors"), device.clone())?;
 
 // 2. Attach Qwen3 Prompt Encoder and Flux.2 32-Channel VAE Decoder
 // (Auto-detected if embedded in checkpoint, or attached externally via .safetensors)
@@ -446,8 +456,14 @@ let params = DiffusionParams {
 };
 
 // 4. Generate high-fidelity image in pure Rust (< 7.5GB VRAM footprint)
-let (image, metrics) = flux_pipeline.generate_with_metrics(params, None::<fn(usize, usize, &candle_core::Tensor)>)?;
+let (image, metrics) = flux_pipeline.generate_with_metrics(params.clone(), None::<fn(usize, usize, &candle_core::Tensor)>)?;
 image.save("flux_lion.png")?;
+
+// 5. Batched Multi-Image Generation (maximizes GPU throughput in a single pass)
+let (images, batch_metrics) = flux_pipeline.generate_batch_with_metrics(params, 4, None::<fn(usize, usize, &candle_core::Tensor)>)?;
+for (idx, img) in images.iter().enumerate() {
+    img.save(format!("flux_lion_batch_{idx}.png"))?;
+}
 ```
 
 #### Flux.2-Klein-9B (Qwen3-8B, multi-file shards)
@@ -714,6 +730,21 @@ let params = InpaintParams {
 
 let inpaint_result = pipeline.generate_inpaint(params, None)?;
 inpaint_result.save("output_inpaint.png")?;
+```
+
+---
+
+### IP-Adapter (Image Prompt Adapter)
+
+Condition image generation using reference visual style or character concepts via decoupled cross-attention:
+
+```rust
+use aurora_rust_engine::diffusion::ip_adapter::{IPAdapter, IPAdapterCrossAttention, ImageProjModel};
+
+// ImageProjModel projects image embedding vectors to cross-attention token sequence
+// IPAdapterCrossAttention layers compute decoupled cross-attention:
+// final_output = text_cross_attention_out + scale * ip_cross_attention_out
+ip_adapter.set_scale(0.75); // Configure conditioning strength (0.0 = prompt only, 1.0 = strong image reference)
 ```
 
 ---
@@ -1328,7 +1359,11 @@ Aurora comes with pre-built test and benchmark executables in `src/bin/`:
 | **`test_img2img`** | `cargo run --release --bin test_img2img --features cuda,flash-attn` | Image-to-Image pipeline verification |
 | **`test_inpaint`** | `cargo run --release --bin test_inpaint --features cuda,flash-attn` | Mask-guided inpainting verification |
 | **`test_controlnet`** | `cargo run --release --bin test_controlnet --features cuda,flash-attn` | Canny edge Multi-ControlNet integration test |
-| **`test_text_gen`** | `cargo run --release --bin test_text_gen --features cuda "<model.gguf>" "<prompt>"` | **CausalLM Text Generation** (Llama/DeepSeek/Qwen/Gemma/Mistral) |
+| **`test_text_gen`** | `cargo run --release --bin test_text_gen --features cuda "<model.safetensors_or_gguf>" "<prompt>"` | **CausalLM Text Generation** (Llama/DeepSeek/Qwen/Gemma/Mistral) |
+| **`test_upscale`** | `cargo run --release --features cuda --bin test_upscale -- <model.safetensors> <in.png> <out.png>` | **Super-Resolution (Real-ESRGAN / 4x-UltraSharp)** tiled x2/x4 upscaler |
+| **`test_moonshine`** | `cargo run --release --features cuda --bin test_moonshine -- -m <model_dir> -w <in.wav>` | **Moonshine Speech-to-Text (STT)** high-speed speech transcription |
+| **`test_flux_inference`** | `cargo run --release --features cuda --bin test_flux_inference -- <ckpt.safetensors> 4 "<prompt>"` | **FLUX.1 & FLUX.2 MMDiT Image Generation** (Klein-4B / Schnell / Dev) |
+| **`test_chattts`** | `cargo run --release --features cuda --bin test_chattts` | **Conversational Prosodic TTS** (ChatTTS + Vocos vocoder) |
 | **`test_tts`** | `cargo run --bin test_tts` | **Audio & Neural Text-to-Speech (TTS)** validation harness (WAV + Parler/DAC) |
 | **`test_whisper`** | `cargo run --bin test_whisper` | **Speech-to-Text (STT)** Whisper transcription harness (pure Rust Slaney Mel filterbank) |
 | **`test_audio_diffusion`** | `cargo run --release --features cuda --bin test_audio_diffusion -- --model-dir G:/models/Audio --duration 30 --steps 8` | **Text-to-Music** end-to-end (ACE-Step 1.5 Turbo/Base/XL) |
@@ -1339,7 +1374,7 @@ Aurora comes with pre-built test and benchmark executables in `src/bin/`:
 
 ---
 
-## 6. Super-Resolution & Neural Upscaling (Real-ESRGAN & 4x-UltraSharp)
+## 7. Super-Resolution & Neural Upscaling (Real-ESRGAN & 4x-UltraSharp)
 
 Aurora Engine provides high-speed, pure Rust image upscaling (x2, x4, x8) powered by **RRDBNet** (Real-ESRGAN, 4x-UltraSharp, NMKD) and **SRVGGNetCompact** (Anime-6B).
 
@@ -1387,7 +1422,7 @@ cargo run --bin test_upscale -- <model.safetensors> <input.png> <output.png>
 
 ---
 
-## 7. Vision-Language Models (VLM) & Multimodal Understanding
+## 8. Vision-Language Models (VLM) & Multimodal Understanding
 
 Aurora Engine embeds pure Rust Multimodal Vision-Language capabilities supporting **Qwen2-VL**, **Qwen2.5-VL**, **Qwen3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, and **SmolVLM**.
 
@@ -1434,7 +1469,137 @@ cargo run --bin test_vlm -- <model_dir> [image.png] [prompt]
 
 ---
 
-## 8. Hardware & Performance Tuning Guide
+## 9. Universal Multi-Container Weights Loader & Next-Gen Dialogue (Milestone 27)
+
+Aurora Engine features a zero-copy multi-container weight virtualization layer (`UniversalWeightsLoader`, `ZeroCopyTensorSlice`) and conversational API (`ChatMessage`, `ChatRole`, `CausalLMPipeline::chat`):
+
+### 1. Universal Multi-Container Zero-Copy Loader
+Memory-maps arbitrary weights format without conversion:
+- **GGUF v2/v3**: Direct byte slice views into quantized tensor records (`Q4_K_M`, `Q8_0`, etc.).
+- **SafeTensors & Multi-Shard Sets**: Automated sharding resolution with instant header lookup.
+- **ONNX Initializers**: Direct protobuf stream extraction of raw weight descriptors (`ModelProto` / `GraphProto`) with alignment-safe slicing via `Cow<'_, [T]>`.
+- **Quantized AWQ / GPTQ**: Native 4-bit packing representation without dequantization on load.
+
+```rust
+use std::path::Path;
+use aurora_rust_engine::weights::{UniversalWeightsLoader, ZeroCopyTensorSlice};
+
+let loader = UniversalWeightsLoader::open(&[
+    Path::new("model-00001-of-00002.safetensors"),
+    Path::new("model-00002-of-00002.safetensors"),
+])?;
+
+// Zero-copy tensor slice directly accessible in virtual memory
+let slice: ZeroCopyTensorSlice = loader.get_tensor_slice("model.layers.0.self_attn.q_proj.weight")?;
+println!("Tensor shape: {:?}, size: {} bytes", slice.shape(), slice.as_bytes().len());
+```
+
+### 2. Multi-Turn Dialogue API (ChatML Compatible)
+```rust
+use aurora_rust_engine::models::text::causal::{ChatMessage, ChatRole, TextGenParams};
+
+let messages = vec![
+    ChatMessage::system("You are a high-performance Rust AI assistant."),
+    ChatMessage::user("What is the advantage of zero-copy weight slicing?"),
+];
+
+let mut params = TextGenParams::default();
+params.max_tokens = 64;
+params.temperature = 0.7;
+
+let reply = causal_pipeline.chat(&messages, &params)?;
+println!("Assistant:\n{}", reply);
+```
+
+### 3. Native Live Token-by-Token Streaming (`TokenCallback`)
+Inference consumers can stream generated tokens in real time directly from the core without pulling web, async or network daemon dependencies:
+
+```rust
+use aurora_rust_engine::models::common::GenerationModel;
+use std::io::{self, Write};
+
+// Define an in-line token callback (returns false to abort generation early)
+let mut on_token = |token_str: &str| -> bool {
+    print!("{}", token_str);
+    io::stdout().flush().ok();
+    true // continue generating
+};
+
+// Generates and streams tokens synchronously with zero network overhead
+let full_text = text_model.generate_stream(
+    "Explain quantum computing step by step:",
+    128,
+    0.7,
+    Some(&mut on_token),
+)?;
+```
+
+### 4. Dynamic Sparse MoE Top-K Routing (DeepSeek V3/R1 & Mixtral)
+The CausalLM pipeline dynamically routes token activations across top-K experts based on router gate logits, with automatic softmax weight normalization and seamless weight resolution across HuggingFace (`mlp.experts.N`) and GGUF (`blk.N.ffn_gate.K`) formats:
+
+```rust
+// Configured automatically by AutoModel / CausalLMConfig::from_weights
+// config.moe_num_experts = 64;
+// config.moe_top_k = 2;
+// config.moe_shared_experts = 2;
+```
+
+### 5. On-the-Fly Dynamic W8A16 Dequantization & Fast BF16 Slicing
+To eliminate memory bloat when loading quantized checkpoints, `aurora-rust-engine` introduces:
+- **Direct W8A16 Matmul**: Dynamic on-the-fly dequantization of INT8 / U8 weight matrices directly in the linear forward pass (`matmul_linear`), avoiding full F16/F32 weight expansion in system RAM.
+- **Fast BF16 $\leftrightarrow$ F16 Conversion**: Direct elementwise conversions without allocating intermediate F32 buffers in [`ZeroCopyTensorSlice::to_tensor`](file:///d:/image_to_text/TransRust/src/weights/slice.rs#L85-L135).
+
+### 6. Speculative Decoding (`DraftModel` + `TargetModel`)
+Accelerate LLM inference throughput using a smaller draft model (e.g. 1B parameter draft) paired with a high-capacity target model (e.g. 14B or 27B verifier) via [`generate_speculative`](file:///d:/image_to_text/TransRust/src/models/text/causal.rs#L585-L710):
+
+```rust
+use aurora_rust_engine::models::text::causal::{CausalLMPipeline, TextGenParams};
+
+// Let target verify gamma=4 candidate tokens per draft step
+let params = TextGenParams::default();
+let verified_text = target_model.generate_speculative(
+    &mut draft_model,
+    "Explain general relativity concisely:",
+    &params,
+    /* gamma = */ 4,
+)?;
+```
+
+### 7. Cross-Modal Shared VRAM Cache (`SharedPipelineCache`)
+Shares an allocation budget across Vision, Text, Audio, and VLM with deterministic LRU eviction:
+```rust
+use aurora_rust_engine::weights::cache::SharedPipelineCache;
+
+// Budget of 10 GB VRAM shared dynamically across active modalities
+let cache = SharedPipelineCache::new(10 * 1024 * 1024 * 1024);
+```
+
+---
+
+## 10. Hardware & Performance Tuning Guide
+
+### CUDA 13.x & MSVC Environment Configuration
+To compile and execute natively with NVIDIA CUDA 13.4 and MSVC under Windows:
+1. Ensure `.cargo/config.toml` includes:
+   ```toml
+   [env]
+   CUDARC_CUDA_VERSION = { value = "13030", force = true }
+   NVCC_CCBIN = { value = "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64", force = true }
+   CUDA_COMPUTE_CAP = { value = "89", force = true }
+   _CL_ = { value = "/DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING /Zc:preprocessor", force = true }
+   ```
+2. Build and run binaries with `--release --features cuda`.
+
+### Empirical Multi-Modal Benchmarks (RTX 4070 Ti 12 GB)
+
+| Modality | Model | Config / Resolution | Execution Time | Output Artifact |
+|---|---|---|---|---|
+| **Super-Resolution** | Real-ESRGAN x4 (66.8 Mo) | 512² → 2048² (tiled 256px) | **5.51 s** (0.14s load) | `output/upscaled_step_4_real.png` (4.78 Mo) |
+| **Speech-to-Text** | Moonshine Tiny (108 Mo) | 48 000 samples @ 16 kHz | **1.60 s** | `"Thank you for watching."` |
+| **Text Generation** | TinyLlama-1.1B (2.2 Go) | 32 tokens, greedy/temp 0.7 | **5.95 s** (~5.38 tok/s) | Autoregressive token stream |
+| **DiT Generation** | FLUX.2-Klein-4B (7.75 Go) | 1024², 4 steps Euler ODE | **25.85 s** ODE, 3.64s VAE | `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` |
+
+---
 
 ### Recommended Settings per GPU VRAM Tier
 
@@ -1521,7 +1686,17 @@ Aurora Engine features a unified CausalLM inference pipeline for large language 
   let response = model.generate("Explain quantum computing in 3 bullets:", 128, 0.7)?;
   ```
 
+#### 7. Spatio-Temporal 3D Video DiT Generation (CogVideoX-2B on AMD Radeon AI PRO R9700 & ROCm)
+Aurora Engine includes a pure-Rust 3D Spatio-Temporal Diffusion Transformer (`CogVideoXTransformer3D`) supporting end-to-end video generation from native HuggingFace safetensors weights:
+- **ROCm Hardware Compatibility**: Native pure-tensor LayerNorm (`CogVideoXLayerNorm`) eliminating missing ROCm kernel barriers.
+- **Chunked Query Attention**: Queries sliced into 2048-token chunks to eliminate the $O(N^2)$ 15.75 GB monolithic allocation, enabling 49-frame generation in under 16 GB VRAM.
+- **Empirical Video Generation Benchmarks (AMD Radeon AI PRO R9700 32 GB, ROCm 10.0, gfx1201)**:
 
+| Profile | Frames | Resolution | Euler Steps | DiT Step Time | DiT Total Time | Wallclock Total | Peak VRAM |
+|---|---|---|---|---|---|---|---|
+| **Fast Preview** | 16 | 128x128 | 10 | **0.10 s / step** | **0.97 s** | 1.15 s | ~3.8 GB |
+| **Standard 240p** | 24 | 240x368 | 10 | **0.57 s / step** | **5.67 s** | 6.16 s | ~7.2 GB |
+| **Server 480p (`--server-32gb`)** | 49 | 480x720 | 25 | **21.76 s / step** | **544.09 s** | 544.58 s | **15.1 GB (47%)** |
 
 ---
 

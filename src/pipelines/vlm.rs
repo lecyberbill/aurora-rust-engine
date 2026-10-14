@@ -123,6 +123,104 @@ impl VlmPipeline {
         Tensor::from_vec(float_data, (1, 3, self.image_size, self.image_size), &self.device)
     }
 
+    /// Dynamic resolution image preprocessing preserving aspect ratio with optimal patch grid
+    pub fn preprocess_image_dynamic(&self, img: &DynamicImage, min_patches: usize, max_patches: usize) -> Result<Tensor> {
+        let (orig_w, orig_h) = (img.width() as usize, img.height() as usize);
+        let patch_size = 14;
+        let spatial_merge = 2;
+        let (target_h, target_w) = crate::models::vlm::compute_dynamic_patch_grid(
+            orig_h,
+            orig_w,
+            patch_size,
+            spatial_merge,
+            min_patches,
+            max_patches,
+        );
+
+        let resized = img.resize_exact(
+            target_w as u32,
+            target_h as u32,
+            image::imageops::FilterType::CatmullRom,
+        );
+        let rgb = resized.to_rgb8();
+        let raw = rgb.into_raw();
+
+        let num_pixels = target_h * target_w;
+        let mut float_data = vec![0f32; 3 * num_pixels];
+
+        for i in 0..num_pixels {
+            let r = raw[i * 3] as f32 / 255.0;
+            let g = raw[i * 3 + 1] as f32 / 255.0;
+            let b = raw[i * 3 + 2] as f32 / 255.0;
+
+            float_data[i] = (r - 0.5) / 0.5;
+            float_data[num_pixels + i] = (g - 0.5) / 0.5;
+            float_data[2 * num_pixels + i] = (b - 0.5) / 0.5;
+        }
+
+        Tensor::from_vec(float_data, (1, 3, target_h, target_w), &self.device)
+    }
+
+    /// Generate visual description or answer a question about an image using dynamic resolution
+    pub fn generate_dynamic(
+        &mut self,
+        image: Option<&DynamicImage>,
+        prompt: &str,
+        params: &VlmParams,
+    ) -> Result<String> {
+        self.model.reset_kv_cache();
+
+        let pixel_tensor = if let Some(img) = image {
+            Some(self.preprocess_image_dynamic(img, 16, 256)?)
+        } else {
+            None
+        };
+
+        let formatted_prompt = if image.is_some() {
+            if prompt.contains("<image>") || prompt.contains("<|image_pad|>") {
+                prompt.to_string()
+            } else {
+                format!("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{prompt}<|im_end|>\n<|im_start|>assistant\n")
+            }
+        } else {
+            format!("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+        };
+
+        let encoding = self.tokenizer.encode(formatted_prompt, true)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let token_ids = encoding.get_ids();
+        let input_ids = Tensor::new(token_ids, &self.device)?.unsqueeze(0)?;
+
+        let mut current_pos = 0;
+        let mut generated_tokens: Vec<u32> = Vec::new();
+
+        let logits = self.model.forward_dynamic(&input_ids, pixel_tensor.as_ref(), current_pos)?;
+        current_pos += token_ids.len();
+
+        let last_logits = logits.narrow(1, logits.dim(1)? - 1, 1)?.squeeze(1)?;
+        let mut next_token = self.sample_token(&last_logits, &generated_tokens, params)?;
+        generated_tokens.push(next_token);
+
+        for _ in 1..params.max_tokens {
+            if params.stop_tokens.contains(&next_token) {
+                break;
+            }
+
+            let next_input = Tensor::new(&[next_token], &self.device)?.unsqueeze(0)?;
+            let step_logits = self.model.forward(&next_input, None, current_pos)?;
+            current_pos += 1;
+
+            let step_last = step_logits.squeeze(0)?.squeeze(0)?;
+            next_token = self.sample_token(&step_last, &generated_tokens, params)?;
+            generated_tokens.push(next_token);
+        }
+
+        let output_text = self.tokenizer.decode(&generated_tokens, true)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+
+        Ok(output_text)
+    }
+
     /// Generate visual description or answer a question about an image
     pub fn generate(
         &mut self,
@@ -184,6 +282,34 @@ impl VlmPipeline {
             .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
         Ok(output_text)
+    }
+
+    /// Automatically generate a descriptive image caption
+    pub fn caption_image(&mut self, image: &DynamicImage) -> Result<String> {
+        let params = VlmParams {
+            max_tokens: 128,
+            temperature: 0.2,
+            ..Default::default()
+        };
+        self.generate(
+            Some(image),
+            "Describe this image in detailed, objective terms suitable for image generation prompts.",
+            &params,
+        )
+    }
+
+    /// Extract an optimized text-to-image prompt (style, subjects, lighting) from an image
+    pub fn extract_prompt(&mut self, image: &DynamicImage) -> Result<String> {
+        let params = VlmParams {
+            max_tokens: 200,
+            temperature: 0.3,
+            ..Default::default()
+        };
+        self.generate(
+            Some(image),
+            "Extract a concise, high-quality text-to-image generation prompt describing the visual style, subject, composition, and lighting of this image.",
+            &params,
+        )
     }
 
     fn sample_token(&self, logits: &Tensor, generated: &[u32], params: &VlmParams) -> Result<u32> {
