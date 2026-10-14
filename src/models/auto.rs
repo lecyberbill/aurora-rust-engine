@@ -395,7 +395,7 @@ fn build_text(
 
             if is_native_engine_available && (is_qwen27b || is_gemma_checkpoint) {
                 let model_tag = if is_gemma_checkpoint {
-                    std::env::var("GEMMA_MODEL_TAG").unwrap_or_else(|_| "gemma2:latest".to_string())
+                    std::env::var("GEMMA_MODEL_TAG").unwrap_or_else(|_| "gemma4:26b".to_string())
                 } else {
                     "qwen3.8:27b-unlimited".to_string()
                 };
