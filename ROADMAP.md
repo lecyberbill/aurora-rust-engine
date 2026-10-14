@@ -484,7 +484,8 @@ loading/merging/stacking stack. This turns `aurora-rust-engine` from a pure infe
   - **Empirical Hardware Validation on AMD ROCm Server (Radeon AI PRO R9700 `gfx1201`)**:
     - **Qwen3.8-27B (`Qwen3.8-27B-Q4_K_M.gguf`, 17.44 GB)**: Model loaded in **0.23s**, generated 16 tokens at **61.60 tok/s**.
     - **Gemma-3-12B (`gemma-3-12b-it-q4_k_m.gguf`, 7.30 GB)**: Model loaded in **0.18s**, generated 40 tokens at **174.07 tok/s** (prompt enrichment & French translation validated).
-    - **Liquid AI LFM2.5-8B (`LFM2.5-8B-A1B-Q4_K_M.gguf`, 5.15 GB)**: Architectural audit revealed a hybrid **`lfm2moe`** architecture: 1D short convolutions (`shortconv.conv.weight`, `in_proj`, `out_proj`) on layers 0, 1, 3.. interspersed with standard QKV attention (layers 2, 6, 10, 14, 18, 21) and MoE FFN experts (`ffn_down_exps`, `ffn_gate_exps`, `ffn_up_exps`). Pure Transformer fallback detected missing attention weights on layer 0; scheduled for dedicated `lfm2moe` hybrid block support.
+    - **Gemma-4-31B-UD (`gemma-4-31B-it-UD-Q4_K_XL.gguf`, 18.82 GB)**: Loaded in **0.39s**. **Stress Test**: Long-context generation of **1024 tokens** sustained uninterrupted at **133.29 tok/s** (total time: 7.68s) on the 22-stanza poem on muscle hypertrophy.
+    - **Liquid AI LFM2.5-8B (`LFM2.5-8B-A1B-Q4_K_M.gguf`, 5.15 GB)**: Architectural audit revealed a hybrid **`lfm2moe`** architecture: 1D short convolutions (`shortconv.conv.weight`, `in_proj`, `out_proj`) on layers 0, 1, 3.. interspersed with standard QKV attention (layers 2, 6, 10, 14, 18, 21) and MoE FFN experts (`ffn_down_exps`, `ffn_gate_exps`, `ffn_up_exps`). Pure Transformer fallback detected missing attention weights on layer 0; scheduled for dedicated `lfm2moe` hybrid block support (see Milestone 18).
 
 #### First concrete use-case: prompt enrichment & translation (for image generation)
 
@@ -696,6 +697,19 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
   - Multi-turn unified dialog API independent of any specific UI, consumable via native Rust crate, C ABI, or headless gRPC/HTTP inference servers (`ChatMessage`, `ChatRole`, `CausalLMPipeline::chat`).
 - [x] **Cross-Modal Tensor Routing & Shared Pipeline Cache (`src/weights/cache.rs`)**:
   - Unified execution engine sharing VRAM allocation pools across Vision (Flux / SDXL), Vision-Language (Qwen-VL / PaliGemma), Text (Qwen / Gemma / LLaMA), and Audio with deterministic LRU KV-cache and weights eviction (`SharedPipelineCache`).
+
+---
+
+## 🚀 Milestone 28 (PROPOSED): Liquid AI LFM Hybrid Conv1D-MoE Architecture Support
+
+**Goal.** Provide full native support for Liquid AI's hybrid State Space / Convolution / MoE architectures (`LFM2.5-8B-A1B-Q4_K_M.gguf`):
+
+- [ ] **LFM2-MoE Block Engine (`src/models/text/lfm.rs`)**:
+  - GGUF architecture sniffing for `general.architecture == "lfm2moe"`.
+  - Non-attention 1D Short Convolutions (`shortconv.conv.weight`, `shortconv.in_proj.weight`, `shortconv.out_proj.weight`) on designated hybrid layers (layers 0, 1, 3..).
+  - Interleaved Multi-Head Attention blocks on anchor layers (layers 2, 6, 10, 14, 18, 21).
+  - Mixture-of-Experts (MoE) dynamic routing with `ffn_gate_exps.weight`, `ffn_up_exps.weight`, and `ffn_down_exps.weight`.
+  - Continuous streaming state caching for `shortconv` state buffers alongside standard KV-cache.
 
 ---
 
