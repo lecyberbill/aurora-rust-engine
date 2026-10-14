@@ -210,6 +210,9 @@ pub fn tiled_scaled_dot_product_attention(
 
     #[cfg(feature = "rocm")]
     {
+        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+        use candle_core::backend::BackendStorage;
+
         extern "C" {
             fn launch_hip_fused_sdpa_f16(
                 q: *const std::ffi::c_void,
