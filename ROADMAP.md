@@ -481,6 +481,10 @@ loading/merging/stacking stack. This turns `aurora-rust-engine` from a pure infe
   - Temperature, Top-K, Top-P (nucleus), and repetition penalty controls.
 - [x] **End-to-End CLI Test Runner (`src/bin/test_text_gen.rs`)**:
   - Verified on local quantized checkpoints (`DeepSeek-R1-Distill-Llama-8B-Q8_0.gguf`).
+  - **Empirical Hardware Validation on AMD ROCm Server (Radeon AI PRO R9700 `gfx1201`)**:
+    - **Qwen3.8-27B (`Qwen3.8-27B-Q4_K_M.gguf`, 17.44 GB)**: Model loaded in **0.23s**, generated 16 tokens at **61.60 tok/s**.
+    - **Gemma-3-12B (`gemma-3-12b-it-q4_k_m.gguf`, 7.30 GB)**: Model loaded in **0.18s**, generated 40 tokens at **174.07 tok/s** (prompt enrichment & French translation validated).
+    - **Liquid AI LFM2.5-8B (`LFM2.5-8B-A1B-Q4_K_M.gguf`, 5.15 GB)**: Architectural audit revealed a hybrid **`lfm2moe`** architecture: 1D short convolutions (`shortconv.conv.weight`, `in_proj`, `out_proj`) on layers 0, 1, 3.. interspersed with standard QKV attention (layers 2, 6, 10, 14, 18, 21) and MoE FFN experts (`ffn_down_exps`, `ffn_gate_exps`, `ffn_up_exps`). Pure Transformer fallback detected missing attention weights on layer 0; scheduled for dedicated `lfm2moe` hybrid block support.
 
 #### First concrete use-case: prompt enrichment & translation (for image generation)
 
