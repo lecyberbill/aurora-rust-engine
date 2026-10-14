@@ -210,9 +210,6 @@ pub fn tiled_scaled_dot_product_attention(
 
     #[cfg(feature = "rocm")]
     {
-        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-        use candle_core::backend::BackendStorage;
-
         extern "C" {
             fn launch_hip_fused_sdpa_f16(
                 q: *const std::ffi::c_void,
@@ -234,7 +231,7 @@ pub fn tiled_scaled_dot_product_attention(
             let q_c = q.contiguous()?;
             let k_c = k.contiguous()?;
             let v_c = v.contiguous()?;
-            let out = candle_core::Tensor::zeros((b, h, l_q, d), orig_dtype, q.device())?;
+            let mut out = candle_core::Tensor::zeros((b, h, l_q, d), orig_dtype, q.device())?;
 
             let (q_st, _) = q_c.storage_and_layout();
             let (k_st, _) = k_c.storage_and_layout();
@@ -242,34 +239,32 @@ pub fn tiled_scaled_dot_product_attention(
             let (out_st, _) = out.storage_and_layout();
 
             if let (
-                candle_core::Storage::Cuda(q_cuda),
-                candle_core::Storage::Cuda(k_cuda),
-                candle_core::Storage::Cuda(v_cuda),
-                candle_core::Storage::Cuda(out_cuda),
+                candle_core::Storage::Rocm(q_rocm),
+                candle_core::Storage::Rocm(k_rocm),
+                candle_core::Storage::Rocm(v_rocm),
+                candle_core::Storage::Rocm(out_rocm),
             ) = (&*q_st, &*k_st, &*v_st, &*out_st) {
-                if let (Ok(q_slice), Ok(k_slice), Ok(v_slice), Ok(out_slice)) = (
-                    q_cuda.as_cuda_slice::<half::f16>(),
-                    k_cuda.as_cuda_slice::<half::f16>(),
-                    v_cuda.as_cuda_slice::<half::f16>(),
-                    out_cuda.as_cuda_slice::<half::f16>(),
-                ) {
-                    unsafe {
-                        launch_hip_fused_sdpa_f16(
-                            *q_slice.device_ptr() as *const _,
-                            *k_slice.device_ptr() as *const _,
-                            *v_slice.device_ptr() as *const _,
-                            *out_slice.device_ptr() as *mut _,
-                            b as i32,
-                            h as i32,
-                            l_q as i32,
-                            l_k as i32,
-                            d as i32,
-                            scale as f32,
-                            std::ptr::null_mut(),
-                        );
-                    }
-                    return Ok(out);
+                let q_ptr = q_rocm.slice.as_ptr();
+                let k_ptr = k_rocm.slice.as_ptr();
+                let v_ptr = v_rocm.slice.as_ptr();
+                let out_ptr = out_rocm.slice.as_ptr() as *mut std::ffi::c_void;
+
+                unsafe {
+                    launch_hip_fused_sdpa_f16(
+                        q_ptr,
+                        k_ptr,
+                        v_ptr,
+                        out_ptr,
+                        b as i32,
+                        h as i32,
+                        l_q as i32,
+                        l_k as i32,
+                        d as i32,
+                        scale as f32,
+                        std::ptr::null_mut(),
+                    );
                 }
+                return Ok(out);
             }
         }
     }
