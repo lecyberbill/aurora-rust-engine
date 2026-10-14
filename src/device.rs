@@ -233,37 +233,45 @@ pub fn tiled_scaled_dot_product_attention(
             let v_c = v.contiguous()?;
             let mut out = candle_core::Tensor::zeros((b, h, l_q, d), orig_dtype, q.device())?;
 
-            let (q_st, _) = q_c.storage_and_layout();
-            let (k_st, _) = k_c.storage_and_layout();
-            let (v_st, _) = v_c.storage_and_layout();
-            let (out_st, _) = out.storage_and_layout();
+            let success = {
+                let (q_st, _) = q_c.storage_and_layout();
+                let (k_st, _) = k_c.storage_and_layout();
+                let (v_st, _) = v_c.storage_and_layout();
+                let (out_st, _) = out.storage_and_layout();
 
-            if let (
-                candle_core::Storage::Rocm(q_rocm),
-                candle_core::Storage::Rocm(k_rocm),
-                candle_core::Storage::Rocm(v_rocm),
-                candle_core::Storage::Rocm(out_rocm),
-            ) = (&*q_st, &*k_st, &*v_st, &*out_st) {
-                let q_ptr = q_rocm.slice.as_ptr();
-                let k_ptr = k_rocm.slice.as_ptr();
-                let v_ptr = v_rocm.slice.as_ptr();
-                let out_ptr = out_rocm.slice.as_ptr() as *mut std::ffi::c_void;
+                if let (
+                    candle_core::Storage::Rocm(q_rocm),
+                    candle_core::Storage::Rocm(k_rocm),
+                    candle_core::Storage::Rocm(v_rocm),
+                    candle_core::Storage::Rocm(out_rocm),
+                ) = (&*q_st, &*k_st, &*v_st, &*out_st) {
+                    let q_ptr = q_rocm.slice.as_ptr();
+                    let k_ptr = k_rocm.slice.as_ptr();
+                    let v_ptr = v_rocm.slice.as_ptr();
+                    let out_ptr = out_rocm.slice.as_ptr() as *mut std::ffi::c_void;
 
-                unsafe {
-                    launch_hip_fused_sdpa_f16(
-                        q_ptr,
-                        k_ptr,
-                        v_ptr,
-                        out_ptr,
-                        b as i32,
-                        h as i32,
-                        l_q as i32,
-                        l_k as i32,
-                        d as i32,
-                        scale as f32,
-                        std::ptr::null_mut(),
-                    );
+                    unsafe {
+                        launch_hip_fused_sdpa_f16(
+                            q_ptr,
+                            k_ptr,
+                            v_ptr,
+                            out_ptr,
+                            b as i32,
+                            h as i32,
+                            l_q as i32,
+                            l_k as i32,
+                            d as i32,
+                            scale as f32,
+                            std::ptr::null_mut(),
+                        );
+                    }
+                    true
+                } else {
+                    false
                 }
+            };
+
+            if success {
                 return Ok(out);
             }
         }
