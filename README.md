@@ -332,6 +332,14 @@ cargo run --release --bin server --features cuda,flash-attn
 | ACE-Step 1.5 **Base** | 10 s, 30 steps (CFG/APG) | 2.7 s | CUDA / ROCm |
 | Audio Export | 48 kHz stereo | WAV · OGG · MP3 | Zero C/FFmpeg dependencies |
 
+### 🚀 Pure Rust LLM Inference Benchmarks (AMD ROCm / Radeon AI PRO R9700 `gfx1201`)
+
+| Model | Checkpoint File | Size | Load Time | Generation Throughput | Test Case |
+|---|---|---|---|---|---|
+| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **0.23 s** | **61.60 tok/s** | Multilingual prompt generation |
+| **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **0.18 s** | **174.07 tok/s** | Prompt enrichment & French translation |
+| **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **0.39 s** | **133.29 tok/s** | 1024-token long-form poem stress test |
+
 ---
 
 ## 🗺️ Project Roadmap
@@ -361,6 +369,7 @@ See [`ROADMAP.md`](ROADMAP.md) for full technical specifications and development
 - [x] **Milestone 25**: Linux & AMD ROCm / HIP Acceleration (Cross-Platform Deployment)
 - [x] **Milestone 26**: Cross-Platform Performance & Kernel Optimizations (CUDA, ROCm, Metal, CPU, RDNA4 WMMA)
 - [x] **Milestone 27**: Universal Multi-Format & Multi-Modal Inference Engine (Zero-Copy Slicing, Gemma/DeepSeek, Cross-Modal Cache)
+- [ ] **Milestone 28 (PROPOSED)**: Liquid AI LFM Hybrid Conv1D-MoE Architecture Support (`lfm2moe`)
 
 ---
 

@@ -1599,6 +1599,14 @@ To compile and execute natively with NVIDIA CUDA 13.4 and MSVC under Windows:
 | **Text Generation** | TinyLlama-1.1B (2.2 Go) | 32 tokens, greedy/temp 0.7 | **5.95 s** (~5.38 tok/s) | Autoregressive token stream |
 | **DiT Generation** | FLUX.2-Klein-4B (7.75 Go) | 1024², 4 steps Euler ODE | **25.85 s** ODE, 3.64s VAE | `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` |
 
+#### Empirical LLM Inference Benchmarks (AMD ROCm / Radeon AI PRO R9700 `gfx1201`)
+
+| Model | Checkpoint File | Size | Load Time | Generation Throughput | Test Case |
+|---|---|---|---|---|---|
+| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **0.23 s** | **61.60 tok/s** | Multilingual prompt generation |
+| **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **0.18 s** | **174.07 tok/s** | Prompt enrichment & French translation |
+| **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **0.39 s** | **133.29 tok/s** | 1024-token long-form poem stress test |
+
 ---
 
 ### Recommended Settings per GPU VRAM Tier
