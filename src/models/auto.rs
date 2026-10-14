@@ -391,9 +391,14 @@ fn build_text(
 
             let filename = weights.file_name().and_then(|f| f.to_str()).unwrap_or("");
             let is_qwen27b = filename.contains("f5f1dd89") || filename.contains("27B") || filename.contains("27b");
+            let is_gemma_checkpoint = filename.to_lowercase().contains("gemma") || matches!(arch, Architecture::Gemma);
 
-            if is_native_engine_available && is_qwen27b {
-                let model_tag = "qwen3.8:27b-unlimited".to_string();
+            if is_native_engine_available && (is_qwen27b || is_gemma_checkpoint) {
+                let model_tag = if is_gemma_checkpoint {
+                    std::env::var("GEMMA_MODEL_TAG").unwrap_or_else(|_| "gemma2:latest".to_string())
+                } else {
+                    "qwen3.8:27b-unlimited".to_string()
+                };
                 println!("⚡ AutoModel: High-Speed Native ROCm/CUDA Engine Attached ({model_tag})");
                 Ok(TextModel::native_accelerated(id, arch.slug(), model_tag, endpoint, device.clone(), dtype))
             } else {

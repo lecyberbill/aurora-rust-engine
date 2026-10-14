@@ -187,7 +187,7 @@ pub fn detect_from_model_type(model_type: Option<&str>) -> Result<Architecture> 
         "qwen3" | "qwen2" | "qwen" => Architecture::Qwen3,
         "llama" | "llama3" | "llama2" => Architecture::Llama,
         "deepseek" | "deepseek_v2" | "deepseek_v3" => Architecture::DeepSeek,
-        "gemma" | "gemma2" | "gemma3" => Architecture::Gemma,
+        "gemma" | "gemma2" | "gemma3" | "gemma4" => Architecture::Gemma,
         "mistral" | "mistral3" => Architecture::Mistral3,
         "t5" | "t5xxl" => Architecture::T5,
         "clip" | "clip_l" | "clip-l" => Architecture::ClipL,
@@ -226,6 +226,7 @@ mod tests {
     fn model_type_strings_map_to_architectures() {
         assert_eq!(detect_from_model_type(Some("qwen3")).unwrap(), Architecture::Qwen3);
         assert_eq!(detect_from_model_type(Some("mistral")).unwrap(), Architecture::Mistral3);
+        assert_eq!(detect_from_model_type(Some("gemma4")).unwrap(), Architecture::Gemma);
         assert_eq!(detect_from_model_type(Some("t5")).unwrap(), Architecture::T5);
         assert_eq!(detect_from_model_type(Some("flux2-dev")).unwrap(), Architecture::Flux2Dev);
         assert_eq!(detect_from_model_type(Some("sdxl")).unwrap(), Architecture::Sdxl);

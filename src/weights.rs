@@ -1,5 +1,13 @@
 // [WFGY] Zone: SAFE | λ: 0.35 | Fallbacks: 1 (OpenCLIP in_proj tensor splitting) | Action: OpenCLIP in_proj splitting, key mapping and text_projection support
 
+pub mod cache;
+pub mod loader;
+pub mod slice;
+
+pub use cache::{PipelineModality, SharedPipelineCache, SharedPipelineCacheHandle};
+pub use loader::{ContainerKind, UniversalWeightsLoader};
+pub use slice::ZeroCopyTensorSlice;
+
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use half::{bf16, f16};
@@ -1136,26 +1144,8 @@ impl WeightsSource for SafeTensorsArchive {
 
 /// Open weights automatically by inspecting the path (directory of shards, GGUF magic, or SafeTensors).
 pub fn open_auto<P: AsRef<Path>>(path: P) -> Result<Arc<dyn WeightsSource>> {
-    let path = path.as_ref();
-    if path.is_dir() {
-        return Ok(Arc::new(SafeTensorsArchive::open_shards_dir(path)?));
-    }
-    
-    // Sniff magic bytes if file exists
-    if let Ok(mut f) = File::open(path) {
-        use std::io::Read;
-        let mut magic = [0u8; 4];
-        if f.read_exact(&mut magic).is_ok() && &magic == b"GGUF" {
-            return Ok(Arc::new(crate::gguf::GgufWeights::open(path)?));
-        }
-    }
-    
-    let lower = path.to_string_lossy().to_lowercase();
-    if lower.ends_with(".gguf") {
-        Ok(Arc::new(crate::gguf::GgufWeights::open(path)?))
-    } else {
-        Ok(Arc::new(SafeTensorsArchive::open(path)?))
-    }
+    let loader = UniversalWeightsLoader::open_auto(path)?;
+    Ok(Arc::new(loader))
 }
 
 #[cfg(test)]
