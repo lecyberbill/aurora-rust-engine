@@ -109,6 +109,7 @@ pub struct CausalLMConfig {
     pub final_logit_softcapping: Option<f64>,
     pub unit_offset_norm: bool,
     pub sliding_window_pattern: Option<usize>,
+    pub rope_scaling_factor: f32,
     pub moe_num_experts: usize,
     pub moe_top_k: usize,
     pub moe_shared_experts: usize,
@@ -249,7 +250,12 @@ impl CausalLMConfig {
         let sliding_window = src.metadata_usize(&format!("{arch_prefix}attention.sliding_window"))
             .or_else(|| if is_gemma && !arch.contains("gemma3") { Some(4096) } else { None });
 
-        let sliding_window_pattern = src.metadata_usize(&format!("{arch_prefix}attention.sliding_window_pattern"));
+        let sliding_window_pattern = src.metadata_usize(&format!("{arch_prefix}attention.sliding_window_pattern"))
+            .or_else(|| if is_gemma && arch.contains("gemma3") { Some(6) } else { None });
+
+        let rope_scaling_factor = src.metadata_f64(&format!("{arch_prefix}rope.scaling.factor"))
+            .map(|f| f as f32)
+            .unwrap_or(1.0f32);
 
         let attn_logit_softcapping = src.metadata_f64(&format!("{arch_prefix}attn_logit_softcapping"))
             .or_else(|| {
@@ -304,6 +310,7 @@ impl CausalLMConfig {
             final_logit_softcapping,
             unit_offset_norm,
             sliding_window_pattern,
+            rope_scaling_factor,
             moe_num_experts,
             moe_top_k,
             moe_shared_experts,
@@ -1751,7 +1758,8 @@ impl CausalLMPipeline {
     fn apply_rope(&self, q: &Tensor, k: &Tensor, pos: usize, seq_len: usize, theta: f32) -> Result<(Tensor, Tensor)> {
         let dev = q.device();
         let head_dim = self.config.head_dim;
-        let positions: Vec<f32> = (pos..pos + seq_len).map(|p| p as f32).collect();
+        let scale_factor = if self.config.rope_scaling_factor > 0.0 { self.config.rope_scaling_factor } else { 1.0f32 };
+        let positions: Vec<f32> = (pos..pos + seq_len).map(|p| (p as f32) / scale_factor).collect();
         let pos_tensor = Tensor::new(&positions[..], dev)?.unsqueeze(1)?; // [S, 1]
 
         let half_dim = head_dim / 2;

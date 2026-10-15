@@ -383,13 +383,24 @@ fn build_text(
     match arch {
         Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma | Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Lfm | Architecture::Phi => {
             let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
+            let text_dtype = if config.is_gemma {
+                // Gemma 3 activations naturally peak up to ~58,800 at layer 47.
+                // Standard F16 (max 65,504) overflows into +inf, zeroing out RMSNorm logits.
+                // Gemma 3 MUST run in BF16 (on GPU) or F32 (on CPU).
+                match device {
+                    Device::Cpu => DType::F32,
+                    _ => DType::BF16,
+                }
+            } else {
+                dtype
+            };
             let tokenizer = resolve_tokenizer(weights, arch);
             let pipeline = crate::models::text::CausalLMPipeline::new(
                 archive,
                 config,
                 tokenizer,
                 device.clone(),
-                dtype,
+                text_dtype,
             );
             Ok(TextModel::causal_lm(id, arch.slug(), pipeline))
         }
