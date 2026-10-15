@@ -621,9 +621,20 @@ impl CausalLMPipeline {
         );
 
         // Prefill prompt tokens
+        println!("🔍 Prefill: prompt_tokens = {:?}", prompt_tokens);
         let input_tensor = Tensor::new(&prompt_tokens[..], &self.device)?.unsqueeze(0)?;
         let logits = self.forward(&input_tensor, 0)?;
         let last_logits = logits.i((0, prompt_tokens.len() - 1))?;
+
+        let logits_vec = last_logits.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let mut top_indices: Vec<(usize, f32)> = logits_vec.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        top_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        println!("🔍 Top-5 logits at step 0:");
+        for (idx, score) in top_indices.iter().take(5) {
+            let piece = self.tokenizer.as_ref().and_then(|t| t.decode(&[*idx as u32], false).ok()).unwrap_or_default();
+            println!("   - token {idx} ({:?}): {score:.4}", piece);
+        }
+
         // Track all context tokens for repetition penalty
         let mut all_context_tokens = prompt_tokens.clone();
 
