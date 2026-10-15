@@ -48,8 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         w_dense_dev.contiguous()?
     };
     let input_f32 = input.to_dtype(DType::F32)?;
+    let in_2d = input_f32.reshape((1, in_features))?;
     let t1 = std::time::Instant::now();
-    let y_dense = input_f32.matmul(&w_adapted)?;
+    let y_dense_2d = in_2d.matmul(&w_adapted)?;
+    let y_dense = y_dense_2d.reshape((1, 1, y_dense_2d.dim(1)?))?;
     let t_dense = t1.elapsed();
     println!("y_dense computed in {:.3}ms: shape {:?}, dtype {:?}", t_dense.as_secs_f64() * 1000.0, y_dense.shape(), y_dense.dtype());
 
