@@ -11,10 +11,7 @@ fn main() -> anyhow::Result<()> {
 
     println!("=== GGUF Metadata Fields ===");
     for (k, v) in &content.metadata {
-        let k_lower = k.to_lowercase();
-        if k_lower.contains("expert") || k_lower.contains("gating") || k_lower.contains("template") || k_lower.contains("cache") || k_lower.contains("shortconv") || k_lower.contains("eos") || k_lower.contains("bos") {
-            println!("  {k} => {:?}", v);
-        }
+        println!("  {k} => {:?}", v);
     }
     Ok(())
 }

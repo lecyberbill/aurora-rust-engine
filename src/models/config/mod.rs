@@ -26,6 +26,7 @@ pub enum Architecture {
     Gemma,
     Mistral3,
     Lfm,
+    Phi,
     T5,
     ClipL,
     OpenClip,
@@ -38,7 +39,7 @@ impl Architecture {
     pub fn model_kind(&self) -> ModelKind {
         match self {
             Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma => ModelKind::Text,
-            Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Lfm => ModelKind::Text,
+            Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Lfm | Architecture::Phi => ModelKind::Text,
             Architecture::T5 | Architecture::ClipL | Architecture::OpenClip => ModelKind::TextEncoder,
             Architecture::ZImageTurbo
             | Architecture::Flux2Dev
@@ -70,6 +71,7 @@ impl Architecture {
             Architecture::Gemma => "gemma".into(),
             Architecture::Mistral3 => "mistral3".into(),
             Architecture::Lfm => "lfm".into(),
+            Architecture::Phi => "phi".into(),
             Architecture::T5 => "t5".into(),
             Architecture::ClipL => "clip-l".into(),
             Architecture::OpenClip => "open-clip".into(),
@@ -141,6 +143,9 @@ pub fn detect_architecture(src: &dyn WeightsSource) -> Architecture {
             }
             return Architecture::Llama;
         }
+        if has("phi") || has("phi3") || has("phi4") || (has("blk.0.attn_qkv.weight") && has("blk.0.ffn_up.weight") && !has("blk.0.ffn_gate.weight")) {
+            return Architecture::Phi;
+        }
         if has("blk.0.attn_q.weight") || has("blk.0.attn_qkv.weight") || has("blk.0.ssm_a") {
             if has("attn_q_norm") || has("ssm_a") || has("attn_qkv") || has("ssm_beta") {
                 return Architecture::Qwen3;
@@ -193,6 +198,7 @@ pub fn detect_from_model_type(model_type: Option<&str>) -> Result<Architecture> 
         "llama" | "llama3" | "llama2" => Architecture::Llama,
         "deepseek" | "deepseek_v2" | "deepseek_v3" => Architecture::DeepSeek,
         "lfm" | "lfm2" | "lfm2moe" | "liquid" => Architecture::Lfm,
+        "phi" | "phi3" | "phi4" | "phi-3" | "phi-4" => Architecture::Phi,
         "gemma" | "gemma2" | "gemma3" | "gemma4" => Architecture::Gemma,
         "mistral" | "mistral3" => Architecture::Mistral3,
         "t5" | "t5xxl" => Architecture::T5,
