@@ -1355,7 +1355,7 @@ impl CausalLMPipeline {
             };
 
             // Apply RoPE
-            let (q, k) = self.apply_rope(&q, &k, pos, seq_len, theta)?;
+            let (q, k) = self.apply_rope(&q, &k, pos, seq_len, theta, sw.is_some())?;
 
             // Append to KV Cache with sliding window bounding
             let (k, v) = self.kv_cache.layers[layer_idx]
@@ -1755,10 +1755,14 @@ impl CausalLMPipeline {
         rocm_contiguous(&x)
     }
 
-    fn apply_rope(&self, q: &Tensor, k: &Tensor, pos: usize, seq_len: usize, theta: f32) -> Result<(Tensor, Tensor)> {
+    fn apply_rope(&self, q: &Tensor, k: &Tensor, pos: usize, seq_len: usize, theta: f32, is_sliding_layer: bool) -> Result<(Tensor, Tensor)> {
         let dev = q.device();
         let head_dim = self.config.head_dim;
-        let scale_factor = if self.config.rope_scaling_factor > 0.0 { self.config.rope_scaling_factor } else { 1.0f32 };
+        let scale_factor = if !is_sliding_layer && self.config.rope_scaling_factor > 0.0 {
+            self.config.rope_scaling_factor
+        } else {
+            1.0f32
+        };
         let positions: Vec<f32> = (pos..pos + seq_len).map(|p| (p as f32) / scale_factor).collect();
         let pos_tensor = Tensor::new(&positions[..], dev)?.unsqueeze(1)?; // [S, 1]
 
