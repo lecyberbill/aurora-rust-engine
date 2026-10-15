@@ -1760,13 +1760,14 @@ impl CausalLMPipeline {
 
     fn causal_mask(&self, seq_len: usize, device: &Device, sliding_window: Option<usize>) -> Result<Tensor> {
         let mut mask_vec = vec![0.0f32; seq_len * seq_len];
+        let neg_inf = -1e4f32;
         for i in 0..seq_len {
             for j in 0..seq_len {
                 if j > i {
-                    mask_vec[i * seq_len + j] = f32::NEG_INFINITY;
+                    mask_vec[i * seq_len + j] = neg_inf;
                 } else if let Some(sw) = sliding_window {
                     if i.saturating_sub(j) > sw {
-                        mask_vec[i * seq_len + j] = f32::NEG_INFINITY;
+                        mask_vec[i * seq_len + j] = neg_inf;
                     }
                 }
             }
@@ -1982,8 +1983,8 @@ mod tests {
         // row 2: [0, 0, 0, -inf]
         // row 3 (i=3, sw=2 -> diff=3-0=3 > 2): [-inf, 0, 0, 0]
         assert_eq!(mask_flat[0 * 4 + 0], 0.0);
-        assert_eq!(mask_flat[0 * 4 + 1], f32::NEG_INFINITY);
-        assert_eq!(mask_flat[3 * 4 + 0], f32::NEG_INFINITY); // i=3, j=0, diff=3 > sliding_window(2)
+        assert_eq!(mask_flat[0 * 4 + 1], -1e4);
+        assert_eq!(mask_flat[3 * 4 + 0], -1e4); // i=3, j=0, diff=3 > sliding_window(2)
         assert_eq!(mask_flat[3 * 4 + 1], 0.0); // i=3, j=1, diff=2 <= sliding_window(2)
         assert_eq!(mask_flat[3 * 4 + 3], 0.0);
     }
