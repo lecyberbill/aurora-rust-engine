@@ -296,6 +296,18 @@ impl WeightsSource for UniversalWeightsLoader {
             self.tensors.len()
         )
     }
+
+    fn metadata(&self, key: &str) -> Option<String> {
+        self.gguf_weights.as_ref().and_then(|gw| gw.metadata(key))
+    }
+
+    fn metadata_usize(&self, key: &str) -> Option<usize> {
+        self.gguf_weights.as_ref().and_then(|gw| gw.metadata_usize(key))
+    }
+
+    fn metadata_f64(&self, key: &str) -> Option<f64> {
+        self.gguf_weights.as_ref().and_then(|gw| gw.metadata_f64(key))
+    }
 }
 
 /// Helper parsing protobuf varints.
