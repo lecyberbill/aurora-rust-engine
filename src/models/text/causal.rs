@@ -1541,26 +1541,22 @@ impl CausalLMPipeline {
             accum_out.unwrap_or_else(|| normed_post_x.clone())
         } else {
             // Standard dense SwiGLU MLP
-            let (gate, up) = if let Ok(gate_l) = self.get_layer_linear(layer_idx, &["mlp.gate_proj.weight", "ffn_gate.weight"]) {
+            if let Ok(fused_up_l) = self.get_layer_linear(layer_idx, &["ffn_up.weight", "mlp.up_proj.weight"]) {
+                // Dedicated modular Phi-3 / Phi-4 SwiGLU block
+                let down_l = self.get_layer_linear(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
+                let phi_mlp = super::phi::PhiMlp::new(fused_up_l, down_l, self.config.intermediate_size);
+                phi_mlp.forward(&normed_post_x)?
+            } else if let Ok(gate_l) = self.get_layer_linear(layer_idx, &["mlp.gate_proj.weight", "ffn_gate.weight"]) {
                 let up_l = self.get_layer_linear(layer_idx, &["mlp.up_proj.weight", "ffn_up.weight"])?;
                 let gate = gate_l.forward(&normed_post_x)?;
                 let up = up_l.forward(&normed_post_x)?;
-                (gate, up)
-            } else if let Ok(fused_up_l) = self.get_layer_linear(layer_idx, &["ffn_up.weight", "mlp.up_proj.weight"]) {
-                // In Phi-3/Phi-4: fused_up is [2 * intermediate_size, hidden_size] -> proj is [B, S, 2 * intermediate_size]
-                let fused_proj = fused_up_l.forward(&normed_post_x)?;
-                let inter_dim = self.config.intermediate_size;
-                let gate = fused_proj.narrow(candle_core::D::Minus1, 0, inter_dim)?;
-                let up = fused_proj.narrow(candle_core::D::Minus1, inter_dim, inter_dim)?;
-                (gate, up)
+                let down_l = self.get_layer_linear(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
+                let silu_gate = candle_nn::ops::silu(&gate).map_err(LuminaError::Candle)?;
+                let mlp_act = (silu_gate * up).map_err(LuminaError::Candle)?;
+                down_l.forward(&mlp_act)?
             } else {
                 return Err(LuminaError::MissingWeight(format!("FFN up/gate weight for layer {layer_idx} not found")));
-            };
-
-            let down_l = self.get_layer_linear(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
-            let silu_gate = candle_nn::ops::silu(&gate).map_err(LuminaError::Candle)?;
-            let mlp_act = (silu_gate * up).map_err(LuminaError::Candle)?;
-            down_l.forward(&mlp_act)?
+            }
         };
 
         let x = (x + mlp_out).map_err(LuminaError::Candle)?;
