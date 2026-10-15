@@ -1,6 +1,5 @@
 // [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: Test unit for Native RDNA4 WMMA Q4_K Kernel FFI
 
-use std::time::Instant;
 
 #[cfg(feature = "rocm")]
 extern "C" {

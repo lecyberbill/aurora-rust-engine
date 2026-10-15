@@ -1,6 +1,6 @@
 // [WFGY] Zone: SAFE | λ: 0.10 | Fallbacks: 0 | Action: Pinpoint exact difference between inline and QwenDecoderLayer
 
-use candle_core::{DType, Device, Module, Tensor};
+use candle_core::{DType, Device, Tensor};
 use aurora_rust_engine::weights::SafeTensorsArchive;
 use aurora_rust_engine::text::Qwen3TextEncoder;
 use std::path::PathBuf;
@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
     let enc = tok.encode(formatted_prompt.as_str(), true).unwrap();
     let ids: Vec<u32> = enc.get_ids().to_vec();
     let seq_len = ids.len();
-    let ids_tensor = Tensor::from_vec(ids, (1, seq_len), &dev)?;
+    let _ids_tensor = Tensor::from_vec(ids, (1, seq_len), &dev)?;
 
     // We can directly test layer 0 of the encoder:
     // Access embed_tokens

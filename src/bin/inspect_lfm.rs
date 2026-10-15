@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use aurora_rust_engine::weights::{open_auto, WeightsSource};
+use aurora_rust_engine::weights::open_auto;
 
 fn main() -> anyhow::Result<()> {
     let path = std::env::args().nth(1).unwrap_or_else(|| "/models/llm/LFM2.5-8B-A1B-Q4_K_M.gguf".to_string());

@@ -1,8 +1,6 @@
 // [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: MiniMax H3 Omni-Modal CLI Runner (Pure Rust)
 // Invariant: Zero Python dependency, bounded VRAM (SequentialStageOffload on 32 GB R9700), synchronized video + 32 kHz stereo audio output.
 
-use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 

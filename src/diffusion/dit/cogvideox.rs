@@ -1,7 +1,7 @@
 // [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Pure Rust CogVideoX-2B/5B Spatio-Temporal 3D DiT Transformer Architecture
 // Invariant: Non-intrusive AdaLN-single 6-factor modulation, 3D spatio-temporal attention, exact unpatchify inversion.
 
-use candle_core::{DType, Device, Module, Result, Tensor};
+use candle_core::{DType, Module, Result, Tensor};
 use candle_nn::{conv2d, linear, Conv2d, Conv2dConfig, Linear, VarBuilder};
 
 /// CogVideoX Transformer 3D Configuration
@@ -65,7 +65,7 @@ pub fn gelu_approximate(x: &Tensor) -> Result<Tensor> {
 pub struct CogVideoXPatchEmbed {
     proj: Conv2d,
     text_proj: Linear,
-    patch_size: usize,
+    _patch_size: usize,
     pub pos_embedding: Option<Tensor>,
 }
 
@@ -80,7 +80,7 @@ impl CogVideoXPatchEmbed {
         Ok(Self {
             proj,
             text_proj,
-            patch_size: cfg.patch_size,
+            _patch_size: cfg.patch_size,
             pos_embedding: None,
         })
     }
@@ -536,6 +536,7 @@ impl CogVideoXTransformer3D {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::Device;
 
     #[test]
     fn test_cogvideox_patch_and_time_shapes() -> Result<()> {

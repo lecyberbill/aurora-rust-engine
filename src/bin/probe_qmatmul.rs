@@ -1,5 +1,5 @@
 use candle_core::quantized::{gguf_file, QMatMul};
-use candle_core::{Device, Module, Tensor};
+use candle_core::{Module, Tensor};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dev = aurora_rust_engine::device::auto_device()?;

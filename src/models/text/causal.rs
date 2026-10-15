@@ -668,7 +668,7 @@ impl CausalLMPipeline {
         let mut target_pos = prompt_tokens.len();
         let mut draft_pos = draft_prompt.len();
 
-        let draft_params = TextGenParams {
+        let _draft_params = TextGenParams {
             max_tokens: gamma,
             temperature: params.temperature,
             top_p: params.top_p,
@@ -996,7 +996,7 @@ impl CausalLMPipeline {
             || self.weights.contains(&format!("layers.{layer_idx}.ssm_a"))
             || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ssm_a"));
 
-        let (attn_out, x) = if is_shortconv_layer {
+        let (_attn_out, x) = if is_shortconv_layer {
             // LFM ShortConv double-gated 1D convolution block:
             // 1. in_proj: [hidden_dim, 3 * hidden_dim] -> BCx is [B, S, 3 * hidden_dim]
             let in_proj_w = self.get_layer_weight(layer_idx, &["shortconv.in_proj.weight", "conv.in_proj.weight", "in_proj.weight"])?;
@@ -1333,7 +1333,7 @@ impl CausalLMPipeline {
                 expert_indices.truncate(top_k);
 
                 // Combination weights are derived from unbiased router_probs
-                let mut expert_weights: Vec<(usize, f32)> = expert_indices.iter().map(|&(idx, _)| (idx, clean_flat[idx])).collect();
+                let expert_weights: Vec<(usize, f32)> = expert_indices.iter().map(|&(idx, _)| (idx, clean_flat[idx])).collect();
                 let weight_sum: f32 = expert_weights.iter().map(|(_, w)| *w).sum();
                 let norm_factor = if weight_sum > 0.0 { 1.0 / weight_sum } else { 1.0 };
 
@@ -1420,7 +1420,7 @@ impl CausalLMPipeline {
                         expert_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                         expert_indices.truncate(top_k);
 
-                        let mut expert_weights: Vec<(usize, f32)> = expert_indices.iter().map(|&(idx, _)| (idx, clean_flat[start_off + idx])).collect();
+                        let expert_weights: Vec<(usize, f32)> = expert_indices.iter().map(|&(idx, _)| (idx, clean_flat[start_off + idx])).collect();
                         let weight_sum: f32 = expert_weights.iter().map(|(_, w)| *w).sum();
                         let norm_factor = if weight_sum > 0.0 { 1.0 / weight_sum } else { 1.0 };
 
@@ -1457,7 +1457,7 @@ impl CausalLMPipeline {
                         expert_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                         expert_indices.truncate(top_k);
 
-                        let mut expert_weights: Vec<(usize, f32)> = expert_indices.iter().map(|&(idx, _)| (idx, clean_flat[start_off + idx])).collect();
+                        let expert_weights: Vec<(usize, f32)> = expert_indices.iter().map(|&(idx, _)| (idx, clean_flat[start_off + idx])).collect();
                         let weight_sum: f32 = expert_weights.iter().map(|(_, w)| *w).sum();
                         let norm_factor = if weight_sum > 0.0 { 1.0 / weight_sum } else { 1.0 };
 

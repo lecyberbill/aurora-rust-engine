@@ -1,7 +1,7 @@
 // [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: CogVideoX Official DDIM v-prediction Scheduler with SNR Shift & Zero Terminal SNR
 // Invariant: Exact match with diffusers CogVideoXDDIMScheduler, trailing timesteps, v-prediction inversion.
 
-use candle_core::{DType, Result, Tensor};
+use candle_core::{Result, Tensor};
 
 #[derive(Debug, Clone)]
 pub struct CogVideoXDDIMConfig {

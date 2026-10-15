@@ -3,7 +3,6 @@ use candle_core::{DType, Tensor};
 use aurora_rust_engine::device::auto_device;
 use aurora_rust_engine::diffusion::dit::z_image::{ZImageConfig, ZImageTransformer};
 use aurora_rust_engine::diffusion::schedulers::{FlowMatchEulerConfig, FlowMatchEulerScheduler, Scheduler};
-use aurora_rust_engine::diffusion::vae_flux::FluxVaeDecoder;
 use aurora_rust_engine::text::Qwen3TextEncoder;
 use aurora_rust_engine::weights::SafeTensorsArchive;
 use std::sync::Arc;
@@ -35,7 +34,7 @@ fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .or_else(|| std::env::var("MODEL_PATH").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(r"G:\models\zit\z-image-turbo-fp8-aio.safetensors"));
-    let vae_path = std::env::args().nth(2)
+    let _vae_path = std::env::args().nth(2)
         .map(PathBuf::from)
         .or_else(|| std::env::var("VAE_PATH").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(r"/models/comfyui/vae/qwen_image_vae.safetensors"));

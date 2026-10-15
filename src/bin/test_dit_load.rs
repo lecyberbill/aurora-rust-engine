@@ -1,5 +1,5 @@
 use std::path::Path;
-use candle_core::{DType, Device};
+use candle_core::DType;
 use aurora_rust_engine::device::auto_device;
 use aurora_rust_engine::pipelines::ZImageTurboPipeline;
 

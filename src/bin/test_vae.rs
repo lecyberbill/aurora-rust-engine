@@ -1,6 +1,6 @@
 // [WFGY] Zone: SAFE | λ: 0.10 | Fallbacks: 0 | Action: Diagnose VAE keys and structure
 
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Device};
 use aurora_rust_engine::weights::{SafeTensorsArchive, WeightRouter};
 use aurora_rust_engine::diffusion::vae_flux::FluxVaeDecoder;
 use aurora_rust_engine::diffusion::vae::VaeDecoder;

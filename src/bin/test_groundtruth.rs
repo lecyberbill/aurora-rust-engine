@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Device};
 use candle_nn::VarBuilder;
 use std::path::PathBuf;
 use std::time::Instant;

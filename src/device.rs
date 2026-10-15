@@ -204,7 +204,7 @@ pub fn tiled_scaled_dot_product_attention(
     scale: f64,
     chunk_q: usize,
 ) -> candle_core::Result<candle_core::Tensor> {
-    let (b, h, l_q, d) = q.dims4()?;
+    let (_b, _h, l_q, _d) = q.dims4()?;
     let (_bk, _hk, l_k, _dk) = k.dims4()?;
     let orig_dtype = q.dtype();
 

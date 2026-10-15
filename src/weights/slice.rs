@@ -27,6 +27,7 @@ fn cast_slice<T: Copy>(bytes: &[u8]) -> std::borrow::Cow<'_, [T]> {
 }
 
 #[inline]
+#[allow(dead_code)]
 fn cast_to_bytes<T>(slice: &[T]) -> &[u8] {
     let elem_size = std::mem::size_of::<T>();
     let byte_count = slice.len() * elem_size;

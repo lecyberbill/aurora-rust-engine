@@ -357,8 +357,6 @@ impl MiniMaxH3VideoVaeDecoder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_minimax_video_vae_patch_dimensions() {
         let lat_t = 5;

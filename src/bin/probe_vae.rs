@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::time::Instant;
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Tensor};
 use aurora_rust_engine::device::auto_device;
 use aurora_rust_engine::diffusion::vae_qwen::QwenImageVaeDecoder;
 use aurora_rust_engine::weights::SafeTensorsArchive;

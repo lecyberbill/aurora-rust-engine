@@ -1,6 +1,6 @@
 use aurora_rust_engine::weights::SafeTensorsArchive;
 use aurora_rust_engine::text::Qwen3TextEncoder;
-use candle_core::{DType, Device, Module, Tensor};
+use candle_core::{DType, Device, Tensor};
 use std::path::PathBuf;
 
 fn print_stats(name: &str, t: &Tensor) -> candle_core::Result<()> {

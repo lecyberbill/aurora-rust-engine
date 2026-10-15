@@ -1,7 +1,7 @@
 // [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Pure Rust MiniMax H3 (33.1B) Omni-Modal Audio-Video DiT Backbone
 // Invariant: Single-stream packed sequence [text | audio | video], partial 96-dim 3D RoPE, SwiGLU FFN (14336), dual flow-matching schedules.
 
-use candle_core::{DType, Device, Module, Result, Tensor};
+use candle_core::{DType, Module, Result, Tensor};
 use candle_nn::{linear, linear_no_bias, Linear, VarBuilder};
 
 /// MiniMax H3 Architecture Configuration
@@ -817,6 +817,7 @@ impl MiniMaxH3Transformer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::Device;
 
     #[test]
     fn test_time_shift_sigma_bounds() {

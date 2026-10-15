@@ -44,7 +44,7 @@ pub struct UniversalWeightsLoader {
     kind: ContainerKind,
     mmaps: Vec<Arc<Mmap>>,
     tensors: HashMap<String, TensorMeta>,
-    file_paths: Vec<PathBuf>,
+    _file_paths: Vec<PathBuf>,
     st_archive: Option<crate::weights::SafeTensorsArchive>,
     gguf_weights: Option<crate::gguf::GgufWeights>,
 }
@@ -133,7 +133,7 @@ impl UniversalWeightsLoader {
             kind,
             mmaps,
             tensors,
-            file_paths: paths.to_vec(),
+            _file_paths: paths.to_vec(),
             st_archive,
             gguf_weights: None,
         })
@@ -191,7 +191,7 @@ impl UniversalWeightsLoader {
             kind: ContainerKind::Gguf,
             mmaps: vec![mmap_arc],
             tensors,
-            file_paths: vec![path.to_path_buf()],
+            _file_paths: vec![path.to_path_buf()],
             st_archive: None,
             gguf_weights,
         })
@@ -210,7 +210,7 @@ impl UniversalWeightsLoader {
             kind: ContainerKind::Onnx,
             mmaps: vec![mmap_arc],
             tensors,
-            file_paths: vec![path.to_path_buf()],
+            _file_paths: vec![path.to_path_buf()],
             st_archive: None,
             gguf_weights: None,
         })

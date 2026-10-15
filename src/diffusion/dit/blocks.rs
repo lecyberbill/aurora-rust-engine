@@ -390,6 +390,7 @@ impl DoubleStreamBlock {
         Ok((img, txt))
     }
 
+    #[allow(dead_code)]
     fn standard_sdpa(&self, q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
         let (b, seq, h, d) = q.dims4()?;
         let orig_dtype = q.dtype();
@@ -556,6 +557,7 @@ impl SingleStreamBlock {
         res.clamp(-50000.0f32, 50000.0f32)?.to_dtype(orig_dtype)
     }
 
+    #[allow(dead_code)]
     fn standard_sdpa(&self, q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
         let (b, seq, h, d) = q.dims4()?;
         let orig_dtype = q.dtype();

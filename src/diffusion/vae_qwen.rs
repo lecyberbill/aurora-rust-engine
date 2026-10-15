@@ -1,9 +1,9 @@
 // [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: Pure Rust AutoencoderKLQwenImage 3D Causal VAE Decoder
 // Exact mathematical 2D slice execution of Wan/QwenImage Causal VAE
 
-use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::{conv2d, Conv2d, Conv2dConfig, VarBuilder};
-use image::{ImageBuffer, RgbImage};
+use candle_core::{DType, Module, Result, Tensor};
+use candle_nn::{Conv2d, Conv2dConfig, VarBuilder};
+use image::RgbImage;
 
 pub const QWEN_LATENTS_MEAN: [f32; 16] = [
     -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
@@ -19,7 +19,6 @@ pub const QWEN_LATENTS_STD: [f32; 16] = [
 #[derive(Debug, Clone)]
 pub struct VaeRMSNorm {
     gamma: Tensor,
-    scale: f64,
 }
 
 impl VaeRMSNorm {
@@ -29,7 +28,6 @@ impl VaeRMSNorm {
         let gamma_2d = gamma.reshape((1, dim, 1, 1))?;
         Ok(Self {
             gamma: gamma_2d,
-            scale: (dim as f64).sqrt(),
         })
     }
 
@@ -221,14 +219,10 @@ pub struct QwenImageVaeDecoder {
     up_blocks_3: Vec<QwenVaeResidual>, // 96
     norm_out: VaeRMSNorm,
     conv_out: Conv2d,
-    device: Device,
-    dtype: DType,
 }
 
 impl QwenImageVaeDecoder {
     pub fn new(vb: VarBuilder) -> Result<Self> {
-        let device = vb.device().clone();
-        let dtype = vb.dtype();
 
         let conv_in = causal_3d_to_2d_conv(vb.pp("decoder.conv_in"), 384, 16, 3, 1)
             .or_else(|_| causal_3d_to_2d_conv(vb.pp("decoder.conv1"), 384, 16, 3, 1))?;
@@ -306,8 +300,6 @@ impl QwenImageVaeDecoder {
             up_blocks_3,
             norm_out,
             conv_out,
-            device,
-            dtype,
         })
     }
 
@@ -319,7 +311,7 @@ impl QwenImageVaeDecoder {
             latents.clone()
         };
 
-        let (b, c, h, w) = latents.dims4()?;
+        let (_b, c, _h, _w) = latents.dims4()?;
         if c != 16 {
             return Err(candle_core::Error::Msg(format!("QwenImageVaeDecoder expects 16 channels, got {}", c)));
         }

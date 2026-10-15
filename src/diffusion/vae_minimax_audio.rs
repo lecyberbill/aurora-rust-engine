@@ -1,7 +1,7 @@
 // [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: Pure Rust MiniMax H3 Audio VAE Decoder (BigVGAN 32kHz Stereo Vocoder)
 // Invariant: Bounded VRAM, exact stereo channel independence, clamp in [-1.0, 1.0], bit-exact SnakeBeta activations.
 
-use candle_core::{Device, Module, Result, Tensor};
+use candle_core::{Module, Result, Tensor};
 use candle_nn::{Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, VarBuilder};
 
 /// 1D Snake activation with learnable alpha and beta in log scale:
@@ -301,6 +301,7 @@ impl MiniMaxH3AudioVaeDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::Device;
 
     #[test]
     fn test_snake_beta_activation() -> Result<()> {
