@@ -47,7 +47,7 @@ jobs:
 
   build-cuda:
     name: Build CUDA 12.x (Ubuntu)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -68,9 +68,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ubuntu-cuda12-${{ hashFiles('**/Cargo.lock') }}
+          key: ubuntu22-cuda12-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ubuntu-cuda12-
+            ubuntu22-cuda12-
 
       - name: Check CUDA Feature Build
         run: cargo check --features cuda --all-targets
@@ -94,7 +94,9 @@ jobs:
             build-essential \
             pkg-config \
             libssl-dev \
-            ca-certificates
+            ca-certificates \
+            clang \
+            libclang-dev
           rm -rf /var/lib/apt/lists/*
 
       - name: Install Rust toolchain
