@@ -1819,15 +1819,13 @@ mod tests {
             moe_shared_experts: 0,
         };
 
-        let dummy_pipeline = CausalLMPipeline {
+        let dummy_pipeline = CausalLMPipeline::new(
+            Arc::new(DummySource),
             config,
-            tokenizer: None,
-            weights: Arc::new(DummySource),
-            device: Device::Cpu,
-            dtype: DType::F32,
-            kv_cache: KVCache::new(1),
-            weights_cache: std::collections::HashMap::new(),
-        };
+            None,
+            Device::Cpu,
+            DType::F32,
+        );
 
         let prompt = dummy_pipeline.format_chat_prompt(&msgs);
         assert!(prompt.contains("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"));
@@ -1860,17 +1858,15 @@ mod tests {
             moe_shared_experts: 0,
         };
 
-        let pipeline = CausalLMPipeline {
+        let pipeline = CausalLMPipeline::new(
+            Arc::new(DummySource),
             config,
-            tokenizer: None,
-            weights: Arc::new(DummySource),
-            device: Device::Cpu,
-            dtype: DType::F32,
-            kv_cache: KVCache::new(1),
-            weights_cache: std::collections::HashMap::new(),
-        };
+            None,
+            Device::Cpu,
+            DType::F32,
+        );
 
-        let mask = pipeline.causal_mask(4).expect("causal mask failed");
+        let mask = pipeline.causal_mask(4, &Device::Cpu).expect("causal mask failed");
         let mask_flat: Vec<f32> = mask.flatten_all().unwrap().to_vec1().unwrap();
         // 4x4 matrix:
         // row 0: [0, -inf, -inf, -inf]
