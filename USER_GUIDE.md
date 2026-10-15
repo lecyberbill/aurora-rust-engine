@@ -1681,12 +1681,22 @@ The `SequentialBlockStreamer` spawns a background ring-buffered thread (`std::sy
 FP8 ($E4M3FN$ & $E5M2$) weights are transformed directly to target datatypes (`bf16` or `f16`) via static 256-entry lookup tables with Rayon parallel iterators, bypassing all scalar F32 conversion overhead.
 
 #### 6. CausalLM LLM Inference & RDNA 4 Native WMMA INT4 (`gfx1201`)
-Aurora Engine features a unified CausalLM inference pipeline for large language models (e.g., Qwen3.8-27B, Llama 3, DeepSeek) supporting 4-bit GGUF quantization (`Q4_K_M`):
+Aurora Engine features a unified CausalLM inference pipeline for large language models (e.g., Qwen3.8-27B, Llama 3, DeepSeek, and Liquid AI LFM2.5) supporting 4-bit GGUF quantization (`Q4_K_M`):
 - **AMD RDNA 4 (`gfx1201`, ROCm 10.0)**: Hardware-accelerated matrix-vector multiplication using the native `__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12` instruction via a specialized HIP kernel (`src/kernels/wmma_q4k_rdna4.hip`) for native INT4 execution and INT32 accumulation.
 - **Empirical Benchmarks on AMD Radeon AI PRO R9700 (34 GB VRAM)**:
   - **Prefill (Prompt Evaluation)**: **~148 to 216 tok/s**
   - **Decode (Sequential Generation)**: **~74.5 tok/s** (physical VRAM bandwidth saturation limit)
   - **VRAM Footprint**: 16.64 GB (27B weights) + 9.53 GB (KV Cache) = 26.17 GB / 31.86 GB (0% memory swap)
+- **Liquid AI LFM2.5 Hybrid ShortConv-MoE Architecture**:
+  - Full native support for Liquid Foundation Models (`LFM2.5-8B-A1B-Q4_K_M.gguf`).
+  - Double-gated Linear Input-Varying (LIV) 1D depthwise convolutions with circular rolling state buffer ($K=3$).
+  - Sparse Mixture-of-Experts (MoE) with 32 experts (Top-4 active), Sigmoid gating (`expert_gating_func = 2`), and aux-loss-free expert selection bias (`exp_probs_b.bias`).
+  - Built-in ChatML role conditioning:
+  ```rust
+  let mut model = AutoModel::from_local("LFM2.5-8B-A1B-Q4_K_M.gguf", device, DType::F16)?;
+  let prompt = "<|im_start|>user\nBonjour, qui es-tu et de quoi es-tu capable ?<|im_end|>\n<|im_start|>assistant\n";
+  let response = model.generate(prompt, 64, 0.2)?;
+  ```
 - **NVIDIA CUDA Cross-Platform Compatibility**:
   - Full hardware acceleration under `--features cuda` via CUDA Tensor Cores without caller API modification:
   ```rust

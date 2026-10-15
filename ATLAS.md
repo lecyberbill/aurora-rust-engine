@@ -67,3 +67,4 @@
    - Gemma 2/4 : `unit_offset_norm` ($x \cdot (1 + w)$) et logit softcapping.
    - Qwen / Llama : RoPE standard / QK-Norm / Sliding Window.
    - DeepSeek V3/R1 / Mixtral : Routage dynamique MoE Top-K avec normalisation des poids et experts partagés.
+   - Liquid AI LFM2 / LFM2.5 : Architecture hybride Liv ShortConv 1D causale circulaire ($K=3$, gating double $B \odot x$ et $C \odot y$), routage MoE 32 experts (Top-4) avec activation Sigmoid (`expert_gating_func = 2`), biais de sélection d'experts `exp_probs_b` et ancrage GQA périodique.

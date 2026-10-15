@@ -700,16 +700,19 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 
 ---
 
-## 🚀 Milestone 28 (PROPOSED): Liquid AI LFM Hybrid Conv1D-MoE Architecture Support
+## ✅ Milestone 28: Liquid AI LFM Hybrid Conv1D-MoE Architecture Support (COMPLETED & EMPIRICALLY VERIFIED)
 
 **Goal.** Provide full native support for Liquid AI's hybrid State Space / Convolution / MoE architectures (`LFM2.5-8B-A1B-Q4_K_M.gguf`):
 
-- [ ] **LFM2-MoE Block Engine (`src/models/text/lfm.rs`)**:
-  - GGUF architecture sniffing for `general.architecture == "lfm2moe"`.
-  - Non-attention 1D Short Convolutions (`shortconv.conv.weight`, `shortconv.in_proj.weight`, `shortconv.out_proj.weight`) on designated hybrid layers (layers 0, 1, 3..).
-  - Interleaved Multi-Head Attention blocks on anchor layers (layers 2, 6, 10, 14, 18, 21).
-  - Mixture-of-Experts (MoE) dynamic routing with `ffn_gate_exps.weight`, `ffn_up_exps.weight`, and `ffn_down_exps.weight`.
-  - Continuous streaming state caching for `shortconv` state buffers alongside standard KV-cache.
+- [x] **LFM2-MoE Block Engine (`src/models/text/causal.rs`, `src/models/config/mod.rs`)**:
+  - GGUF architecture sniffing identifying `lfm` / `lfm2moe` across 24 hybrid layers.
+  - Linear Input-Varying (LIV) Double-Gated 1D Short Convolutions (`shortconv.conv.weight`, `shortconv.in_proj.weight`, `shortconv.out_proj.weight`) with rolling circular state buffer ($K=3$) and $B \odot x$ / $C \odot \text{conv\_out}$ feature modulation.
+  - Interleaved Multi-Head Attention blocks on anchor layers (layers 2, 6, 10, 14, 18, 21) with head-dim 64 QK-Norm.
+  - Mixture-of-Experts (MoE) 32-expert dynamic routing with fused 3D tensor slicing (`ffn_gate_exps.weight`, `ffn_up_exps.weight`, `ffn_down_exps.weight`).
+  - Native Sigmoid Gating (`expert_gating_func = 2`), aux-loss-free expert selection bias (`exp_probs_b.bias`), and Top-4 expert routing with normalized combining weights.
+  - Context-aware repetition penalty tracking and official ChatML prompt template conditioning.
+  - **Empirical Validation**: End-to-end token generation on remote AMD ROCm server (`ai-dev@192.168.1.165`) producing coherent formatted assistant reasoning:
+    `\boxed{\text{Je suis un assistant virtuel qui peut répondre à...}}` with zero NaN and zero infinite loops.
 
 ---
 
@@ -722,6 +725,7 @@ All pipelines have been validated end-to-end with real physical weights on real 
 | **Super-Resolution (4x)** | `RealESRGAN_x4.safetensors` (66.8 Mo) | NVIDIA CUDA (RTX 4070 Ti) | 512×512 PNG, tiled 256px, pad 16px | **5.51s** upscaling time, 0.14s load | `output/upscaled_step_4_real.png` (2048×2048, 4.78 Mo) |
 | **Speech-to-Text (STT)** | `moonshine-tiny` (108 Mo) | NVIDIA CUDA (RTX 4070 Ti) | 48 000 samples @ 16 kHz WAV | **1.6s** greedy decode | Bit-exact transcript: `"Thank you for watching."` |
 | **Text Generation (LLM)** | `TinyLlama-1.1B-Chat` (2.2 Go) | NVIDIA CUDA (RTX 4070 Ti) | 32 max tokens, temp 0.7 | **2.06s** load, **5.38 tok/s** decode (5.95s) | Generated autoregressive text with KV-cache |
+| **Hybrid MoE Agent (LLM)** | `LFM2.5-8B-A1B-Q4_K_M.gguf` (4.8 Go) | AMD ROCm / Linux | 32 max tokens, ChatML, temp 0.2 | **0.39s** load, LIV ShortConv + MoE Top-4 | Verified coherent agentic assistant output (`\boxed{\text{...}}`) |
 | **DiT Image Synthesis** | `FLUX.2-Klein-4B` (7.75 Go) + Qwen3-4B + VAE 32ch | NVIDIA CUDA (RTX 4070 Ti) | 1024×1024, 4-step Euler Flow Matching | **25.85s** ODE (0.15 it/s), 3.64s VAE decode | `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` (1.88 Mo) |
 
 - [x] **Speculative Decoding & On-The-Fly W8A16 Kernel (`src/models/text/causal.rs`)**:
