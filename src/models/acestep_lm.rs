@@ -131,6 +131,7 @@ impl AceStepLm {
             top_k: 40,
             repetition_penalty: 1.05,
             stop_tokens: vec![Self::EOS_TOKEN_ID, Self::PAD_TOKEN_ID],
+            n_gpu_layers: None,
         };
         self.generate(&prompt, &params)
     }

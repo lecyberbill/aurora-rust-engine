@@ -671,6 +671,7 @@ impl CausalLMPipeline {
             top_k: params.top_k,
             repetition_penalty: params.repetition_penalty,
             stop_tokens: params.stop_tokens.clone(),
+            n_gpu_layers: None,
         };
 
         while generated_tokens.len() < params.max_tokens {
