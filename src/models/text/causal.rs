@@ -523,9 +523,12 @@ impl CausalLMPipeline {
         let input_tensor = Tensor::new(&prompt_tokens[..], &self.device)?.unsqueeze(0)?;
         let logits = self.forward(&input_tensor, 0)?;
         let last_logits = logits.i((0, prompt_tokens.len() - 1))?;
+        // Track all context tokens for repetition penalty
+        let mut all_context_tokens = prompt_tokens.clone();
 
-        let mut next_token = logits_processor.sample(&last_logits, &generated_tokens)?;
+        let mut next_token = logits_processor.sample(&last_logits, &all_context_tokens)?;
         generated_tokens.push(next_token);
+        all_context_tokens.push(next_token);
 
         // Stream initial token if callback provided
         if let Some(ref mut cb) = on_token {
@@ -550,8 +553,9 @@ impl CausalLMPipeline {
             let step_logits = self.forward(&next_input, pos)?;
             let step_last_logits = step_logits.i((0, 0))?;
 
-            next_token = logits_processor.sample(&step_last_logits, &generated_tokens)?;
+            next_token = logits_processor.sample(&step_last_logits, &all_context_tokens)?;
             generated_tokens.push(next_token);
+            all_context_tokens.push(next_token);
 
             if let Some(ref mut cb) = on_token {
                 if let Some(tok_ref) = self.tokenizer.as_ref() {
@@ -1266,7 +1270,15 @@ impl CausalLMPipeline {
         let mlp_out = if is_moe_layer {
             let router_w = self.get_layer_weight(layer_idx, &["mlp.gate.weight", "ffn_gate_inp.weight"])?;
             let router_logits = Self::matmul_linear(&normed_post_x, &router_w)?;
-            let router_probs = crate::device::softmax_last_dim(&router_logits).map_err(LuminaError::Candle)?;
+
+            // Gating function: LFM2.5 explicitly specifies expert_gating_func = 2 (SIGMOID)
+            let is_lfm = self.weights.contains(&"blk.0.shortconv.in_proj.weight".to_string())
+                || self.weights_cache.contains_key("blk.0.shortconv.in_proj.weight");
+            let router_probs = if is_lfm {
+                candle_nn::ops::sigmoid(&router_logits).map_err(LuminaError::Candle)?
+            } else {
+                crate::device::softmax_last_dim(&router_logits).map_err(LuminaError::Candle)?
+            };
 
             let num_experts = router_w.shape().dims2().map_err(LuminaError::Candle)?.0;
             let top_k = self.config.moe_top_k.min(num_experts).max(1);
