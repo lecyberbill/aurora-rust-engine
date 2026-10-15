@@ -627,6 +627,10 @@ impl CausalLMPipeline {
         let last_logits = logits.i((0, prompt_tokens.len() - 1))?;
 
         let logits_vec = last_logits.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let nan_count = logits_vec.iter().filter(|v| v.is_nan()).count();
+        let min_val = logits_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_val = logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        println!("🔍 Logits debug: min = {min_val:.4}, max = {max_val:.4}, nan_count = {nan_count}/{}", logits_vec.len());
         let mut top_indices: Vec<(usize, f32)> = logits_vec.iter().enumerate().map(|(i, &v)| (i, v)).collect();
         top_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         println!("🔍 Top-5 logits at step 0:");
