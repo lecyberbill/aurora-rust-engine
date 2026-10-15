@@ -10,10 +10,7 @@ fn main() -> anyhow::Result<()> {
     let mut model_lock = boxed_model.lock().unwrap();
     let text_model = downcast_model::<TextModel>(&mut *model_lock).unwrap();
 
-    let pipe = match text_model {
-        TextModel::CausalLM { pipeline, .. } => pipeline,
-        _ => panic!("expected CausalLM"),
-    };
+    let pipe = text_model.as_causal_lm_mut().expect("expected CausalLM");
 
     let prompt = "<start_of_turn>user\nHello world<end_of_turn>\n<start_of_turn>model\n";
     let tok = pipe.tokenizer.as_ref().unwrap();

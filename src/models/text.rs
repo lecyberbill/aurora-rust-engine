@@ -55,6 +55,13 @@ impl TextModel {
     pub fn causal_lm(id: String, family: String, pipeline: CausalLMPipeline) -> Self {
         Self { id, family, inner: TextBackend::CausalLM(pipeline) }
     }
+
+    pub fn as_causal_lm_mut(&mut self) -> Option<&mut CausalLMPipeline> {
+        match &mut self.inner {
+            TextBackend::CausalLM(ref mut p) => Some(p),
+            _ => None,
+        }
+    }
 }
 
 impl AnyModel for TextModel {
