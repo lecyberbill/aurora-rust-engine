@@ -1027,7 +1027,7 @@ impl CausalLMPipeline {
     }
 
     /// Forward pass through the Transformer
-    fn forward(&mut self, input_ids: &Tensor, pos: usize) -> Result<Tensor> {
+    pub fn forward(&mut self, input_ids: &Tensor, pos: usize) -> Result<Tensor> {
         let (_b_size, seq_len) = input_ids.shape().dims2().map_err(LuminaError::Candle)?;
 
         // 1. Embedding lookup
