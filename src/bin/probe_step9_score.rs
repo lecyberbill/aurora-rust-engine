@@ -16,7 +16,7 @@ fn main() -> anyhow::Result<()> {
     let prompt_tokens = tok.encode(prompt, true).unwrap().get_ids().to_vec();
 
     // Replay steps 0..8
-    let generated = [102093, 20124, 236764, 528, 886, 13315, 236764, 563, 496];
+    let generated: [u32; 9] = [102093, 20124, 236764, 528, 886, 13315, 236764, 563, 496];
     pipe.kv_cache.reset();
     let input0 = Tensor::new(&prompt_tokens[..], &device)?.unsqueeze(0)?;
     let _ = pipe.forward(&input0, 0)?;
