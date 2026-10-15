@@ -1032,6 +1032,13 @@ impl CausalLMPipeline {
             hidden = (hidden * normalizer).map_err(LuminaError::Candle)?;
         }
 
+        if pos == 0 {
+            let h_flat = hidden.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+            let min_h = h_flat.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max_h = h_flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            println!("🔍 [Step 0] Hidden after embed: min={min_h:.4}, max={max_h:.4}");
+        }
+
         // 2. Transformer layers loop with KV-Cache and Dynamic Layer Offloading
         for layer_idx in 0..self.config.num_hidden_layers {
             let layer_dev = self.device_for_layer(layer_idx);
@@ -1039,6 +1046,12 @@ impl CausalLMPipeline {
                 hidden = hidden.to_device(&layer_dev).map_err(LuminaError::Candle)?;
             }
             hidden = self.forward_layer(layer_idx, &hidden, pos, seq_len)?;
+            if pos == 0 && (layer_idx == 0 || layer_idx == 1 || layer_idx == self.config.num_hidden_layers - 1) {
+                let h_flat = hidden.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+                let min_h = h_flat.iter().cloned().fold(f32::INFINITY, f32::min);
+                let max_h = h_flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                println!("🔍 [Step 0] Hidden after layer {layer_idx}: min={min_h:.4}, max={max_h:.4}");
+            }
         }
 
         // Transfer hidden back to primary pipeline device for final norm and LM head if offloaded
@@ -1049,6 +1062,13 @@ impl CausalLMPipeline {
         // 3. Final layer norm
         let norm_w = self.get_weight_or_fallback(&["model.norm.weight", "output_norm.weight", "norm.weight", "token_embd_norm.weight"])?;
         let hidden = self.apply_norm(&hidden, &norm_w)?;
+
+        if pos == 0 {
+            let h_flat = hidden.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+            let min_h = h_flat.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max_h = h_flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            println!("🔍 [Step 0] Hidden after final norm: min={min_h:.4}, max={max_h:.4}");
+        }
 
         // 4. LM Head projection
         let lm_head_l = self.get_linear_or_fallback(&["lm_head.weight", "output.weight", "model.embed_tokens.weight", "embed_tokens.weight", "token_embd.weight"])?;
