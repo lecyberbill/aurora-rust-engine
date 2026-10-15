@@ -13,5 +13,11 @@ fn main() -> anyhow::Result<()> {
     for (k, v) in &content.metadata {
         println!("  {k} => {:?}", v);
     }
+    println!("=== GGUF Tensor Names ===");
+    for (k, info) in &content.tensor_infos {
+        if k.starts_with("blk.0.") || !k.contains("blk.") {
+            println!("  {k} => shape: {:?}, dtype: {:?}", info.shape.dims(), info.ggml_dtype);
+        }
+    }
     Ok(())
 }
