@@ -469,7 +469,7 @@ fn resolve_tokenizer(weights: &Path, arch: &Architecture) -> Option<tokenizers::
         ],
         Architecture::Gemma => vec!["google/gemma-2-2b-it", "google/gemma-2-9b"],
         Architecture::Mistral3 => vec!["mistralai/Mistral-7B-Instruct-v0.3"],
-        Architecture::Lfm => vec!["LiquidAI/LFM-2.5-8B-Instruct", "liquid-ai/LFM-2.5-8B"],
+        Architecture::Lfm => vec!["LiquidAI/LFM2.5-8B-A1B", "LiquidAI/LFM2-8B-A1B", "LiquidAI/LFM2.5-24B-A2B"],
         _ => return None,
     };
 
