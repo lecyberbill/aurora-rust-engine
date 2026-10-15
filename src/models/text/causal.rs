@@ -1310,14 +1310,21 @@ impl CausalLMPipeline {
                 }
             }
 
-            // Apply RoPE
-            let (q, k) = self.apply_rope(&q, &k, pos, seq_len)?;
-
             // Layer-specific sliding window (e.g. Gemma 3 sliding_window_pattern alternates 5:1 local/global)
             let sw = match (self.config.sliding_window, self.config.sliding_window_pattern) {
                 (Some(w), Some(p)) if p > 0 => if (layer_idx + 1) % p == 0 { None } else { Some(w) },
                 (s, _) => s,
             };
+
+            // RoPE theta: in Gemma 3, sliding window layers use local base (10,000.0), global layers use 1,000,000.0
+            let theta = if self.config.is_gemma && sw.is_some() {
+                10_000.0f32
+            } else {
+                self.config.rope_theta
+            };
+
+            // Apply RoPE
+            let (q, k) = self.apply_rope(&q, &k, pos, seq_len, theta)?;
 
             // Append to KV Cache with sliding window bounding
             let (k, v) = self.kv_cache.layers[layer_idx]
@@ -1717,14 +1724,13 @@ impl CausalLMPipeline {
         rocm_contiguous(&x)
     }
 
-    fn apply_rope(&self, q: &Tensor, k: &Tensor, pos: usize, seq_len: usize) -> Result<(Tensor, Tensor)> {
+    fn apply_rope(&self, q: &Tensor, k: &Tensor, pos: usize, seq_len: usize, theta: f32) -> Result<(Tensor, Tensor)> {
         let dev = q.device();
         let head_dim = self.config.head_dim;
         let positions: Vec<f32> = (pos..pos + seq_len).map(|p| p as f32).collect();
         let pos_tensor = Tensor::new(&positions[..], dev)?.unsqueeze(1)?; // [S, 1]
 
         let half_dim = head_dim / 2;
-        let theta = self.config.rope_theta;
         let freqs: Vec<f32> = (0..half_dim).map(|i| 1.0f32 / theta.powf((2 * i) as f32 / head_dim as f32)).collect();
         let freq_tensor = Tensor::new(&freqs[..], dev)?.unsqueeze(0)?; // [1, half_dim]
 
