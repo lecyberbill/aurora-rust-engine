@@ -1,4 +1,7 @@
 
+#[cfg(feature = "rocm")]
+use candle_core::Device;
+
 fn main() -> anyhow::Result<()> {
     println!("🔍 Probing ROCm / HIP compute devices on aurora-dev...");
     
