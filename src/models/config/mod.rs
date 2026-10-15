@@ -25,6 +25,7 @@ pub enum Architecture {
     DeepSeek,
     Gemma,
     Mistral3,
+    Lfm,
     T5,
     ClipL,
     OpenClip,
@@ -37,7 +38,7 @@ impl Architecture {
     pub fn model_kind(&self) -> ModelKind {
         match self {
             Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma => ModelKind::Text,
-            Architecture::Qwen3 | Architecture::Mistral3 => ModelKind::Text,
+            Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Lfm => ModelKind::Text,
             Architecture::T5 | Architecture::ClipL | Architecture::OpenClip => ModelKind::TextEncoder,
             Architecture::ZImageTurbo
             | Architecture::Flux2Dev
@@ -68,6 +69,7 @@ impl Architecture {
             Architecture::DeepSeek => "deepseek".into(),
             Architecture::Gemma => "gemma".into(),
             Architecture::Mistral3 => "mistral3".into(),
+            Architecture::Lfm => "lfm".into(),
             Architecture::T5 => "t5".into(),
             Architecture::ClipL => "clip-l".into(),
             Architecture::OpenClip => "open-clip".into(),
@@ -124,6 +126,9 @@ pub fn detect_architecture(src: &dyn WeightsSource) -> Architecture {
 
     // --- CausalLM / Text Models -----------------------------------------------
     if has("model.embed_tokens.weight") || has("embed_tokens.weight") || has("token_embd.weight") {
+        if has("shortconv") || has("lfm2") || has("lfm") || has("conv.conv.weight") {
+            return Architecture::Lfm;
+        }
         if has("gemma") || has("pre_feedforward_layernorm") {
             return Architecture::Gemma;
         }
@@ -187,6 +192,7 @@ pub fn detect_from_model_type(model_type: Option<&str>) -> Result<Architecture> 
         "qwen3" | "qwen2" | "qwen" => Architecture::Qwen3,
         "llama" | "llama3" | "llama2" => Architecture::Llama,
         "deepseek" | "deepseek_v2" | "deepseek_v3" => Architecture::DeepSeek,
+        "lfm" | "lfm2" | "lfm2moe" | "liquid" => Architecture::Lfm,
         "gemma" | "gemma2" | "gemma3" | "gemma4" => Architecture::Gemma,
         "mistral" | "mistral3" => Architecture::Mistral3,
         "t5" | "t5xxl" => Architecture::T5,

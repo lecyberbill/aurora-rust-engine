@@ -307,7 +307,7 @@ impl AutoModel {
             }
             // ---- Text / CausalLM models -----------------------------------------
             Architecture::Qwen3 | Architecture::Mistral3 | Architecture::T5
-            | Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma
+            | Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma | Architecture::Lfm
             | Architecture::ClipL | Architecture::OpenClip => {
                 let text = super::auto::build_text(&arch, &weights, &device, dtype)?;
                 Arc::new(Mutex::new(text))
@@ -381,7 +381,7 @@ fn build_text(
     let archive = crate::weights::open_auto(weights)?;
 
     match arch {
-        Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma | Architecture::Qwen3 | Architecture::Mistral3 => {
+        Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma | Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Lfm => {
             // Check if high-speed GPU engine is running on local host / server
             let endpoint = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
             let is_native_engine_available = ureq::get(&format!("{}/api/version", endpoint.trim_end_matches('/')))
@@ -469,6 +469,7 @@ fn resolve_tokenizer(weights: &Path, arch: &Architecture) -> Option<tokenizers::
         ],
         Architecture::Gemma => vec!["google/gemma-2-2b-it", "google/gemma-2-9b"],
         Architecture::Mistral3 => vec!["mistralai/Mistral-7B-Instruct-v0.3"],
+        Architecture::Lfm => vec!["LiquidAI/LFM-2.5-8B-Instruct", "liquid-ai/LFM-2.5-8B"],
         _ => return None,
     };
 

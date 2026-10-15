@@ -959,13 +959,89 @@ impl CausalLMPipeline {
         let in_norm_w = self.get_layer_weight(layer_idx, &["input_layernorm.weight", "attn_norm.weight"])?;
         let normed_x = self.apply_norm(x, &in_norm_w)?;
 
+        // Check if this layer is an LFM ShortConv layer (Liquid AI LFM2 / LFM2.5)
+        let is_shortconv_layer = self.weights.contains(&format!("blk.{layer_idx}.shortconv.conv.weight"))
+            || self.weights.contains(&format!("model.layers.{layer_idx}.conv.conv.weight"))
+            || self.weights.contains(&format!("layers.{layer_idx}.conv.conv.weight"))
+            || self.weights_cache.contains_key(&format!("blk.{layer_idx}.shortconv.conv.weight"));
+
         // Check if this layer is an SSM / Linear Attention layer (e.g. Qwen 3.5 / 3.8 hybrid architecture)
         let is_ssm_layer = self.weights.contains(&format!("blk.{layer_idx}.ssm_a"))
             || self.weights.contains(&format!("model.layers.{layer_idx}.ssm_a"))
             || self.weights.contains(&format!("layers.{layer_idx}.ssm_a"))
             || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ssm_a"));
 
-        let (attn_out, x) = if is_ssm_layer {
+        let (attn_out, x) = if is_shortconv_layer {
+            // LFM ShortConv double-gated 1D convolution block:
+            // 1. in_proj: [hidden_dim, 3 * hidden_dim] -> BCx is [B, S, 3 * hidden_dim]
+            let in_proj_w = self.get_layer_weight(layer_idx, &["shortconv.in_proj.weight", "conv.in_proj.weight", "in_proj.weight"])?;
+            let bcx = Self::matmul_linear(&normed_x, &in_proj_w)?;
+            let hidden_dim = normed_x.dim(candle_core::D::Minus1)?;
+            let b_gate = bcx.narrow(candle_core::D::Minus1, 0, hidden_dim)?;
+            let c_gate = bcx.narrow(candle_core::D::Minus1, hidden_dim, hidden_dim)?;
+            let x_feat = bcx.narrow(candle_core::D::Minus1, 2 * hidden_dim, hidden_dim)?;
+
+            // 2. Gating: B * x
+            let bx = (&b_gate * &x_feat).map_err(LuminaError::Candle)?;
+
+            // 3. Causal Depthwise 1D Convolution with kernel size K (e.g. K=3)
+            let conv_w = self.get_layer_weight(layer_idx, &["shortconv.conv.weight", "conv.conv.weight", "conv.weight"])?;
+            // conv_w shape: [hidden_dim, K]
+            let (c_dim, k_sz) = conv_w.shape().dims2().map_err(LuminaError::Candle)?;
+            let state_len = k_sz.saturating_sub(1);
+
+            let conv_out = if seq_len == 1 {
+                // Autoregressive token step: rolling buffer of size state_len
+                let prev_state = self.kv_cache.layers[layer_idx].ssm_conv_state.clone().unwrap_or_else(|| {
+                    Tensor::zeros((1, c_dim, state_len), bx.dtype(), &self.device).unwrap()
+                });
+                let x_step = bx.transpose(1, 2)?; // [1, c_dim, 1]
+                let full_window = Tensor::cat(&[&prev_state, &x_step], 2)?; // [1, c_dim, K]
+                let next_buf = full_window.narrow(2, 1, state_len)?;
+                self.kv_cache.layers[layer_idx].ssm_conv_state = Some(next_buf);
+
+                let conv_w_b = conv_w.unsqueeze(0)?; // [1, c_dim, K]
+                (full_window * conv_w_b)?.sum_keepdim(2)?.transpose(1, 2)? // [1, 1, c_dim]
+            } else {
+                // Prefill phase: update historical state buffer
+                let last_steps = if seq_len >= state_len {
+                    bx.narrow(1, seq_len - state_len, state_len)?.transpose(1, 2)?
+                } else {
+                    let mut pad = Tensor::zeros((1, c_dim, state_len - seq_len), bx.dtype(), &self.device)?;
+                    let cur = bx.transpose(1, 2)?;
+                    Tensor::cat(&[&pad, &cur], 2)?
+                };
+                self.kv_cache.layers[layer_idx].ssm_conv_state = Some(last_steps);
+
+                // Full causal 1D convolution over sequence
+                let bx_trans = bx.transpose(1, 2)?; // [B, c_dim, S]
+                let mut padded_bx = if state_len > 0 {
+                    let pad = Tensor::zeros((bx.dim(0)?, c_dim, state_len), bx.dtype(), &self.device)?;
+                    Tensor::cat(&[&pad, &bx_trans], 2)?
+                } else {
+                    bx_trans
+                };
+
+                let mut out_cols = Vec::with_capacity(seq_len);
+                for t in 0..seq_len {
+                    let window = padded_bx.narrow(2, t, k_sz)?; // [B, c_dim, K]
+                    let conv_w_b = conv_w.unsqueeze(0)?; // [1, c_dim, K]
+                    let step = (window * conv_w_b)?.sum_keepdim(2)?; // [B, c_dim, 1]
+                    out_cols.push(step);
+                }
+                let cols_ref: Vec<&Tensor> = out_cols.iter().collect();
+                Tensor::cat(&cols_ref, 2)?.transpose(1, 2)? // [B, S, c_dim]
+            };
+
+            // 4. Output Modulation: C * conv_out
+            let modulated = (&c_gate * &conv_out).map_err(LuminaError::Candle)?;
+
+            // 5. Output projection: out_proj(y)
+            let out_proj_w = self.get_layer_weight(layer_idx, &["shortconv.out_proj.weight", "conv.out_proj.weight", "out_proj.weight"])?;
+            let out = Self::matmul_linear(&modulated, &out_proj_w)?;
+            let x_res = (x + &out).map_err(LuminaError::Candle)?;
+            (out, x_res)
+        } else if is_ssm_layer {
             // SSM / Linear Attention / Conv1D DeltaNet forward pass:
             // 1. in_proj (attn_qkv): [10240, 5120] -> projected is [B, S, 10240]
             let in_proj_w = self.get_layer_weight(layer_idx, &["attn_qkv.weight", "ssm_in.weight", "self_attn.qkv_proj.weight", "ssm_proj.weight"])?;
@@ -1210,25 +1286,20 @@ impl CausalLMPipeline {
                 let weight_sum: f32 = expert_weights.iter().map(|(_, w)| *w).sum();
                 let norm_factor = if weight_sum > 0.0 { 1.0 / weight_sum } else { 1.0 };
 
-                for (exp_idx, raw_weight) in expert_weights {
-                    let norm_w = raw_weight * norm_factor;
-                    let gate_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
-                    let up_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
-                    let down_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+                let has_fused_exps = self.weights.contains(&format!("blk.{layer_idx}.ffn_gate_exps.weight"))
+                    || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ffn_gate_exps.weight"));
 
-                    let alt_g = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
-                    let alt_u = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
-                    let alt_d = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+                if has_fused_exps {
+                    let fused_g = self.get_layer_weight(layer_idx, &["ffn_gate_exps.weight", "mlp.experts.gate_exps.weight"])?;
+                    let fused_u = self.get_layer_weight(layer_idx, &["ffn_up_exps.weight", "mlp.experts.up_exps.weight"])?;
+                    let fused_d = self.get_layer_weight(layer_idx, &["ffn_down_exps.weight", "mlp.experts.down_exps.weight"])?;
 
-                    let gguf_g = format!("blk.{layer_idx}.ffn_gate.{exp_idx}.weight");
-                    let gguf_u = format!("blk.{layer_idx}.ffn_up.{exp_idx}.weight");
-                    let gguf_d = format!("blk.{layer_idx}.ffn_down.{exp_idx}.weight");
+                    for (exp_idx, raw_weight) in expert_weights {
+                        let norm_w = raw_weight * norm_factor;
+                        let g_w = fused_g.get(exp_idx)?; // [1792, 2048]
+                        let u_w = fused_u.get(exp_idx)?; // [1792, 2048]
+                        let d_w = fused_d.get(exp_idx)?; // [2048, 1792]
 
-                    if let (Ok(g_w), Ok(u_w), Ok(d_w)) = (
-                        self.get_weight_or_fallback(&[&gate_name, &alt_g, &gguf_g]),
-                        self.get_weight_or_fallback(&[&up_name, &alt_u, &gguf_u]),
-                        self.get_weight_or_fallback(&[&down_name, &alt_d, &gguf_d]),
-                    ) {
                         let g = Self::matmul_linear(&normed_post_x, &g_w)?;
                         let u = Self::matmul_linear(&normed_post_x, &u_w)?;
                         let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
@@ -1242,27 +1313,56 @@ impl CausalLMPipeline {
                             None => Some(weighted),
                         };
                     }
+                } else {
+                    for (exp_idx, raw_weight) in expert_weights {
+                        let norm_w = raw_weight * norm_factor;
+                        let gate_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
+                        let up_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
+                        let down_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+
+                        let alt_g = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
+                        let alt_u = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
+                        let alt_d = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+
+                        let gguf_g = format!("blk.{layer_idx}.ffn_gate.{exp_idx}.weight");
+                        let gguf_u = format!("blk.{layer_idx}.ffn_up.{exp_idx}.weight");
+                        let gguf_d = format!("blk.{layer_idx}.ffn_down.{exp_idx}.weight");
+
+                        if let (Ok(g_w), Ok(u_w), Ok(d_w)) = (
+                            self.get_weight_or_fallback(&[&gate_name, &alt_g, &gguf_g]),
+                            self.get_weight_or_fallback(&[&up_name, &alt_u, &gguf_u]),
+                            self.get_weight_or_fallback(&[&down_name, &alt_d, &gguf_d]),
+                        ) {
+                            let g = Self::matmul_linear(&normed_post_x, &g_w)?;
+                            let u = Self::matmul_linear(&normed_post_x, &u_w)?;
+                            let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
+                            let exp_act = (silu_g * u).map_err(LuminaError::Candle)?;
+                            let exp_out = Self::matmul_linear(&exp_act, &d_w)?;
+
+                            let weighted = (exp_out * (norm_w as f64)).map_err(LuminaError::Candle)?;
+
+                            accum_out = match accum_out {
+                                Some(prev) => Some((prev + weighted).map_err(LuminaError::Candle)?),
+                                None => Some(weighted),
+                            };
+                        }
+                    }
                 }
             } else {
                 // Prefill / Multi-token path: dispatch across top-k experts
-                for exp_idx in 0..top_k {
-                    let gate_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
-                    let up_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
-                    let down_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+                let has_fused_exps = self.weights.contains(&format!("blk.{layer_idx}.ffn_gate_exps.weight"))
+                    || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ffn_gate_exps.weight"));
 
-                    let alt_g = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
-                    let alt_u = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
-                    let alt_d = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+                if has_fused_exps {
+                    let fused_g = self.get_layer_weight(layer_idx, &["ffn_gate_exps.weight", "mlp.experts.gate_exps.weight"])?;
+                    let fused_u = self.get_layer_weight(layer_idx, &["ffn_up_exps.weight", "mlp.experts.up_exps.weight"])?;
+                    let fused_d = self.get_layer_weight(layer_idx, &["ffn_down_exps.weight", "mlp.experts.down_exps.weight"])?;
 
-                    let gguf_g = format!("blk.{layer_idx}.ffn_gate.{exp_idx}.weight");
-                    let gguf_u = format!("blk.{layer_idx}.ffn_up.{exp_idx}.weight");
-                    let gguf_d = format!("blk.{layer_idx}.ffn_down.{exp_idx}.weight");
+                    for exp_idx in 0..top_k {
+                        let g_w = fused_g.get(exp_idx)?;
+                        let u_w = fused_u.get(exp_idx)?;
+                        let d_w = fused_d.get(exp_idx)?;
 
-                    if let (Ok(g_w), Ok(u_w), Ok(d_w)) = (
-                        self.get_weight_or_fallback(&[&gate_name, &alt_g, &gguf_g]),
-                        self.get_weight_or_fallback(&[&up_name, &alt_u, &gguf_u]),
-                        self.get_weight_or_fallback(&[&down_name, &alt_d, &gguf_d]),
-                    ) {
                         let g = Self::matmul_linear(&normed_post_x, &g_w)?;
                         let u = Self::matmul_linear(&normed_post_x, &u_w)?;
                         let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
@@ -1276,6 +1376,40 @@ impl CausalLMPipeline {
                             Some(prev) => Some((prev + weighted).map_err(LuminaError::Candle)?),
                             None => Some(weighted),
                         };
+                    }
+                } else {
+                    for exp_idx in 0..top_k {
+                        let gate_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
+                        let up_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
+                        let down_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+
+                        let alt_g = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
+                        let alt_u = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
+                        let alt_d = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+
+                        let gguf_g = format!("blk.{layer_idx}.ffn_gate.{exp_idx}.weight");
+                        let gguf_u = format!("blk.{layer_idx}.ffn_up.{exp_idx}.weight");
+                        let gguf_d = format!("blk.{layer_idx}.ffn_down.{exp_idx}.weight");
+
+                        if let (Ok(g_w), Ok(u_w), Ok(d_w)) = (
+                            self.get_weight_or_fallback(&[&gate_name, &alt_g, &gguf_g]),
+                            self.get_weight_or_fallback(&[&up_name, &alt_u, &gguf_u]),
+                            self.get_weight_or_fallback(&[&down_name, &alt_d, &gguf_d]),
+                        ) {
+                            let g = Self::matmul_linear(&normed_post_x, &g_w)?;
+                            let u = Self::matmul_linear(&normed_post_x, &u_w)?;
+                            let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
+                            let exp_act = (silu_g * u).map_err(LuminaError::Candle)?;
+                            let exp_out = Self::matmul_linear(&exp_act, &d_w)?;
+
+                            let prob_slice = router_probs.narrow(candle_core::D::Minus1, exp_idx, 1)?;
+                            let weighted = exp_out.broadcast_mul(&prob_slice).map_err(LuminaError::Candle)?;
+
+                            accum_out = match accum_out {
+                                Some(prev) => Some((prev + weighted).map_err(LuminaError::Candle)?),
+                                None => Some(weighted),
+                            };
+                        }
                     }
                 }
             }
