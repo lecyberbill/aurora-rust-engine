@@ -2,10 +2,7 @@ use candle_core::quantized::{gguf_file, QMatMul};
 use candle_core::{Device, Module, Tensor};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(feature = "rocm")]
-    let dev = Device::new_cuda(0)?;
-    #[cfg(not(feature = "rocm"))]
-    let dev = Device::Cpu;
+    let dev = aurora_rust_engine::device::auto_device()?;
 
     println!("Testing QMatMul on device: {:?}", dev);
     let path = "/models/llm/Phi-4-reasoning-plus-Q4_K_M.gguf";
