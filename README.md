@@ -339,6 +339,7 @@ cargo run --release --bin server --features cuda,flash-attn
 | **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **0.23 s** | **61.60 tok/s** | Multilingual prompt generation |
 | **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **0.18 s** | **174.07 tok/s** | Prompt enrichment & French translation |
 | **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **0.39 s** | **133.29 tok/s** | 1024-token long-form poem stress test |
+| **Phi-4 Reasoning Plus 15B** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.16 s** | Native GGUF | Autoregressive reasoning continuation |
 
 ---
 
