@@ -232,7 +232,7 @@ pub fn tiled_scaled_dot_product_attention(
             let q_c = q.contiguous()?;
             let k_c = k.contiguous()?;
             let v_c = v.contiguous()?;
-            let mut out = candle_core::Tensor::zeros((b, h, l_q, d), orig_dtype, q.device())?;
+            let out = candle_core::Tensor::zeros((b, h, l_q, d), orig_dtype, q.device())?;
 
             let success = {
                 let (q_st, _) = q_c.storage_and_layout();

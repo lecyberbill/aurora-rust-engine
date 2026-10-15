@@ -2,6 +2,9 @@
 
 
 #[cfg(feature = "rocm")]
+use std::time::Instant;
+
+#[cfg(feature = "rocm")]
 extern "C" {
     fn launch_wmma_gemv_q4k_rdna4(
         weights: *const std::ffi::c_void,
