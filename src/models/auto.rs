@@ -422,19 +422,34 @@ fn resolve_tokenizer(weights: &Path, arch: &Architecture) -> Option<tokenizers::
         }
     }
 
-    // 2. Try standard root cache tokenizers
-    let candidates = match arch {
-        Architecture::Qwen3 => vec!["qwen_tokenizer.json", "tokenizer.json"],
-        Architecture::Llama | Architecture::DeepSeek => vec!["llama_tokenizer.json", "tokenizer.json"],
-        Architecture::Gemma => vec!["gemma_tokenizer.json", "tokenizer.json"],
-        Architecture::Mistral3 => vec!["mistral_tokenizer.json", "tokenizer.json"],
-        Architecture::Lfm => vec!["lfm_tokenizer.json", "tokenizer.json"],
-        Architecture::Phi => vec!["phi_tokenizer.json", "tokenizer.json"],
-        _ => vec!["tokenizer.json"],
+    // 2. Try standard root cache and assets/tokenizers directories
+    let filename = match arch {
+        Architecture::Qwen3 => "qwen_tokenizer.json",
+        Architecture::Llama | Architecture::DeepSeek => "llama_tokenizer.json",
+        Architecture::Gemma => "gemma_tokenizer.json",
+        Architecture::Mistral3 => "mistral_tokenizer.json",
+        Architecture::Lfm => "lfm_tokenizer.json",
+        Architecture::Phi => "phi_tokenizer.json",
+        _ => "tokenizer.json",
     };
-    for c in candidates {
-        if Path::new(c).exists() {
-            if let Ok(t) = tokenizers::Tokenizer::from_file(c) {
+
+    let search_roots = [
+        PathBuf::from("."),
+        PathBuf::from("assets/tokenizers"),
+        PathBuf::from("/srv/dev/aurora-rust-engine"),
+        PathBuf::from("/srv/dev/aurora-rust-engine/assets/tokenizers"),
+    ];
+
+    for root in &search_roots {
+        let p = root.join(filename);
+        if p.exists() {
+            if let Ok(t) = tokenizers::Tokenizer::from_file(&p) {
+                return Some(t);
+            }
+        }
+        let p_generic = root.join("tokenizer.json");
+        if p_generic.exists() {
+            if let Ok(t) = tokenizers::Tokenizer::from_file(&p_generic) {
                 return Some(t);
             }
         }

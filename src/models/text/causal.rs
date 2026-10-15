@@ -1351,15 +1351,20 @@ impl CausalLMPipeline {
                 out = (out * gate).map_err(LuminaError::Candle)?;
             }
 
-            let attn_out = o_l.forward(&out)?;
+            let mut attn_out = o_l.forward(&out)?;
+
+            // Gemma 2 / 3 applies post_attention_norm to attn_out before adding residual
+            if let Ok(post_attn_w) = self.get_layer_weight(layer_idx, &["post_attention_norm.weight"]) {
+                attn_out = self.apply_norm(&attn_out, &post_attn_w)?;
+            }
 
             let x_res = (x + &attn_out).map_err(LuminaError::Candle)?;
             (attn_out, x_res)
         };
 
-        // Post-attention layernorm
-        let post_norm_w = self.get_layer_weight(layer_idx, &["post_attention_layernorm.weight", "ffn_norm.weight", "post_attention_norm.weight"])?;
-        let normed_post_x = self.apply_norm(&x, &post_norm_w)?;
+        // Pre-feedforward layernorm (ffn_norm / post_attention_layernorm)
+        let ffn_norm_w = self.get_layer_weight(layer_idx, &["pre_feedforward_layernorm.weight", "ffn_norm.weight", "post_attention_layernorm.weight"])?;
+        let normed_post_x = self.apply_norm(&x, &ffn_norm_w)?;
 
         // Check if this layer is MoE (DeepSeek / Mixtral)
         let is_moe_layer = self.weights.contains(&format!("model.layers.{layer_idx}.mlp.gate.weight"))
@@ -1636,6 +1641,11 @@ impl CausalLMPipeline {
                 return Err(LuminaError::MissingWeight(format!("FFN up/gate weight for layer {layer_idx} not found")));
             }
         };
+
+        let mut mlp_out = mlp_out;
+        if let Ok(post_ffw_w) = self.get_layer_weight(layer_idx, &["post_ffw_norm.weight"]) {
+            mlp_out = self.apply_norm(&mlp_out, &post_ffw_w)?;
+        }
 
         let x = (x + mlp_out).map_err(LuminaError::Candle)?;
         Ok(x)
