@@ -108,6 +108,7 @@ pub struct CausalLMConfig {
     pub attn_logit_softcapping: Option<f64>,
     pub final_logit_softcapping: Option<f64>,
     pub unit_offset_norm: bool,
+    pub sliding_window_pattern: Option<usize>,
     pub moe_num_experts: usize,
     pub moe_top_k: usize,
     pub moe_shared_experts: usize,
@@ -117,54 +118,90 @@ impl CausalLMConfig {
     /// Detect or extract configuration from weight keys and shapes.
     pub fn from_weights(src: &dyn WeightsSource) -> Result<Self> {
         let keys = src.keys();
-        let num_layers = count_causal_layers(&keys);
-        let num_layers = if num_layers == 0 { 28 } else { num_layers };
+        let arch = src.metadata("general.architecture").unwrap_or_default();
+        let arch_prefix = if !arch.is_empty() { format!("{arch}.") } else { String::new() };
 
-        // Sniff vocab_size and hidden_size from embed_tokens or lm_head
-        let (vocab_size, hidden_size) = if let Some((_, dims)) = src.raw_info("model.embed_tokens.weight") {
-            (dims.first().copied().unwrap_or(151936), dims.get(1).copied().unwrap_or(4096))
-        } else if let Some((_, dims)) = src.raw_info("embed_tokens.weight") {
-            (dims.first().copied().unwrap_or(151936), dims.get(1).copied().unwrap_or(4096))
-        } else if let Some((_, dims)) = src.raw_info("token_embd.weight") {
-            (dims.first().copied().unwrap_or(151936), dims.get(1).copied().unwrap_or(4096))
-        } else if let Some((_, dims)) = src.raw_info("lm_head.weight") {
-            (dims.first().copied().unwrap_or(151936), dims.get(1).copied().unwrap_or(4096))
-        } else if let Some((_, dims)) = src.raw_info("output.weight") {
-            (dims.first().copied().unwrap_or(151936), dims.get(1).copied().unwrap_or(4096))
-        } else {
-            (151936, 4096)
-        };
+        let num_layers = src.metadata_usize(&format!("{arch_prefix}block_count"))
+            .unwrap_or_else(|| {
+                let cnt = count_causal_layers(&keys);
+                if cnt == 0 { 28 } else { cnt }
+            });
 
-        // Sniff intermediate_size from mlp gate or up projection
-        let intermediate_size = if let Some((_, dims)) = src.raw_info("model.layers.0.mlp.gate_proj.weight") {
-            dims.first().copied().unwrap_or(hidden_size * 4)
-        } else if let Some((_, dims)) = src.raw_info("layers.0.mlp.gate_proj.weight") {
-            dims.first().copied().unwrap_or(hidden_size * 4)
-        } else if let Some((_, dims)) = src.raw_info("blk.0.ffn_gate.weight") {
-            dims.first().copied().unwrap_or(hidden_size * 4)
-        } else if let Some((_, dims)) = src.raw_info("blk.0.ffn_up.weight") {
-            // In Phi-3/Phi-4, ffn_up is fused [2 * intermediate_size, hidden_size]
-            let d0 = dims.first().copied().unwrap_or(hidden_size * 4);
-            d0 / 2
-        } else {
-            hidden_size * 4
-        };
+        // Hidden size & vocab size: prefer GGUF metadata, fallback to sniffing shapes
+        let hidden_size = src.metadata_usize(&format!("{arch_prefix}embedding_length"))
+            .unwrap_or_else(|| {
+                if let Some((_, dims)) = src.raw_info("model.embed_tokens.weight")
+                    .or_else(|| src.raw_info("embed_tokens.weight"))
+                    .or_else(|| src.raw_info("token_embd.weight"))
+                    .or_else(|| src.raw_info("lm_head.weight"))
+                    .or_else(|| src.raw_info("output.weight")) {
+                    if dims.len() >= 2 {
+                        // In GGUF 2D shapes are [ne0, ne1], where ne0 is in_dim (hidden_size for token_embd)
+                        // In SafeTensors 2D shapes are [vocab_size, hidden_size]
+                        let min_dim = dims[0].min(dims[1]);
+                        min_dim
+                    } else {
+                        4096
+                    }
+                } else {
+                    4096
+                }
+            });
 
-        // Sniff head_dim from attn_q_norm or standard 128
-        let head_dim = keys.iter().find_map(|k| {
-            if k.contains("attn_q_norm.weight") || k.contains("self_attn.q_norm.weight") {
-                src.raw_info(k).and_then(|(_, d)| d.first().copied())
-            } else {
-                None
-            }
-        }).unwrap_or(128);
+        let vocab_size = src.metadata_usize(&format!("{arch_prefix}vocab_size"))
+            .unwrap_or_else(|| {
+                if let Some((_, dims)) = src.raw_info("token_embd.weight")
+                    .or_else(|| src.raw_info("model.embed_tokens.weight"))
+                    .or_else(|| src.raw_info("embed_tokens.weight"))
+                    .or_else(|| src.raw_info("lm_head.weight"))
+                    .or_else(|| src.raw_info("output.weight")) {
+                    if dims.len() >= 2 {
+                        let max_dim = dims[0].max(dims[1]);
+                        max_dim
+                    } else {
+                        151936
+                    }
+                } else {
+                    151936
+                }
+            });
 
-        // Sniff num_heads & num_kv_heads
-        let (num_heads, num_kv_heads, head_dim) = if let Some(q_key) = keys.iter().find(|k| k.ends_with("self_attn.q_proj.weight") || k.ends_with("attn_q.weight")) {
+        // Intermediate size
+        let intermediate_size = src.metadata_usize(&format!("{arch_prefix}feed_forward_length"))
+            .unwrap_or_else(|| {
+                if let Some((_, dims)) = src.raw_info("model.layers.0.mlp.gate_proj.weight")
+                    .or_else(|| src.raw_info("layers.0.mlp.gate_proj.weight"))
+                    .or_else(|| src.raw_info("blk.0.ffn_gate.weight")) {
+                    dims.first().copied().unwrap_or(hidden_size * 4)
+                } else if let Some((_, dims)) = src.raw_info("blk.0.ffn_up.weight") {
+                    let d0 = dims.first().copied().unwrap_or(hidden_size * 4);
+                    d0 / 2
+                } else {
+                    hidden_size * 4
+                }
+            });
+
+        // Head count & KV head count
+        let num_heads_meta = src.metadata_usize(&format!("{arch_prefix}attention.head_count"));
+        let num_kv_heads_meta = src.metadata_usize(&format!("{arch_prefix}attention.head_count_kv"));
+        let head_dim_meta = src.metadata_usize(&format!("{arch_prefix}attention.key_length"));
+
+        let head_dim = head_dim_meta.unwrap_or_else(|| {
+            keys.iter().find_map(|k| {
+                if k.contains("attn_q_norm.weight") || k.contains("self_attn.q_norm.weight") {
+                    src.raw_info(k).and_then(|(_, d)| d.first().copied())
+                } else {
+                    None
+                }
+            }).unwrap_or(128)
+        });
+
+        let (num_heads, num_kv_heads, head_dim) = if let (Some(nh), Some(nkv)) = (num_heads_meta, num_kv_heads_meta) {
+            (nh, nkv, head_dim)
+        } else if let Some(q_key) = keys.iter().find(|k| k.ends_with("self_attn.q_proj.weight") || k.ends_with("attn_q.weight")) {
             let q_out = src.raw_info(q_key).and_then(|(_, d)| d.first().copied()).unwrap_or(hidden_size);
             let k_key = q_key.replace(".q_proj.", ".k_proj.").replace(".attn_q.", ".attn_k.");
             let k_out = src.raw_info(&k_key).and_then(|(_, d)| d.first().copied()).unwrap_or(q_out);
-            // In Qwen 3.8, q_out is doubled due to Q-Gate (e.g. 12288 = 2 * 24 heads * 256)
             let actual_q_dim = if q_out > hidden_size && q_out % (head_dim * 2) == 0 {
                 q_out / 2
             } else {
@@ -175,14 +212,13 @@ impl CausalLMConfig {
             let total_out = dims.first().copied().unwrap_or(hidden_size);
             let total_heads = total_out / head_dim;
             let (num_h, num_kv) = if total_heads == 60 {
-                // Phi-4: total_heads = 60 => num_heads = 40, num_kv = 10 (40 + 10 + 10 = 60)
                 (40, 10)
             } else if total_heads == 36 {
-                (28, 4) // Qwen 3B/7B GQA
+                (28, 4)
             } else if total_heads == 20 {
-                (16, 2) // Qwen 1.5B/2B GQA
+                (16, 2)
             } else if total_heads == 40 {
-                (32, 4) // Llama / Qwen
+                (32, 4)
             } else {
                 (total_heads.saturating_sub(4), 2)
             };
@@ -191,24 +227,48 @@ impl CausalLMConfig {
             (32, 8, head_dim)
         };
 
-        let is_gemma = keys.iter().any(|k| k.contains("gemma") || k.contains("pre_feedforward_layernorm"));
-        let qk_norm = keys.iter().any(|k| k.contains("q_norm") || k.contains("attn_q_norm"));
-        let rope_theta = if keys.iter().any(|k| k.contains("llama") || k.contains("deepseek")) || !qk_norm {
-            500_000.0f32
-        } else {
-            1_000_000.0f32
-        };
+        let is_gemma = arch.starts_with("gemma")
+            || keys.iter().any(|k| k.contains("gemma") || k.contains("pre_feedforward_layernorm"));
+        let unit_offset_norm = is_gemma;
 
-        let sliding_window = if is_gemma {
-            Some(4096)
-        } else {
-            None
-        };
-        let (attn_logit_softcapping, final_logit_softcapping, unit_offset_norm) = if is_gemma {
-            (Some(50.0), Some(30.0), true)
-        } else {
-            (None, None, false)
-        };
+        let qk_norm = keys.iter().any(|k| k.contains("q_norm") || k.contains("attn_q_norm"));
+
+        let rope_theta = src.metadata_f64(&format!("{arch_prefix}rope.freq_base"))
+            .map(|f| f as f32)
+            .unwrap_or_else(|| {
+                if keys.iter().any(|k| k.contains("llama") || k.contains("deepseek")) || !qk_norm {
+                    500_000.0f32
+                } else {
+                    1_000_000.0f32
+                }
+            });
+
+        let rms_norm_eps = src.metadata_f64(&format!("{arch_prefix}attention.layer_norm_rms_epsilon"))
+            .unwrap_or(1e-6);
+
+        let sliding_window = src.metadata_usize(&format!("{arch_prefix}attention.sliding_window"))
+            .or_else(|| if is_gemma && !arch.contains("gemma3") { Some(4096) } else { None });
+
+        let sliding_window_pattern = src.metadata_usize(&format!("{arch_prefix}attention.sliding_window_pattern"));
+
+        let attn_logit_softcapping = src.metadata_f64(&format!("{arch_prefix}attn_logit_softcapping"))
+            .or_else(|| {
+                // Gemma 2 hardcoded fallback if not in metadata, but Gemma 3 has no softcapping
+                if is_gemma && !arch.starts_with("gemma3") && keys.iter().any(|k| k.contains("gemma_2")) {
+                    Some(50.0)
+                } else {
+                    None
+                }
+            });
+
+        let final_logit_softcapping = src.metadata_f64(&format!("{arch_prefix}final_logit_softcapping"))
+            .or_else(|| {
+                if is_gemma && !arch.starts_with("gemma3") && keys.iter().any(|k| k.contains("gemma_2")) {
+                    Some(30.0)
+                } else {
+                    None
+                }
+            });
 
         let has_moe = keys.iter().any(|k| k.contains("mlp.experts") || k.contains("ffn_gate_exps"));
         let (moe_num_experts, moe_top_k, moe_shared_experts) = if has_moe {
@@ -233,7 +293,7 @@ impl CausalLMConfig {
             num_key_value_heads: num_kv_heads.max(1),
             num_hidden_layers: num_layers,
             vocab_size,
-            rms_norm_eps: 1e-6,
+            rms_norm_eps,
             rope_theta,
             max_position_embeddings: 8192,
             head_dim,
@@ -243,6 +303,7 @@ impl CausalLMConfig {
             attn_logit_softcapping,
             final_logit_softcapping,
             unit_offset_norm,
+            sliding_window_pattern,
             moe_num_experts,
             moe_top_k,
             moe_shared_experts,
@@ -400,6 +461,18 @@ fn rand_f32() -> f32 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
     (nanos as f32) / (1_000_000_000.0f32)
+}
+
+/// The ROCm Candle backend only supports contiguous operands for `matmul`.
+/// On every other backend this is a cheap no-op (Candle `Tensor` clones are Arc-based).
+fn rocm_contiguous(t: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "rocm")]
+    {
+        if t.device().is_rocm() {
+            return t.contiguous().map_err(LuminaError::Candle);
+        }
+    }
+    Ok(t.clone())
 }
 
 /// Conversational message in multi-turn dialogues.
@@ -1219,19 +1292,25 @@ impl CausalLMPipeline {
             // Qwen3 applies per-head RMSNorm (over head_dim) to Q and K before RoPE.
             if self.config.qk_norm {
                 if let Ok(qn_w) = self.get_layer_weight(layer_idx, &["self_attn.q_norm.weight", "attn_q_norm.weight"]) {
-                    q = Self::apply_rms_norm(&q, &qn_w, self.config.rms_norm_eps)?;
+                    q = Self::apply_rms_norm_configured(&q, &qn_w, self.config.rms_norm_eps, self.config.unit_offset_norm)?;
                 }
                 if let Ok(kn_w) = self.get_layer_weight(layer_idx, &["self_attn.k_norm.weight", "attn_k_norm.weight"]) {
-                    k = Self::apply_rms_norm(&k, &kn_w, self.config.rms_norm_eps)?;
+                    k = Self::apply_rms_norm_configured(&k, &kn_w, self.config.rms_norm_eps, self.config.unit_offset_norm)?;
                 }
             }
 
             // Apply RoPE
             let (q, k) = self.apply_rope(&q, &k, pos, seq_len)?;
 
+            // Layer-specific sliding window (e.g. Gemma 3 sliding_window_pattern alternates 5:1 local/global)
+            let sw = match (self.config.sliding_window, self.config.sliding_window_pattern) {
+                (Some(w), Some(p)) if p > 0 => if (layer_idx + 1) % p == 0 { None } else { Some(w) },
+                (s, _) => s,
+            };
+
             // Append to KV Cache with sliding window bounding
             let (k, v) = self.kv_cache.layers[layer_idx]
-                .append_with_window(&k, &v, self.config.sliding_window)
+                .append_with_window(&k, &v, sw)
                 .map_err(LuminaError::Candle)?;
 
             // GQA repeat KV if needed
@@ -1240,7 +1319,8 @@ impl CausalLMPipeline {
 
             // Scaled dot product attention: q is [B, H, S_q, D], k is [B, H, S_k, D] -> att is [B, H, S_q, S_k]
             let scale = 1.0 / (self.config.head_dim as f64).sqrt();
-            let k_t = k.transpose(2, 3).map_err(LuminaError::Candle)?;
+            let q = rocm_contiguous(&q)?;
+            let k_t = rocm_contiguous(&k.transpose(2, 3).map_err(LuminaError::Candle)?)?;
             let mut att = (q.matmul(&k_t)? * scale).map_err(LuminaError::Candle)?;
 
             // Google Gemma attention logit soft-capping: att = cap * tanh(att / cap)
@@ -1255,16 +1335,17 @@ impl CausalLMPipeline {
 
             // Causal mask for prefill (supports sliding window)
             let att = if seq_len > 1 {
-                let mask = self.causal_mask(seq_len, att.device())?;
+                let mask = self.causal_mask(seq_len, att.device(), sw)?;
                 att.broadcast_add(&mask).map_err(LuminaError::Candle)?
             } else {
                 att
             };
 
-            let att = crate::device::softmax_last_dim(&att).map_err(LuminaError::Candle)?;
+            let att = rocm_contiguous(&crate::device::softmax_last_dim(&att).map_err(LuminaError::Candle)?)?;
+            let v = rocm_contiguous(&v)?;
             let out = att.matmul(&v).map_err(LuminaError::Candle)?;
             let attn_dim = self.config.num_attention_heads * self.config.head_dim;
-            let mut out = out.transpose(1, 2)?.reshape((b_sz, seq_len, attn_dim))?;
+            let mut out = rocm_contiguous(&out.transpose(1, 2).map_err(LuminaError::Candle)?)?.reshape((b_sz, seq_len, attn_dim))?;
             
             if let Some(gate) = gate_opt {
                 out = (out * gate).map_err(LuminaError::Candle)?;
@@ -1541,16 +1622,16 @@ impl CausalLMPipeline {
             accum_out.unwrap_or_else(|| normed_post_x.clone())
         } else {
             // Standard dense SwiGLU MLP
-            if let Ok(fused_up_l) = self.get_layer_linear(layer_idx, &["ffn_up.weight", "mlp.up_proj.weight"]) {
-                // Dedicated modular Phi-3 / Phi-4 SwiGLU block
-                let down_l = self.get_layer_linear(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
-                let phi_mlp = super::phi::PhiMlp::new(fused_up_l, down_l, self.config.intermediate_size);
-                phi_mlp.forward(&normed_post_x)?
-            } else if let Ok(gate_l) = self.get_layer_linear(layer_idx, &["mlp.gate_proj.weight", "ffn_gate.weight"]) {
+            if let Ok(gate_l) = self.get_layer_linear(layer_idx, &["mlp.gate_proj.weight", "ffn_gate.weight"]) {
                 let up_l = self.get_layer_linear(layer_idx, &["mlp.up_proj.weight", "ffn_up.weight"])?;
                 let down_l = self.get_layer_linear(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
                 let llama_mlp = super::llama::LlamaMlp::new(gate_l, up_l, down_l);
                 llama_mlp.forward(&normed_post_x)?
+            } else if let Ok(fused_up_l) = self.get_layer_linear(layer_idx, &["ffn_up.weight", "mlp.up_proj.weight"]) {
+                // Dedicated modular Phi-3 / Phi-4 SwiGLU block (fused gate+up in ffn_up)
+                let down_l = self.get_layer_linear(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
+                let phi_mlp = super::phi::PhiMlp::new(fused_up_l, down_l, self.config.intermediate_size);
+                phi_mlp.forward(&normed_post_x)?
             } else {
                 return Err(LuminaError::MissingWeight(format!("FFN up/gate weight for layer {layer_idx} not found")));
             }
@@ -1586,15 +1667,17 @@ impl CausalLMPipeline {
             )));
         };
 
+        let w_adapted = rocm_contiguous(&w_adapted)?;
+
         let x_dims = x.shape().dims();
         if x_dims.len() == 3 {
             let (b, s, in_d) = (x_dims[0], x_dims[1], x_dims[2]);
-            let x_2d = x.reshape((b * s, in_d)).map_err(LuminaError::Candle)?;
+            let x_2d = rocm_contiguous(&x.reshape((b * s, in_d)).map_err(LuminaError::Candle)?)?;
             let out_2d = x_2d.matmul(&w_adapted).map_err(LuminaError::Candle)?;
             let out_dim = w_adapted.dim(1).map_err(LuminaError::Candle)?;
             out_2d.reshape((b, s, out_dim)).map_err(LuminaError::Candle)
         } else {
-            x.matmul(&w_adapted).map_err(LuminaError::Candle)
+            rocm_contiguous(x)?.matmul(&w_adapted).map_err(LuminaError::Candle)
         }
     }
 
@@ -1606,7 +1689,7 @@ impl CausalLMPipeline {
         let (b, n_kv_heads, seq_len, head_dim) = x.shape().dims4().map_err(LuminaError::Candle)?;
         let x = x.unsqueeze(2)?.expand((b, n_kv_heads, n_rep, seq_len, head_dim))?;
         let x = x.reshape((b, n_kv_heads * n_rep, seq_len, head_dim))?;
-        Ok(x)
+        rocm_contiguous(&x)
     }
 
     fn apply_rope(&self, q: &Tensor, k: &Tensor, pos: usize, seq_len: usize) -> Result<(Tensor, Tensor)> {
@@ -1641,12 +1724,11 @@ impl CausalLMPipeline {
         let q_out = ((q.broadcast_mul(&cos)?) + (q_rot.broadcast_mul(&sin)?)).map_err(LuminaError::Candle)?;
         let k_out = ((k.broadcast_mul(&cos)?) + (k_rot.broadcast_mul(&sin)?)).map_err(LuminaError::Candle)?;
 
-        Ok((q_out, k_out))
+        Ok((rocm_contiguous(&q_out)?, rocm_contiguous(&k_out)?))
     }
 
-    fn causal_mask(&self, seq_len: usize, device: &Device) -> Result<Tensor> {
+    fn causal_mask(&self, seq_len: usize, device: &Device, sliding_window: Option<usize>) -> Result<Tensor> {
         let mut mask_vec = vec![0.0f32; seq_len * seq_len];
-        let sliding_window = self.config.sliding_window;
         for i in 0..seq_len {
             for j in 0..seq_len {
                 if j > i {
@@ -1807,6 +1889,7 @@ mod tests {
             attn_logit_softcapping: Some(50.0),
             final_logit_softcapping: Some(30.0),
             unit_offset_norm: true,
+            sliding_window_pattern: None,
             moe_num_experts: 0,
             moe_top_k: 0,
             moe_shared_experts: 0,
@@ -1846,6 +1929,7 @@ mod tests {
             attn_logit_softcapping: Some(50.0),
             final_logit_softcapping: Some(30.0),
             unit_offset_norm: true,
+            sliding_window_pattern: None,
             moe_num_experts: 0,
             moe_top_k: 0,
             moe_shared_experts: 0,
@@ -1859,7 +1943,7 @@ mod tests {
             DType::F32,
         );
 
-        let mask = pipeline.causal_mask(4, &Device::Cpu).expect("causal mask failed");
+        let mask = pipeline.causal_mask(4, &Device::Cpu, pipeline.config.sliding_window).expect("causal mask failed");
         let mask_flat: Vec<f32> = mask.flatten_all().unwrap().to_vec1().unwrap();
         // 4x4 matrix:
         // row 0: [0, -inf, -inf, -inf]

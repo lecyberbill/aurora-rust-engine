@@ -51,6 +51,21 @@ pub trait WeightsSource: Send + Sync {
     fn describe(&self) -> String {
         "weights".to_string()
     }
+
+    /// Retrieve a string metadata value if available (e.g. from GGUF header).
+    fn metadata(&self, _key: &str) -> Option<String> {
+        None
+    }
+
+    /// Retrieve an integer metadata value if available (e.g. from GGUF header).
+    fn metadata_usize(&self, _key: &str) -> Option<usize> {
+        None
+    }
+
+    /// Retrieve a float metadata value if available (e.g. from GGUF header).
+    fn metadata_f64(&self, _key: &str) -> Option<f64> {
+        None
+    }
 }
 
 /// Blanket impl so any `WeightsSource` can be consumed by reference (e.g. `&dyn WeightsSource`).
@@ -65,6 +80,9 @@ impl<'a> WeightsSource for &'a dyn WeightsSource {
     }
     fn keys(&self) -> Vec<String> { (**self).keys() }
     fn describe(&self) -> String { (**self).describe() }
+    fn metadata(&self, key: &str) -> Option<String> { (**self).metadata(key) }
+    fn metadata_usize(&self, key: &str) -> Option<usize> { (**self).metadata_usize(key) }
+    fn metadata_f64(&self, key: &str) -> Option<f64> { (**self).metadata_f64(key) }
 }
 
 pub struct SafeTensorsArchive {

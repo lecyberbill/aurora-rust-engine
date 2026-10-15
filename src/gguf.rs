@@ -107,4 +107,50 @@ impl WeightsSource for GgufWeights {
     fn describe(&self) -> String {
         format!("gguf ({} tensors)", self.content.tensor_infos.len())
     }
+
+    fn metadata(&self, key: &str) -> Option<String> {
+        match self.content.metadata.get(key)? {
+            candle_core::quantized::gguf_file::Value::String(s) => Some(s.clone()),
+            candle_core::quantized::gguf_file::Value::U8(v) => Some(v.to_string()),
+            candle_core::quantized::gguf_file::Value::I8(v) => Some(v.to_string()),
+            candle_core::quantized::gguf_file::Value::U16(v) => Some(v.to_string()),
+            candle_core::quantized::gguf_file::Value::I16(v) => Some(v.to_string()),
+            candle_core::quantized::gguf_file::Value::U32(v) => Some(v.to_string()),
+            candle_core::quantized::gguf_file::Value::I32(v) => Some(v.to_string()),
+            candle_core::quantized::gguf_file::Value::U64(v) => Some(v.to_string()),
+            candle_core::quantized::gguf_file::Value::I64(v) => Some(v.to_string()),
+            candle_core::quantized::gguf_file::Value::F32(v) => Some(v.to_string()),
+            candle_core::quantized::gguf_file::Value::F64(v) => Some(v.to_string()),
+            candle_core::quantized::gguf_file::Value::Bool(v) => Some(v.to_string()),
+            _ => None,
+        }
+    }
+
+    fn metadata_usize(&self, key: &str) -> Option<usize> {
+        match self.content.metadata.get(key)? {
+            candle_core::quantized::gguf_file::Value::U8(v) => Some(*v as usize),
+            candle_core::quantized::gguf_file::Value::I8(v) if *v >= 0 => Some(*v as usize),
+            candle_core::quantized::gguf_file::Value::U16(v) => Some(*v as usize),
+            candle_core::quantized::gguf_file::Value::I16(v) if *v >= 0 => Some(*v as usize),
+            candle_core::quantized::gguf_file::Value::U32(v) => Some(*v as usize),
+            candle_core::quantized::gguf_file::Value::I32(v) if *v >= 0 => Some(*v as usize),
+            candle_core::quantized::gguf_file::Value::U64(v) => Some(*v as usize),
+            candle_core::quantized::gguf_file::Value::I64(v) if *v >= 0 => Some(*v as usize),
+            candle_core::quantized::gguf_file::Value::String(s) => s.parse::<usize>().ok(),
+            _ => None,
+        }
+    }
+
+    fn metadata_f64(&self, key: &str) -> Option<f64> {
+        match self.content.metadata.get(key)? {
+            candle_core::quantized::gguf_file::Value::F32(v) => Some(*v as f64),
+            candle_core::quantized::gguf_file::Value::F64(v) => Some(*v),
+            candle_core::quantized::gguf_file::Value::U32(v) => Some(*v as f64),
+            candle_core::quantized::gguf_file::Value::I32(v) => Some(*v as f64),
+            candle_core::quantized::gguf_file::Value::U64(v) => Some(*v as f64),
+            candle_core::quantized::gguf_file::Value::I64(v) => Some(*v as f64),
+            candle_core::quantized::gguf_file::Value::String(s) => s.parse::<f64>().ok(),
+            _ => None,
+        }
+    }
 }

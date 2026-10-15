@@ -87,6 +87,26 @@ impl Architecture {
 /// Returns an `Architecture` best-effort. Callers can layer extra heuristics (e.g. reading
 /// `config.json` for model_type) on top; this table is the shape-based fallback.
 pub fn detect_architecture(src: &dyn WeightsSource) -> Architecture {
+    // 0. Primary ground truth: container-level metadata (GGUF general.architecture)
+    if let Some(arch) = src.metadata("general.architecture") {
+        let arch_lower = arch.to_lowercase();
+        if arch_lower.starts_with("gemma") {
+            return Architecture::Gemma;
+        } else if arch_lower.starts_with("qwen") {
+            return Architecture::Qwen3;
+        } else if arch_lower.starts_with("llama") {
+            return Architecture::Llama;
+        } else if arch_lower.starts_with("deepseek") {
+            return Architecture::DeepSeek;
+        } else if arch_lower.starts_with("phi") {
+            return Architecture::Phi;
+        } else if arch_lower.starts_with("mistral") {
+            return Architecture::Mistral3;
+        } else if arch_lower.starts_with("lfm") {
+            return Architecture::Lfm;
+        }
+    }
+
     let keys = src.keys();
     let has = |needle: &str| keys.iter().any(|k| k.contains(needle));
 

@@ -18,12 +18,6 @@ pub enum TextBackend {
     Mistral(Mistral3TextEncoder),
     T5(T5TextEncoder),
     CausalLM(CausalLMPipeline),
-    NativeAccelerated {
-        model_tag: String,
-        endpoint: String,
-        device: Device,
-        dtype: DType,
-    },
 }
 
 impl TextBackend {
@@ -31,7 +25,6 @@ impl TextBackend {
         match self {
             TextBackend::Qwen(_) | TextBackend::Mistral(_) | TextBackend::T5(_) => &Device::Cpu,
             TextBackend::CausalLM(c) => &c.device,
-            TextBackend::NativeAccelerated { device, .. } => device,
         }
     }
 
@@ -39,7 +32,6 @@ impl TextBackend {
         match self {
             TextBackend::Qwen(_) | TextBackend::Mistral(_) | TextBackend::T5(_) => DType::F16,
             TextBackend::CausalLM(c) => c.dtype,
-            TextBackend::NativeAccelerated { dtype, .. } => *dtype,
         }
     }
 }
@@ -63,24 +55,12 @@ impl TextModel {
     pub fn causal_lm(id: String, family: String, pipeline: CausalLMPipeline) -> Self {
         Self { id, family, inner: TextBackend::CausalLM(pipeline) }
     }
-    pub fn native_accelerated(id: String, family: String, model_tag: String, endpoint: String, device: Device, dtype: DType) -> Self {
-        Self {
-            id,
-            family,
-            inner: TextBackend::NativeAccelerated {
-                model_tag,
-                endpoint,
-                device,
-                dtype,
-            },
-        }
-    }
 }
 
 impl AnyModel for TextModel {
     fn kind(&self) -> ModelKind {
         match &self.inner {
-            TextBackend::CausalLM(_) | TextBackend::NativeAccelerated { .. } => ModelKind::Text,
+            TextBackend::CausalLM(_) => ModelKind::Text,
             _ => ModelKind::TextEncoder,
         }
     }
@@ -120,7 +100,7 @@ impl GenerationModel for TextModel {
         prompt: &str,
         max_tokens: usize,
         temperature: f64,
-        reasoning_effort: f64,
+        _reasoning_effort: f64,
     ) -> Result<(String, String, f64)> {
         match &mut self.inner {
             TextBackend::CausalLM(pipeline) => {
@@ -135,77 +115,6 @@ impl GenerationModel for TextModel {
                 let text = pipeline.generate(prompt, &params)?;
                 Ok((String::new(), text, 0.0))
             }
-            TextBackend::NativeAccelerated { model_tag, endpoint, .. } => {
-                let options = serde_json::json!({
-                    "num_predict": max_tokens,
-                    "temperature": temperature,
-                    "num_gpu": 99,
-                    "num_thread": 8,
-                    "low_vram": false,
-                });
-
-                // Map reasoning effort to prompt shaping / context settings
-                let adjusted_prompt = if prompt.contains("<|im_start|>") {
-                    // Already formatted as a multi-turn chat template (ChatML)
-                    prompt.to_string()
-                } else if reasoning_effort <= 0.1 {
-                    // Fast / direct response without deep thinking
-                    format!("Direct concise answer without internal monologue:\n{prompt}")
-                } else if reasoning_effort >= 0.8 {
-                    // Deep thorough reasoning
-                    format!("Think deeply step-by-step before answering thoroughly:\n{prompt}")
-                } else {
-                    prompt.to_string()
-                };
-
-                let payload = serde_json::json!({
-                    "model": model_tag,
-                    "prompt": adjusted_prompt,
-                    "stream": false,
-                    "options": options
-                });
-
-                let url = format!("{}/api/generate", endpoint.trim_end_matches('/'));
-                let response = ureq::post(&url)
-                    .timeout(std::time::Duration::from_secs(180))
-                    .send_json(payload)
-                    .map_err(|e| LuminaError::Context {
-                        context: format!("Native ROCm Engine generation failed at {url}: {e}"),
-                        source: Box::new(LuminaError::Config(e.to_string())),
-                    })?;
-
-                let res_json: serde_json::Value = response.into_json().map_err(|e| LuminaError::Context {
-                    context: "Failed to parse Native GPU generation response".into(),
-                    source: Box::new(LuminaError::Config(e.to_string())),
-                })?;
-
-                let mut tok_per_sec = 0.0;
-                if let (Some(eval_count), Some(eval_duration)) = (
-                    res_json.get("eval_count").and_then(|v| v.as_u64()),
-                    res_json.get("eval_duration").and_then(|v| v.as_u64()),
-                ) {
-                    if eval_duration > 0 {
-                        tok_per_sec = (eval_count as f64) / (eval_duration as f64 / 1e9);
-                        println!(
-                            "⚡ GPU Eval Engine: {} tokens in {:.2}s ({:.2} tok/s)",
-                            eval_count,
-                            eval_duration as f64 / 1e9,
-                            tok_per_sec
-                        );
-                    }
-                }
-
-                let resp = res_json.get("response")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let thinking = res_json.get("thinking")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                Ok((thinking, resp, tok_per_sec))
-            }
             _ => Err(LuminaError::UnsupportedOp("This model is a text encoder only, not a CausalLM".into())),
         }
     }
@@ -215,83 +124,32 @@ impl GenerationModel for TextModel {
         messages: &[(String, String)],
         max_tokens: usize,
         temperature: f64,
-        _reasoning_effort: f64,
+        reasoning_effort: f64,
     ) -> Result<(String, String, f64)> {
-        match &mut self.inner {
-            TextBackend::NativeAccelerated { model_tag, endpoint, .. } => {
-                let options = serde_json::json!({
-                    "num_predict": max_tokens,
-                    "temperature": temperature,
-                    "num_gpu": 99,
-                    "num_thread": 8,
-                    "low_vram": false,
-                });
-
-                let chat_messages: Vec<serde_json::Value> = messages
-                    .iter()
-                    .map(|(role, content)| {
-                        serde_json::json!({
-                            "role": role,
-                            "content": content
-                        })
-                    })
-                    .collect();
-
-                let payload = serde_json::json!({
-                    "model": model_tag,
-                    "messages": chat_messages,
-                    "stream": false,
-                    "options": options
-                });
-
-                let url = format!("{}/api/chat", endpoint.trim_end_matches('/'));
-                let response = ureq::post(&url)
-                    .timeout(std::time::Duration::from_secs(180))
-                    .send_json(payload)
-                    .map_err(|e| LuminaError::Context {
-                        context: format!("Native ROCm Engine chat failed at {url}: {e}"),
-                        source: Box::new(LuminaError::Config(e.to_string())),
-                    })?;
-
-                let res_json: serde_json::Value = response.into_json().map_err(|e| LuminaError::Context {
-                    context: "Failed to parse Native GPU chat response".into(),
-                    source: Box::new(LuminaError::Config(e.to_string())),
-                })?;
-
-                let mut tok_per_sec = 0.0;
-                if let (Some(eval_count), Some(eval_duration)) = (
-                    res_json.get("eval_count").and_then(|v| v.as_u64()),
-                    res_json.get("eval_duration").and_then(|v| v.as_u64()),
-                ) {
-                    if eval_duration > 0 {
-                        tok_per_sec = (eval_count as f64) / (eval_duration as f64 / 1e9);
-                    }
-                }
-
-                let message_obj = res_json.get("message");
-                let resp = message_obj
-                    .and_then(|m| m.get("content"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let thinking = message_obj
-                    .and_then(|m| m.get("thinking"))
-                    .and_then(|v| v.as_str())
-                    .or_else(|| res_json.get("thinking").and_then(|v| v.as_str()))
-                    .unwrap_or("")
-                    .to_string();
-
-                Ok((thinking, resp, tok_per_sec))
+        let mut prompt = String::new();
+        let family_lower = self.family.to_lowercase();
+        if family_lower.contains("gemma") {
+            // Gemma chat template: <start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n
+            for (role, content) in messages {
+                let r = if role == "assistant" { "model" } else { role.as_str() };
+                prompt.push_str(&format!("<start_of_turn>{r}\n{content}<end_of_turn>\n"));
             }
-            _ => {
-                let mut prompt = String::new();
-                for (role, content) in messages {
-                    prompt.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
-                }
-                prompt.push_str("<|im_start|>assistant\n");
-                self.generate_with_reasoning(&prompt, max_tokens, temperature, _reasoning_effort)
+            prompt.push_str("<start_of_turn>model\n");
+        } else if family_lower.contains("llama") || family_lower.contains("deepseek") {
+            // Llama 3 / DeepSeek format
+            prompt.push_str("<|begin_of_text|>");
+            for (role, content) in messages {
+                prompt.push_str(&format!("<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>"));
             }
+            prompt.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+        } else {
+            // Default ChatML template (Qwen, Phi, Mistral, LFM)
+            for (role, content) in messages {
+                prompt.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
+            }
+            prompt.push_str("<|im_start|>assistant\n");
         }
+        self.generate_with_reasoning(&prompt, max_tokens, temperature, reasoning_effort)
     }
 
     fn generate_stream(
