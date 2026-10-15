@@ -922,28 +922,10 @@ impl CausalLMPipeline {
             hidden = (hidden * normalizer).map_err(LuminaError::Candle)?;
         }
 
-        // 2. Transformer layers loop with KV-Cache and per-layer cache eviction
+        // 2. Transformer layers loop with KV-Cache
         for layer_idx in 0..self.config.num_hidden_layers {
-            // Evict weights from earlier layers to maintain zero VRAM bloat on ROCm
-            if layer_idx > 0 {
-                let prev_l = layer_idx - 1;
-                let prefixes = [
-                    format!("model.layers.{prev_l}."),
-                    format!("layers.{prev_l}."),
-                    format!("blk.{prev_l}."),
-                ];
-                self.weights_cache.retain(|k, _| !prefixes.iter().any(|p| k.starts_with(p)));
-            }
             hidden = self.forward_layer(layer_idx, &hidden, pos, seq_len)?;
         }
-        // Evict last layer weights before final norm
-        let last_l = self.config.num_hidden_layers.saturating_sub(1);
-        let prefixes = [
-            format!("model.layers.{last_l}."),
-            format!("layers.{last_l}."),
-            format!("blk.{last_l}."),
-        ];
-        self.weights_cache.retain(|k, _| !prefixes.iter().any(|p| k.starts_with(p)));
 
         // 3. Final layer norm
         let norm_w = self.get_weight_or_fallback(&["model.norm.weight", "output_norm.weight", "norm.weight", "token_embd_norm.weight"])?;
