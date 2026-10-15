@@ -717,6 +717,26 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 
 ---
 
+## 🚀 Milestone 29: Native GPU Quantized GEMM (W4A16 / GGUF in VRAM) & Dynamic Layer Offloading (HIGH PRIORITY)
+
+**Goal.** Eliminate the 4x VRAM expansion when loading quantized GGUF weights, enabling 15B–27B models (like Phi-4 15B or Qwen 27B) to run at high speed on consumer GPUs with 8 GB to 16 GB VRAM (e.g., RTX 4070 Ti 12 GB, RX 7800 XT 16 GB), replicating the memory efficiency and offloading flexibility of LM Studio and llama.cpp:
+
+- [ ] **Direct GPU Quantized Storage (`QTensor` resident in VRAM)**:
+  - Store weights directly in their quantized format (`Q4_K`, `Q5_K`, `Q8_0`) in GPU memory instead of dequantizing to F16 in bulk.
+  - Reduces VRAM footprint by ~70–75% (e.g. Phi-4 15B drops from ~30 GB F16 to **~8.5 GB Q4_K_M** resident in VRAM).
+- [ ] **Kernel-Level W4A16 / W8A16 Matmul Dispatch (`src/weights/quantized_gemm.rs`)**:
+  - Direct matrix-vector multiplication executing dequantization on-the-fly inside GPU registers / Tensor Cores (NVIDIA WMMA / TensorCore via CUDA, AMD WMMA / Matrix Cores via ROCm).
+  - Maximizes memory bandwidth saturation during token generation steps without CPU-GPU bus bottlenecks.
+- [ ] **Configurable GPU Layer Offloading (`n_gpu_layers`)**:
+  - Add `n_gpu_layers: Option<usize>` parameter to `CausalLMPipeline` / `TextGenParams`.
+  - When total model size exceeds available GPU VRAM, partition layers dynamically:
+    - Layers $0..N$ loaded onto GPU (VRAM).
+    - Layers $N..\text{num\_layers}$ executed on CPU with Pinned Host Memory (`PinnedHostBuffer` DMA transfer) to avoid out-of-memory errors (`CUDA OOM` / `ROCm OOM`).
+- [ ] **Quantized KV-Cache (`FP8` / `Q4_0` / `Q8_0`)**:
+  - Optional low-bit representation for key and value cache entries in `LayerKVCache`, slashing attention cache memory for long context windows (4K–32K tokens).
+
+---
+
 ## 🔬 Empirical Hardware & Real-Weight Validation (RTX 4070 Ti 12 GB, CUDA 13.4)
 
 All pipelines have been validated end-to-end with real physical weights on real GPU hardware (`--release --features cuda`), confirming zero synthetic stubbing and zero regression:

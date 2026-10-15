@@ -370,7 +370,8 @@ See [`ROADMAP.md`](ROADMAP.md) for full technical specifications and development
 - [x] **Milestone 25**: Linux & AMD ROCm / HIP Acceleration (Cross-Platform Deployment)
 - [x] **Milestone 26**: Cross-Platform Performance & Kernel Optimizations (CUDA, ROCm, Metal, CPU, RDNA4 WMMA)
 - [x] **Milestone 27**: Universal Multi-Format & Multi-Modal Inference Engine (Zero-Copy Slicing, Gemma/DeepSeek, Cross-Modal Cache)
-- [ ] **Milestone 28 (PROPOSED)**: Liquid AI LFM Hybrid Conv1D-MoE Architecture Support (`lfm2moe`)
+- [x] **Milestone 28**: Liquid AI LFM Hybrid Conv1D-MoE Architecture Support (`lfm2moe`)
+- [ ] **Milestone 29 (HIGH PRIORITY)**: Native GPU Quantized GEMM (W4A16 / GGUF in VRAM) & Dynamic Layer Offloading (`n_gpu_layers`)
 
 ---
 
