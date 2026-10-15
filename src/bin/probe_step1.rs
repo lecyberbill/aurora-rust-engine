@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use candle_core::{DType, Device, Tensor, IndexOp};
-use aurora_rust_engine::models::{AutoModel, GenerationModel, downcast_model};
+use candle_core::{DType, Tensor, IndexOp};
+use aurora_rust_engine::models::{AutoModel, downcast_model};
 use aurora_rust_engine::models::text::TextModel;
 
 fn main() -> anyhow::Result<()> {
@@ -11,9 +11,9 @@ fn main() -> anyhow::Result<()> {
     let text_model = downcast_model::<TextModel>(&mut *model_lock).unwrap();
 
     let pipe = text_model.as_causal_lm_mut().expect("expected CausalLM");
+    let tok = pipe.tokenizer.clone().unwrap();
 
     let prompt = "<start_of_turn>user\nHello world<end_of_turn>\n<start_of_turn>model\n";
-    let tok = pipe.tokenizer.as_ref().unwrap();
     let prompt_tokens = tok.encode(prompt, true).unwrap().get_ids().to_vec();
     println!("Prompt tokens: {:?}", prompt_tokens);
 
