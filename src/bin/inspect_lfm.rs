@@ -10,29 +10,29 @@ fn main() -> anyhow::Result<()> {
     
     println!("\n=== Layer 0 tensors ===");
     for k in keys.iter().filter(|k| k.contains("blk.0.")) {
-        if let Ok(info) = archive.raw_info(k) {
-            println!("  {} -> shape: {:?}, dtype: {:?}", k, info.shape, info.dtype);
+        if let Some(info) = archive.raw_info(k) {
+            println!("  {} -> shape: {:?}, dtype: {:?}", k, info.1, info.0);
         }
     }
     
     println!("\n=== Layer 1 tensors ===");
     for k in keys.iter().filter(|k| k.contains("blk.1.")) {
-        if let Ok(info) = archive.raw_info(k) {
-            println!("  {} -> shape: {:?}, dtype: {:?}", k, info.shape, info.dtype);
+        if let Some(info) = archive.raw_info(k) {
+            println!("  {} -> shape: {:?}, dtype: {:?}", k, info.1, info.0);
         }
     }
 
     println!("\n=== Layer 2 tensors ===");
     for k in keys.iter().filter(|k| k.contains("blk.2.")) {
-        if let Ok(info) = archive.raw_info(k) {
-            println!("  {} -> shape: {:?}, dtype: {:?}", k, info.shape, info.dtype);
+        if let Some(info) = archive.raw_info(k) {
+            println!("  {} -> shape: {:?}, dtype: {:?}", k, info.1, info.0);
         }
     }
 
     println!("\n=== Global / Normalization tensors ===");
     for k in keys.iter().filter(|k| !k.starts_with("blk.")) {
-        if let Ok(info) = archive.raw_info(k) {
-            println!("  {} -> shape: {:?}, dtype: {:?}", k, info.shape, info.dtype);
+        if let Some(info) = archive.raw_info(k) {
+            println!("  {} -> shape: {:?}, dtype: {:?}", k, info.1, info.0);
         }
     }
 
