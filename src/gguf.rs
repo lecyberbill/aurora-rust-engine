@@ -39,6 +39,22 @@ impl GgufWeights {
     pub fn has(&self, name: &str) -> bool {
         self.content.tensor_infos.contains_key(name)
     }
+
+    /// Load a layer directly as a hardware-accelerated [`crate::models::common::LinearLayer`].
+    /// If the tensor is quantized, creates a [`QMatMul`] directly resident on `device`,
+    /// saving up to 70% VRAM without dequantizing into float.
+    pub fn get_linear(&self, name: &str, device: &Device) -> Result<crate::models::common::LinearLayer> {
+        let q: QTensor = self
+            .content
+            .tensor(&mut std::io::BufReader::new(&self.file), name, device)
+            .map_err(|e| LuminaError::Context {
+                context: format!("failed to decode GGUF tensor '{name}' onto device: {e}"),
+                source: Box::new(crate::error::LuminaError::Candle(e)),
+            })?;
+        let qmatmul = candle_core::quantized::QMatMul::from_qtensor(q)
+            .map_err(crate::error::LuminaError::Candle)?;
+        Ok(crate::models::common::LinearLayer::from_qmatmul(qmatmul))
+    }
 }
 
 impl WeightsSource for GgufWeights {
@@ -62,6 +78,10 @@ impl WeightsSource for GgufWeights {
             t.to_dtype(dtype).map_err(crate::error::LuminaError::Candle)?
         };
         t_converted.to_device(device).map_err(crate::error::LuminaError::Candle)
+    }
+
+    fn get_linear(&self, name: &str, device: &Device, _dtype: DType) -> Result<crate::models::common::LinearLayer> {
+        self.get_linear(name, device)
     }
 
     fn contains(&self, name: &str) -> bool {

@@ -41,7 +41,7 @@ pub use stable_audio_sched::CosineDpmScheduler;
 pub use t5::T5Encoder;
 pub use vlm::{MultiModalProjector, VisionActivation, VisionTransformer, VisionTransformerConfig, VlmDecoderConfig, VlmModel};
 pub use auto::{AutoModel, BoxedModel, ModelLoadConfig};
-pub use common::{downcast_model, AnyModel, EncodeModel, GenerationModel, ImageGenerationModel, ModelKind};
+pub use common::{downcast_model, AnyModel, EncodeModel, GenerationModel, ImageGenerationModel, LinearLayer, ModelKind};
 pub use config::{detect_architecture, Architecture};
 pub use descriptor::{
     ModelDefaults, ModelDescriptor, ModelDescriptorEntry, ModelDescriptorFile, ModelMemory,

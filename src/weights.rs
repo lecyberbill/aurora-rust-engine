@@ -36,6 +36,14 @@ pub trait WeightsSource: Send + Sync {
     /// Raw (stored) dtype and shape, without decoding. Useful for architecture detection.
     fn raw_info(&self, name: &str) -> Option<(safetensors::Dtype, Vec<usize>)>;
 
+    /// Load a linear layer (either quantized kernel QMatMul or standard Tensor).
+    /// Defaults to get_tensor converted to LinearLayer::Tensor, but specialized sources like GGUF
+    /// can return a memory-efficient Quantized QMatMul directly.
+    fn get_linear(&self, name: &str, device: &Device, dtype: DType) -> Result<crate::models::common::LinearLayer> {
+        let t = self.get_tensor(name, device, dtype)?;
+        Ok(crate::models::common::LinearLayer::from_tensor(t))
+    }
+
     /// All tensor names in this source.
     fn keys(&self) -> Vec<String>;
 
@@ -52,6 +60,9 @@ impl<'a> WeightsSource for &'a dyn WeightsSource {
     }
     fn contains(&self, name: &str) -> bool { (**self).contains(name) }
     fn raw_info(&self, name: &str) -> Option<(safetensors::Dtype, Vec<usize>)> { (**self).raw_info(name) }
+    fn get_linear(&self, name: &str, device: &Device, dtype: DType) -> Result<crate::models::common::LinearLayer> {
+        (**self).get_linear(name, device, dtype)
+    }
     fn keys(&self) -> Vec<String> { (**self).keys() }
     fn describe(&self) -> String { (**self).describe() }
 }

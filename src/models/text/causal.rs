@@ -6,6 +6,7 @@ use candle_nn::{Embedding, Module, RmsNorm};
 use tokenizers::Tokenizer;
 
 use crate::error::{LuminaError, Result};
+use crate::models::common::LinearLayer;
 use crate::weights::WeightsSource;
 
 /// KV Cache for an individual transformer layer.
@@ -450,6 +451,7 @@ pub struct CausalLMPipeline {
     pub dtype: DType,
     pub kv_cache: KVCache,
     pub weights_cache: std::collections::HashMap<String, Tensor>,
+    pub linear_cache: std::collections::HashMap<String, LinearLayer>,
     /// Number of transformer layers offloaded to GPU (None = all layers on GPU)
     pub n_gpu_layers: Option<usize>,
 }
@@ -464,6 +466,7 @@ impl CausalLMPipeline {
     ) -> Self {
         let kv_cache = KVCache::new(config.num_hidden_layers);
         let weights_cache = std::collections::HashMap::new();
+        let linear_cache = std::collections::HashMap::new();
 
         Self {
             config,
@@ -473,6 +476,7 @@ impl CausalLMPipeline {
             dtype,
             kv_cache,
             weights_cache,
+            linear_cache,
             n_gpu_layers: None,
         }
     }
@@ -959,8 +963,8 @@ impl CausalLMPipeline {
         let hidden = self.apply_norm(&hidden, &norm_w)?;
 
         // 4. LM Head projection
-        let lm_head_w = self.get_weight_or_fallback(&["lm_head.weight", "output.weight", "model.embed_tokens.weight", "embed_tokens.weight", "token_embd.weight"])?;
-        let mut logits = Self::matmul_linear(&hidden, &lm_head_w)?;
+        let lm_head_l = self.get_linear_or_fallback(&["lm_head.weight", "output.weight", "model.embed_tokens.weight", "embed_tokens.weight", "token_embd.weight"])?;
+        let mut logits = lm_head_l.forward(&hidden)?;
 
         // Google Gemma final logit soft-capping
         if let Some(cap) = self.config.final_logit_softcapping {
@@ -1177,15 +1181,15 @@ impl CausalLMPipeline {
             (out, x_res)
         } else {
             // Standard Full Multi-Head / Grouped-Query Attention
-            let (q, k, v) = if let Ok(q_w) = self.get_layer_weight(layer_idx, &["self_attn.q_proj.weight", "attn_q.weight"]) {
-                let k_w = self.get_layer_weight(layer_idx, &["self_attn.k_proj.weight", "attn_k.weight"])?;
-                let v_w = self.get_layer_weight(layer_idx, &["self_attn.v_proj.weight", "attn_v.weight"])?;
-                let q = Self::matmul_linear(&normed_x, &q_w)?;
-                let k = Self::matmul_linear(&normed_x, &k_w)?;
-                let v = Self::matmul_linear(&normed_x, &v_w)?;
+            let (q, k, v) = if let Ok(q_l) = self.get_layer_linear(layer_idx, &["self_attn.q_proj.weight", "attn_q.weight"]) {
+                let k_l = self.get_layer_linear(layer_idx, &["self_attn.k_proj.weight", "attn_k.weight"])?;
+                let v_l = self.get_layer_linear(layer_idx, &["self_attn.v_proj.weight", "attn_v.weight"])?;
+                let q = q_l.forward(&normed_x)?;
+                let k = k_l.forward(&normed_x)?;
+                let v = v_l.forward(&normed_x)?;
                 (q, k, v)
-            } else if let Ok(qkv_w) = self.get_layer_weight(layer_idx, &["self_attn.qkv_proj.weight", "attn_qkv.weight"]) {
-                let qkv = Self::matmul_linear(&normed_x, &qkv_w)?;
+            } else if let Ok(qkv_l) = self.get_layer_linear(layer_idx, &["self_attn.qkv_proj.weight", "attn_qkv.weight"]) {
+                let qkv = qkv_l.forward(&normed_x)?;
                 let q_dim = self.config.num_attention_heads * self.config.head_dim;
                 let kv_dim = self.config.num_key_value_heads * self.config.head_dim;
                 let q = qkv.narrow(candle_core::D::Minus1, 0, q_dim)?;
@@ -1195,7 +1199,7 @@ impl CausalLMPipeline {
             } else {
                 return Err(LuminaError::MissingWeight(format!("Attention weights for layer {layer_idx} not found")));
             };
-            let o_w = self.get_layer_weight(layer_idx, &["self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
+            let o_l = self.get_layer_linear(layer_idx, &["self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
 
             let (q, gate_opt) = if q.dim(candle_core::D::Minus1)? == self.config.num_attention_heads * self.config.head_dim * 2 {
                 let half_dim = self.config.num_attention_heads * self.config.head_dim;
@@ -1266,7 +1270,7 @@ impl CausalLMPipeline {
                 out = (out * gate).map_err(LuminaError::Candle)?;
             }
 
-            let attn_out = Self::matmul_linear(&out, &o_w)?;
+            let attn_out = o_l.forward(&out)?;
 
             let x_res = (x + &attn_out).map_err(LuminaError::Candle)?;
             (attn_out, x_res)
@@ -1537,14 +1541,14 @@ impl CausalLMPipeline {
             accum_out.unwrap_or_else(|| normed_post_x.clone())
         } else {
             // Standard dense SwiGLU MLP
-            let (gate, up) = if let Ok(gate_w) = self.get_layer_weight(layer_idx, &["mlp.gate_proj.weight", "ffn_gate.weight"]) {
-                let up_w = self.get_layer_weight(layer_idx, &["mlp.up_proj.weight", "ffn_up.weight"])?;
-                let gate = Self::matmul_linear(&normed_post_x, &gate_w)?;
-                let up = Self::matmul_linear(&normed_post_x, &up_w)?;
+            let (gate, up) = if let Ok(gate_l) = self.get_layer_linear(layer_idx, &["mlp.gate_proj.weight", "ffn_gate.weight"]) {
+                let up_l = self.get_layer_linear(layer_idx, &["mlp.up_proj.weight", "ffn_up.weight"])?;
+                let gate = gate_l.forward(&normed_post_x)?;
+                let up = up_l.forward(&normed_post_x)?;
                 (gate, up)
-            } else if let Ok(fused_up_w) = self.get_layer_weight(layer_idx, &["ffn_up.weight", "mlp.up_proj.weight"]) {
-                // In Phi-3/Phi-4: fused_up_w is [2 * intermediate_size, hidden_size] -> proj is [B, S, 2 * intermediate_size]
-                let fused_proj = Self::matmul_linear(&normed_post_x, &fused_up_w)?;
+            } else if let Ok(fused_up_l) = self.get_layer_linear(layer_idx, &["ffn_up.weight", "mlp.up_proj.weight"]) {
+                // In Phi-3/Phi-4: fused_up is [2 * intermediate_size, hidden_size] -> proj is [B, S, 2 * intermediate_size]
+                let fused_proj = fused_up_l.forward(&normed_post_x)?;
                 let inter_dim = self.config.intermediate_size;
                 let gate = fused_proj.narrow(candle_core::D::Minus1, 0, inter_dim)?;
                 let up = fused_proj.narrow(candle_core::D::Minus1, inter_dim, inter_dim)?;
@@ -1553,10 +1557,10 @@ impl CausalLMPipeline {
                 return Err(LuminaError::MissingWeight(format!("FFN up/gate weight for layer {layer_idx} not found")));
             };
 
-            let down_w = self.get_layer_weight(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
+            let down_l = self.get_layer_linear(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
             let silu_gate = candle_nn::ops::silu(&gate).map_err(LuminaError::Candle)?;
             let mlp_act = (silu_gate * up).map_err(LuminaError::Candle)?;
-            Self::matmul_linear(&mlp_act, &down_w)?
+            down_l.forward(&mlp_act)?
         };
 
         let x = (x + mlp_out).map_err(LuminaError::Candle)?;
@@ -1682,6 +1686,23 @@ impl CausalLMPipeline {
         )))
     }
 
+    fn get_linear_or_fallback(&mut self, candidates: &[&str]) -> Result<LinearLayer> {
+        for name in candidates {
+            if let Some(l) = self.linear_cache.get(*name) {
+                return Ok(l.clone());
+            }
+            if self.weights.contains(name) {
+                let l = self.weights.get_linear(name, &self.device, self.dtype)?;
+                self.linear_cache.insert(name.to_string(), l.clone());
+                return Ok(l);
+            }
+        }
+        Err(LuminaError::MissingWeight(format!(
+            "None of candidate linear layers {:?} found in archive",
+            candidates
+        )))
+    }
+
     /// Resolve target device for a given transformer layer based on n_gpu_layers offloading configuration
     pub fn device_for_layer(&self, layer_idx: usize) -> Device {
         match self.n_gpu_layers {
@@ -1724,6 +1745,32 @@ impl CausalLMPipeline {
         }
         Err(LuminaError::MissingWeight(format!(
             "Weight for layer {} with suffixes {:?} not found",
+            layer_idx, suffixes
+        )))
+    }
+
+    fn get_layer_linear(&mut self, layer_idx: usize, suffixes: &[&str]) -> Result<LinearLayer> {
+        let layer_dev = self.device_for_layer(layer_idx);
+        let prefixes = [
+            format!("model.layers.{layer_idx}."),
+            format!("layers.{layer_idx}."),
+            format!("blk.{layer_idx}."),
+        ];
+        for prefix in &prefixes {
+            for suffix in suffixes {
+                let key = format!("{prefix}{suffix}");
+                if let Some(layer) = self.linear_cache.get(&key) {
+                    return Ok(layer.clone());
+                }
+                if self.weights.contains(&key) {
+                    let linear = self.weights.get_linear(&key, &layer_dev, self.dtype)?;
+                    self.linear_cache.insert(key, linear.clone());
+                    return Ok(linear);
+                }
+            }
+        }
+        Err(LuminaError::MissingWeight(format!(
+            "Linear layer for layer {} with suffixes {:?} not found",
             layer_idx, suffixes
         )))
     }

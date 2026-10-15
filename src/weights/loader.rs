@@ -256,6 +256,14 @@ impl WeightsSource for UniversalWeightsLoader {
         slice.to_tensor(device, dtype)
     }
 
+    fn get_linear(&self, name: &str, device: &Device, dtype: DType) -> Result<crate::models::common::LinearLayer> {
+        if let Some(ref gguf) = self.gguf_weights {
+            return gguf.get_linear(name, device);
+        }
+        let t = self.get_tensor(name, device, dtype)?;
+        Ok(crate::models::common::LinearLayer::from_tensor(t))
+    }
+
     fn contains(&self, name: &str) -> bool {
         if let Some(ref st) = self.st_archive {
             return st.contains(name);

@@ -1,11 +1,89 @@
-// [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Common `transformers`-like model traits (port of HF API to Candle), object-safe
-
-use candle_core::{DType, Device, Tensor};
+use candle_core::quantized::QMatMul;
+use candle_core::{DType, Device, Module, Tensor};
 use image::RgbImage;
 use std::any::Any;
 use std::path::Path;
-use crate::error::Result;
+use std::sync::Arc;
+use crate::error::{LuminaError, Result};
 use crate::traits::{DiffusionParams, Img2ImgParams, InpaintParams};
+
+/// Unified Linear Layer supporting either full-precision/safetensors [`Tensor`]
+/// or hardware-accelerated quantized [`QMatMul`] (W4A16 / GGUF).
+///
+/// Designed like HuggingFace `transformers` linear layers: callers simply call `.forward(x)`
+/// or `.forward(&x)` and the underlying kernel (Float GEMM or Quantized GEMM) is executed
+/// seamlessly on CPU, CUDA or AMD ROCm.
+#[derive(Clone)]
+pub enum LinearLayer {
+    Tensor(Tensor),
+    Quantized(Arc<QMatMul>),
+}
+
+impl std::fmt::Debug for LinearLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tensor(t) => write!(f, "LinearLayer::Tensor({:?}, {:?})", t.shape(), t.dtype()),
+            Self::Quantized(_) => write!(f, "LinearLayer::Quantized(QMatMul)"),
+        }
+    }
+}
+
+impl LinearLayer {
+    pub fn from_tensor(t: Tensor) -> Self {
+        Self::Tensor(t)
+    }
+
+    pub fn from_qmatmul(q: QMatMul) -> Self {
+        Self::Quantized(Arc::new(q))
+    }
+
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Quantized(q) => {
+                let out = q.forward(x).map_err(LuminaError::Candle)?;
+                if out.dtype() != x.dtype() {
+                    out.to_dtype(x.dtype()).map_err(LuminaError::Candle)
+                } else {
+                    Ok(out)
+                }
+            }
+            Self::Tensor(w) => {
+                let w_dtype = w.dtype();
+                let w_float = if w_dtype == DType::U8 {
+                    let target_dt = x.dtype();
+                    let shifted = (w.to_dtype(DType::F32).map_err(LuminaError::Candle)? - 128.0).map_err(LuminaError::Candle)?;
+                    (shifted * (1.0 / 127.0)).map_err(LuminaError::Candle)?.to_dtype(target_dt).map_err(LuminaError::Candle)?
+                } else {
+                    w.clone()
+                };
+
+                let last_x_dim = x.dim(candle_core::D::Minus1).map_err(LuminaError::Candle)?;
+                let w_dims = w_float.shape().dims2().map_err(LuminaError::Candle)?;
+                let w_adapted = if w_dims.1 == last_x_dim {
+                    w_float.t().map_err(LuminaError::Candle)?
+                } else if w_dims.0 == last_x_dim {
+                    w_float
+                } else {
+                    return Err(LuminaError::Config(format!(
+                        "matmul dimension mismatch: x last dim {} vs w dims {:?}",
+                        last_x_dim, w_dims
+                    )));
+                };
+
+                let x_dims = x.shape().dims();
+                if x_dims.len() == 3 {
+                    let (b, s, in_d) = (x_dims[0], x_dims[1], x_dims[2]);
+                    let x_2d = x.reshape((b * s, in_d)).map_err(LuminaError::Candle)?;
+                    let out_2d = x_2d.matmul(&w_adapted).map_err(LuminaError::Candle)?;
+                    let out_dim = w_adapted.dim(1).map_err(LuminaError::Candle)?;
+                    out_2d.reshape((b, s, out_dim)).map_err(LuminaError::Candle)
+                } else {
+                    x.matmul(&w_adapted).map_err(LuminaError::Candle)
+                }
+            }
+        }
+    }
+}
 
 /// Progress callback (step_index, total_steps, latent). Used object-safe (boxed, not generic).
 pub type ProgressFn<'a> = &'a mut (dyn FnMut(usize, usize, &Tensor) + 'a);
