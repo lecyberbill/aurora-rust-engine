@@ -211,8 +211,9 @@ impl CausalLMConfig {
                 } else {
                     None
                 }
-            }).max().map(|m| m + 1).unwrap_or(64);
-            (num_exp, 2, 2)
+            }).max().map(|m| m + 1).unwrap_or(32);
+            let top_k = if keys.iter().any(|k| k.contains("shortconv")) { 4 } else { 2 };
+            (num_exp, top_k, 2)
         } else {
             (0, 0, 0)
         };
@@ -996,10 +997,15 @@ impl CausalLMPipeline {
                     Tensor::zeros((1, c_dim, state_len), bx.dtype(), &self.device).unwrap()
                 });
                 let x_step = bx.transpose(1, 2)?; // [1, c_dim, 1]
-                let full_window = Tensor::cat(&[&prev_state, &x_step], 2)?; // [1, c_dim, K]
+                let full_window = Tensor::cat(&[&prev_state, &x_step], 2)?; // [1, c_dim, K] (oldest to newest: index 0 is oldest, K-1 is newest x_step)
                 let next_buf = full_window.narrow(2, 1, state_len)?;
                 self.kv_cache.layers[layer_idx].ssm_conv_state = Some(next_buf);
 
+                // full_window is [1, c_dim, K] where index K-1 is current token, K-2 is t-1, K-3 is t-2
+                // conv_w in llama.cpp / ggml is indexed such that:
+                // conv_w[:, 0] is t-2, conv_w[:, 1] is t-1, conv_w[:, 2] is t (or vice versa)
+                // In ggml_ssm_conv: s = src0 + i2*nb0 (starts at window start); s[i0] * c[i0]
+                // Since full_window ordered oldest-to-newest matches ggml concat(conv, bx), direct elementwise multiply applies!
                 let conv_w_b = conv_w.unsqueeze(0)?; // [1, c_dim, K]
                 (full_window * conv_w_b)?.sum_keepdim(2)?.transpose(1, 2)? // [1, 1, c_dim]
             } else {
@@ -1007,7 +1013,7 @@ impl CausalLMPipeline {
                 let last_steps = if seq_len >= state_len {
                     bx.narrow(1, seq_len - state_len, state_len)?.transpose(1, 2)?
                 } else {
-                    let mut pad = Tensor::zeros((1, c_dim, state_len - seq_len), bx.dtype(), &self.device)?;
+                    let pad = Tensor::zeros((1, c_dim, state_len - seq_len), bx.dtype(), &self.device)?;
                     let cur = bx.transpose(1, 2)?;
                     Tensor::cat(&[&pad, &cur], 2)?
                 };
@@ -1015,7 +1021,7 @@ impl CausalLMPipeline {
 
                 // Full causal 1D convolution over sequence
                 let bx_trans = bx.transpose(1, 2)?; // [B, c_dim, S]
-                let mut padded_bx = if state_len > 0 {
+                let padded_bx = if state_len > 0 {
                     let pad = Tensor::zeros((bx.dim(0)?, c_dim, state_len), bx.dtype(), &self.device)?;
                     Tensor::cat(&[&pad, &bx_trans], 2)?
                 } else {
@@ -1052,7 +1058,7 @@ impl CausalLMPipeline {
                 // conv_w is [10240, 4]
                 let conv_out = if seq_len == 1 {
                     // Step generation with rolling conv buffer
-                    let mut prev_state = self.kv_cache.layers[layer_idx].ssm_conv_state.clone().unwrap_or_else(|| {
+                    let prev_state = self.kv_cache.layers[layer_idx].ssm_conv_state.clone().unwrap_or_else(|| {
                         Tensor::zeros((1, 10240, 3), projected.dtype(), &self.device).unwrap()
                     });
                     let x_step = projected.transpose(1, 2)?; // [1, 10240, 1]
@@ -1265,29 +1271,39 @@ impl CausalLMPipeline {
             let num_experts = router_w.shape().dims2().map_err(LuminaError::Candle)?.0;
             let top_k = self.config.moe_top_k.min(num_experts).max(1);
 
-            // Compute actual top-k expert indices and normalized routing weights
-            // router_probs is [B, S, num_experts]
-            let probs_flat = router_probs.flatten_all().map_err(LuminaError::Candle)?.to_dtype(DType::F32).map_err(LuminaError::Candle)?.to_vec1::<f32>().map_err(LuminaError::Candle)?;
+            // Optional DeepSeek / LFM aux-loss-free expert selection bias
+            let selection_probs = if let Ok(exp_b) = self.get_layer_weight(layer_idx, &["exp_probs_b.bias", "ffn_exp_probs_b.bias"]) {
+                router_probs.broadcast_add(&exp_b).map_err(LuminaError::Candle)?
+            } else {
+                router_probs.clone()
+            };
+
             let b_sz = normed_post_x.dim(0).map_err(LuminaError::Candle)?;
             let total_tokens = b_sz * seq_len;
+            let hidden_dim = normed_post_x.dim(candle_core::D::Minus1).map_err(LuminaError::Candle)?;
 
             let mut accum_out: Option<Tensor> = None;
 
+            let has_fused_exps = self.weights.contains(&format!("blk.{layer_idx}.ffn_gate_exps.weight"))
+                || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ffn_gate_exps.weight"));
+
             if total_tokens == 1 {
-                // Single-token autoregressive decoding step (most frequent path)
-                let mut expert_weights: Vec<(usize, f32)> = probs_flat[..num_experts.min(probs_flat.len())]
+                // Single-token autoregressive decoding step (fast scalar path)
+                let sel_flat = selection_probs.flatten_all().map_err(LuminaError::Candle)?.to_dtype(DType::F32).map_err(LuminaError::Candle)?.to_vec1::<f32>().map_err(LuminaError::Candle)?;
+                let clean_flat = router_probs.flatten_all().map_err(LuminaError::Candle)?.to_dtype(DType::F32).map_err(LuminaError::Candle)?.to_vec1::<f32>().map_err(LuminaError::Candle)?;
+
+                let mut expert_indices: Vec<(usize, f32)> = sel_flat[..num_experts.min(sel_flat.len())]
                     .iter()
                     .enumerate()
                     .map(|(i, &p)| (i, p))
                     .collect();
-                expert_weights.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                expert_weights.truncate(top_k);
+                expert_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                expert_indices.truncate(top_k);
 
+                // Combination weights are derived from unbiased router_probs
+                let mut expert_weights: Vec<(usize, f32)> = expert_indices.iter().map(|&(idx, _)| (idx, clean_flat[idx])).collect();
                 let weight_sum: f32 = expert_weights.iter().map(|(_, w)| *w).sum();
                 let norm_factor = if weight_sum > 0.0 { 1.0 / weight_sum } else { 1.0 };
-
-                let has_fused_exps = self.weights.contains(&format!("blk.{layer_idx}.ffn_gate_exps.weight"))
-                    || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ffn_gate_exps.weight"));
 
                 if has_fused_exps {
                     let fused_g = self.get_layer_weight(layer_idx, &["ffn_gate_exps.weight", "mlp.experts.gate_exps.weight"])?;
@@ -1296,9 +1312,9 @@ impl CausalLMPipeline {
 
                     for (exp_idx, raw_weight) in expert_weights {
                         let norm_w = raw_weight * norm_factor;
-                        let g_w = fused_g.get(exp_idx)?; // [1792, 2048]
-                        let u_w = fused_u.get(exp_idx)?; // [1792, 2048]
-                        let d_w = fused_d.get(exp_idx)?; // [2048, 1792]
+                        let g_w = fused_g.get(exp_idx)?; // [inter_dim, hidden_dim]
+                        let u_w = fused_u.get(exp_idx)?;
+                        let d_w = fused_d.get(exp_idx)?;
 
                         let g = Self::matmul_linear(&normed_post_x, &g_w)?;
                         let u = Self::matmul_linear(&normed_post_x, &u_w)?;
@@ -1349,69 +1365,110 @@ impl CausalLMPipeline {
                     }
                 }
             } else {
-                // Prefill / Multi-token path: dispatch across top-k experts
-                let has_fused_exps = self.weights.contains(&format!("blk.{layer_idx}.ffn_gate_exps.weight"))
-                    || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ffn_gate_exps.weight"));
+                // Prefill / Multi-token path: dispatch per-token top-k experts
+                let sel_flat = selection_probs.flatten_all().map_err(LuminaError::Candle)?.to_dtype(DType::F32).map_err(LuminaError::Candle)?.to_vec1::<f32>().map_err(LuminaError::Candle)?;
+                let clean_flat = router_probs.flatten_all().map_err(LuminaError::Candle)?.to_dtype(DType::F32).map_err(LuminaError::Candle)?.to_vec1::<f32>().map_err(LuminaError::Candle)?;
+
+                let mut out_tokens: Vec<Tensor> = Vec::with_capacity(total_tokens);
+                let normed_flat = normed_post_x.reshape((total_tokens, hidden_dim))?;
 
                 if has_fused_exps {
                     let fused_g = self.get_layer_weight(layer_idx, &["ffn_gate_exps.weight", "mlp.experts.gate_exps.weight"])?;
                     let fused_u = self.get_layer_weight(layer_idx, &["ffn_up_exps.weight", "mlp.experts.up_exps.weight"])?;
                     let fused_d = self.get_layer_weight(layer_idx, &["ffn_down_exps.weight", "mlp.experts.down_exps.weight"])?;
 
-                    for exp_idx in 0..top_k {
-                        let g_w = fused_g.get(exp_idx)?;
-                        let u_w = fused_u.get(exp_idx)?;
-                        let d_w = fused_d.get(exp_idx)?;
+                    for tok_idx in 0..total_tokens {
+                        let tok_x = normed_flat.narrow(0, tok_idx, 1)?; // [1, hidden_dim]
+                        let start_off = tok_idx * num_experts;
+                        let mut expert_indices: Vec<(usize, f32)> = sel_flat[start_off..start_off + num_experts]
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &p)| (i, p))
+                            .collect();
+                        expert_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        expert_indices.truncate(top_k);
 
-                        let g = Self::matmul_linear(&normed_post_x, &g_w)?;
-                        let u = Self::matmul_linear(&normed_post_x, &u_w)?;
-                        let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
-                        let exp_act = (silu_g * u).map_err(LuminaError::Candle)?;
-                        let exp_out = Self::matmul_linear(&exp_act, &d_w)?;
+                        let mut expert_weights: Vec<(usize, f32)> = expert_indices.iter().map(|&(idx, _)| (idx, clean_flat[start_off + idx])).collect();
+                        let weight_sum: f32 = expert_weights.iter().map(|(_, w)| *w).sum();
+                        let norm_factor = if weight_sum > 0.0 { 1.0 / weight_sum } else { 1.0 };
 
-                        let prob_slice = router_probs.narrow(candle_core::D::Minus1, exp_idx, 1)?;
-                        let weighted = exp_out.broadcast_mul(&prob_slice).map_err(LuminaError::Candle)?;
+                        let mut tok_accum: Option<Tensor> = None;
+                        for (exp_idx, raw_weight) in expert_weights {
+                            let norm_w = raw_weight * norm_factor;
+                            let g_w = fused_g.get(exp_idx)?;
+                            let u_w = fused_u.get(exp_idx)?;
+                            let d_w = fused_d.get(exp_idx)?;
 
-                        accum_out = match accum_out {
-                            Some(prev) => Some((prev + weighted).map_err(LuminaError::Candle)?),
-                            None => Some(weighted),
-                        };
-                    }
-                } else {
-                    for exp_idx in 0..top_k {
-                        let gate_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
-                        let up_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
-                        let down_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
-
-                        let alt_g = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
-                        let alt_u = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
-                        let alt_d = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
-
-                        let gguf_g = format!("blk.{layer_idx}.ffn_gate.{exp_idx}.weight");
-                        let gguf_u = format!("blk.{layer_idx}.ffn_up.{exp_idx}.weight");
-                        let gguf_d = format!("blk.{layer_idx}.ffn_down.{exp_idx}.weight");
-
-                        if let (Ok(g_w), Ok(u_w), Ok(d_w)) = (
-                            self.get_weight_or_fallback(&[&gate_name, &alt_g, &gguf_g]),
-                            self.get_weight_or_fallback(&[&up_name, &alt_u, &gguf_u]),
-                            self.get_weight_or_fallback(&[&down_name, &alt_d, &gguf_d]),
-                        ) {
-                            let g = Self::matmul_linear(&normed_post_x, &g_w)?;
-                            let u = Self::matmul_linear(&normed_post_x, &u_w)?;
+                            let g = Self::matmul_linear(&tok_x, &g_w)?;
+                            let u = Self::matmul_linear(&tok_x, &u_w)?;
                             let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
                             let exp_act = (silu_g * u).map_err(LuminaError::Candle)?;
                             let exp_out = Self::matmul_linear(&exp_act, &d_w)?;
 
-                            let prob_slice = router_probs.narrow(candle_core::D::Minus1, exp_idx, 1)?;
-                            let weighted = exp_out.broadcast_mul(&prob_slice).map_err(LuminaError::Candle)?;
-
-                            accum_out = match accum_out {
+                            let weighted = (exp_out * (norm_w as f64)).map_err(LuminaError::Candle)?;
+                            tok_accum = match tok_accum {
                                 Some(prev) => Some((prev + weighted).map_err(LuminaError::Candle)?),
                                 None => Some(weighted),
                             };
                         }
+                        out_tokens.push(tok_accum.unwrap_or_else(|| tok_x.clone()));
+                    }
+                } else {
+                    for tok_idx in 0..total_tokens {
+                        let tok_x = normed_flat.narrow(0, tok_idx, 1)?;
+                        let start_off = tok_idx * num_experts;
+                        let mut expert_indices: Vec<(usize, f32)> = sel_flat[start_off..start_off + num_experts]
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &p)| (i, p))
+                            .collect();
+                        expert_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        expert_indices.truncate(top_k);
+
+                        let mut expert_weights: Vec<(usize, f32)> = expert_indices.iter().map(|&(idx, _)| (idx, clean_flat[start_off + idx])).collect();
+                        let weight_sum: f32 = expert_weights.iter().map(|(_, w)| *w).sum();
+                        let norm_factor = if weight_sum > 0.0 { 1.0 / weight_sum } else { 1.0 };
+
+                        let mut tok_accum: Option<Tensor> = None;
+                        for (exp_idx, raw_weight) in expert_weights {
+                            let norm_w = raw_weight * norm_factor;
+                            let gate_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
+                            let up_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
+                            let down_name = format!("model.layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+
+                            let alt_g = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.gate_proj.weight");
+                            let alt_u = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.up_proj.weight");
+                            let alt_d = format!("layers.{layer_idx}.mlp.experts.{exp_idx}.down_proj.weight");
+
+                            let gguf_g = format!("blk.{layer_idx}.ffn_gate.{exp_idx}.weight");
+                            let gguf_u = format!("blk.{layer_idx}.ffn_up.{exp_idx}.weight");
+                            let gguf_d = format!("blk.{layer_idx}.ffn_down.{exp_idx}.weight");
+
+                            if let (Ok(g_w), Ok(u_w), Ok(d_w)) = (
+                                self.get_weight_or_fallback(&[&gate_name, &alt_g, &gguf_g]),
+                                self.get_weight_or_fallback(&[&up_name, &alt_u, &gguf_u]),
+                                self.get_weight_or_fallback(&[&down_name, &alt_d, &gguf_d]),
+                            ) {
+                                let g = Self::matmul_linear(&tok_x, &g_w)?;
+                                let u = Self::matmul_linear(&tok_x, &u_w)?;
+                                let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
+                                let exp_act = (silu_g * u).map_err(LuminaError::Candle)?;
+                                let exp_out = Self::matmul_linear(&exp_act, &d_w)?;
+
+                                let weighted = (exp_out * (norm_w as f64)).map_err(LuminaError::Candle)?;
+                                tok_accum = match tok_accum {
+                                    Some(prev) => Some((prev + weighted).map_err(LuminaError::Candle)?),
+                                    None => Some(weighted),
+                                };
+                            }
+                        }
+                        out_tokens.push(tok_accum.unwrap_or_else(|| tok_x.clone()));
                     }
                 }
+
+                let token_refs: Vec<&Tensor> = out_tokens.iter().collect();
+                let stacked = Tensor::cat(&token_refs, 0)?;
+                accum_out = Some(stacked.reshape((b_sz, seq_len, hidden_dim))?);
             }
 
             // Shared experts (DeepSeek V3 / R1)
