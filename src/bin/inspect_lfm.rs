@@ -29,6 +29,14 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    println!("\n=== Layer Types across 24 layers ===");
+    for l in 0..24 {
+        let has_shortconv = keys.iter().any(|k| k == &format!("blk.{l}.shortconv.conv.weight"));
+        let has_attn = keys.iter().any(|k| k == &format!("blk.{l}.attn_q.weight"));
+        let has_moe = keys.iter().any(|k| k == &format!("blk.{l}.ffn_gate_exps.weight"));
+        println!("  Layer {:2}: conv={}, attn={}, moe={}", l, has_shortconv, has_attn, has_moe);
+    }
+
     println!("\n=== Global / Normalization tensors ===");
     for k in keys.iter().filter(|k| !k.starts_with("blk.")) {
         if let Some(info) = archive.raw_info(k) {
