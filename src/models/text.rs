@@ -1,7 +1,10 @@
 // [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Text model wrapper (encoders and CausalLM text generation)
 
 pub mod causal;
+pub mod llama;
+pub mod moe;
 pub mod phi;
+pub mod qwen;
 
 use candle_core::{DType, Device, Tensor};
 use crate::error::{LuminaError, Result};

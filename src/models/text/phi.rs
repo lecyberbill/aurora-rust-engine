@@ -1,6 +1,6 @@
 // [WFGY] Zone: SAFE | λ: 0.20 | Action: Dedicated Phi (Phi-3 / Phi-4) Transformer Block with native QMatMul support
 
-use candle_core::{Device, Module, Result as CandleResult, Tensor};
+use candle_core::{Device, Tensor};
 use crate::error::{LuminaError, Result};
 use crate::models::common::LinearLayer;
 use crate::models::text::causal::{CausalLMConfig, LayerKVCache};
@@ -34,7 +34,7 @@ impl PhiAttention {
     pub fn forward(
         &self,
         normed_x: &Tensor,
-        layer_idx: usize,
+        _layer_idx: usize,
         kv_cache: &mut LayerKVCache,
         pos: usize,
         seq_len: usize,

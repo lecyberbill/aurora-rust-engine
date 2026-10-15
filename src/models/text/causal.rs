@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use candle_core::{DType, Device, IndexOp, Result as CandleResult, Tensor};
-use candle_nn::{Embedding, Module, RmsNorm};
+use candle_nn::{Embedding, Module};
 use tokenizers::Tokenizer;
 
 use crate::error::{LuminaError, Result};
@@ -1548,12 +1548,9 @@ impl CausalLMPipeline {
                 phi_mlp.forward(&normed_post_x)?
             } else if let Ok(gate_l) = self.get_layer_linear(layer_idx, &["mlp.gate_proj.weight", "ffn_gate.weight"]) {
                 let up_l = self.get_layer_linear(layer_idx, &["mlp.up_proj.weight", "ffn_up.weight"])?;
-                let gate = gate_l.forward(&normed_post_x)?;
-                let up = up_l.forward(&normed_post_x)?;
                 let down_l = self.get_layer_linear(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
-                let silu_gate = candle_nn::ops::silu(&gate).map_err(LuminaError::Candle)?;
-                let mlp_act = (silu_gate * up).map_err(LuminaError::Candle)?;
-                down_l.forward(&mlp_act)?
+                let llama_mlp = super::llama::LlamaMlp::new(gate_l, up_l, down_l);
+                llama_mlp.forward(&normed_post_x)?
             } else {
                 return Err(LuminaError::MissingWeight(format!("FFN up/gate weight for layer {layer_idx} not found")));
             }
