@@ -274,6 +274,10 @@ pub struct TextGenParams {
     pub top_k: usize,
     pub repetition_penalty: f32,
     pub stop_tokens: Vec<u32>,
+    /// Optional number of transformer layers to offload onto GPU.
+    /// When None, all layers reside on GPU. When Some(N), layers 0..N are placed on GPU
+    /// and the remaining layers run on CPU, allowing large models (15B-27B) to fit on 8GB-12GB VRAM cards.
+    pub n_gpu_layers: Option<usize>,
 }
 
 impl Default for TextGenParams {
@@ -285,6 +289,7 @@ impl Default for TextGenParams {
             top_k: 40,
             repetition_penalty: 1.1,
             stop_tokens: vec![151643, 151645, 128001, 128009, 2, 1], // Common EOS across Qwen, Llama3, Gemma
+            n_gpu_layers: None,
         }
     }
 }
@@ -445,6 +450,8 @@ pub struct CausalLMPipeline {
     pub dtype: DType,
     pub kv_cache: KVCache,
     pub weights_cache: std::collections::HashMap<String, Tensor>,
+    /// Number of transformer layers offloaded to GPU (None = all layers on GPU)
+    pub n_gpu_layers: Option<usize>,
 }
 
 impl CausalLMPipeline {
@@ -466,7 +473,13 @@ impl CausalLMPipeline {
             dtype,
             kv_cache,
             weights_cache,
+            n_gpu_layers: None,
         }
+    }
+
+    /// Configure the number of layers offloaded to GPU (Layer Offloading)
+    pub fn set_n_gpu_layers(&mut self, n: Option<usize>) {
+        self.n_gpu_layers = n;
     }
 
     /// Format a multi-turn conversation into standard ChatML prompt format.
@@ -515,6 +528,10 @@ impl CausalLMPipeline {
 
         if prompt_tokens.is_empty() {
             return Ok(String::new());
+        }
+
+        if params.n_gpu_layers.is_some() {
+            self.n_gpu_layers = params.n_gpu_layers;
         }
 
         self.kv_cache.reset();
@@ -922,9 +939,18 @@ impl CausalLMPipeline {
             hidden = (hidden * normalizer).map_err(LuminaError::Candle)?;
         }
 
-        // 2. Transformer layers loop with KV-Cache
+        // 2. Transformer layers loop with KV-Cache and Dynamic Layer Offloading
         for layer_idx in 0..self.config.num_hidden_layers {
+            let layer_dev = self.device_for_layer(layer_idx);
+            if !hidden.device().same_device(&layer_dev) {
+                hidden = hidden.to_device(&layer_dev).map_err(LuminaError::Candle)?;
+            }
             hidden = self.forward_layer(layer_idx, &hidden, pos, seq_len)?;
+        }
+
+        // Transfer hidden back to primary pipeline device for final norm and LM head if offloaded
+        if !hidden.device().same_device(&self.device) {
+            hidden = hidden.to_device(&self.device).map_err(LuminaError::Candle)?;
         }
 
         // 3. Final layer norm
@@ -1006,7 +1032,7 @@ impl CausalLMPipeline {
                 let last_steps = if seq_len >= state_len {
                     bx.narrow(1, seq_len - state_len, state_len)?.transpose(1, 2)?
                 } else {
-                    let pad = Tensor::zeros((1, c_dim, state_len - seq_len), bx.dtype(), &self.device)?;
+                    let pad = Tensor::zeros((1, c_dim, state_len - seq_len), bx.dtype(), bx.device())?;
                     let cur = bx.transpose(1, 2)?;
                     Tensor::cat(&[&pad, &cur], 2)?
                 };
@@ -1015,7 +1041,7 @@ impl CausalLMPipeline {
                 // Full causal 1D convolution over sequence
                 let bx_trans = bx.transpose(1, 2)?; // [B, c_dim, S]
                 let padded_bx = if state_len > 0 {
-                    let pad = Tensor::zeros((bx.dim(0)?, c_dim, state_len), bx.dtype(), &self.device)?;
+                    let pad = Tensor::zeros((bx.dim(0)?, c_dim, state_len), bx.dtype(), bx.device())?;
                     Tensor::cat(&[&pad, &bx_trans], 2)?
                 } else {
                     bx_trans
@@ -1052,7 +1078,7 @@ impl CausalLMPipeline {
                 let conv_out = if seq_len == 1 {
                     // Step generation with rolling conv buffer
                     let prev_state = self.kv_cache.layers[layer_idx].ssm_conv_state.clone().unwrap_or_else(|| {
-                        Tensor::zeros((1, 10240, 3), projected.dtype(), &self.device).unwrap()
+                        Tensor::zeros((1, 10240, 3), projected.dtype(), projected.device()).unwrap()
                     });
                     let x_step = projected.transpose(1, 2)?; // [1, 10240, 1]
                     let full_window = Tensor::cat(&[&prev_state, &x_step], 2)?; // [1, 10240, 4]
@@ -1066,7 +1092,7 @@ impl CausalLMPipeline {
                     let last_steps = if seq_len >= 3 {
                         projected.narrow(1, seq_len - 3, 3)?.transpose(1, 2)?
                     } else {
-                        Tensor::zeros((1, 10240, 3), projected.dtype(), &self.device)?
+                        Tensor::zeros((1, 10240, 3), projected.dtype(), projected.device())?
                     };
                     self.kv_cache.layers[layer_idx].ssm_conv_state = Some(last_steps);
                     projected.clone()
@@ -1104,7 +1130,7 @@ impl CausalLMPipeline {
 
                 // SSM Recurrent update
                 let mut curr_state = self.kv_cache.layers[layer_idx].ssm_recurrent_state.clone().unwrap_or_else(|| {
-                    Tensor::zeros((1, 48, 128, 128), feat_slice.dtype(), &self.device).unwrap()
+                    Tensor::zeros((1, 48, 128, 128), feat_slice.dtype(), feat_slice.device()).unwrap()
                 });
 
                 if seq_len == 1 {
@@ -1224,7 +1250,7 @@ impl CausalLMPipeline {
 
             // Causal mask for prefill (supports sliding window)
             let att = if seq_len > 1 {
-                let mask = self.causal_mask(seq_len)?;
+                let mask = self.causal_mask(seq_len, att.device())?;
                 att.broadcast_add(&mask).map_err(LuminaError::Candle)?
             } else {
                 att
@@ -1586,14 +1612,15 @@ impl CausalLMPipeline {
     }
 
     fn apply_rope(&self, q: &Tensor, k: &Tensor, pos: usize, seq_len: usize) -> Result<(Tensor, Tensor)> {
+        let dev = q.device();
         let head_dim = self.config.head_dim;
         let positions: Vec<f32> = (pos..pos + seq_len).map(|p| p as f32).collect();
-        let pos_tensor = Tensor::new(&positions[..], &self.device)?.unsqueeze(1)?; // [S, 1]
+        let pos_tensor = Tensor::new(&positions[..], dev)?.unsqueeze(1)?; // [S, 1]
 
         let half_dim = head_dim / 2;
         let theta = self.config.rope_theta;
         let freqs: Vec<f32> = (0..half_dim).map(|i| 1.0f32 / theta.powf((2 * i) as f32 / head_dim as f32)).collect();
-        let freq_tensor = Tensor::new(&freqs[..], &self.device)?.unsqueeze(0)?; // [1, half_dim]
+        let freq_tensor = Tensor::new(&freqs[..], dev)?.unsqueeze(0)?; // [1, half_dim]
 
         let angles = pos_tensor.matmul(&freq_tensor).map_err(LuminaError::Candle)?; // [S, half_dim]
         let cos = angles.cos().map_err(LuminaError::Candle)?;
@@ -1619,7 +1646,7 @@ impl CausalLMPipeline {
         Ok((q_out, k_out))
     }
 
-    fn causal_mask(&self, seq_len: usize) -> Result<Tensor> {
+    fn causal_mask(&self, seq_len: usize, device: &Device) -> Result<Tensor> {
         let mut mask_vec = vec![0.0f32; seq_len * seq_len];
         let sliding_window = self.config.sliding_window;
         for i in 0..seq_len {
@@ -1633,7 +1660,7 @@ impl CausalLMPipeline {
                 }
             }
         }
-        let mask = Tensor::new(&mask_vec[..], &self.device)?.reshape((1, 1, seq_len, seq_len))?.to_dtype(self.dtype)?;
+        let mask = Tensor::new(&mask_vec[..], device)?.reshape((1, 1, seq_len, seq_len))?.to_dtype(self.dtype)?;
         Ok(mask)
     }
 
@@ -1654,7 +1681,22 @@ impl CausalLMPipeline {
         )))
     }
 
+    /// Resolve target device for a given transformer layer based on n_gpu_layers offloading configuration
+    pub fn device_for_layer(&self, layer_idx: usize) -> Device {
+        match self.n_gpu_layers {
+            Some(n) => {
+                if layer_idx < n {
+                    self.device.clone()
+                } else {
+                    Device::Cpu
+                }
+            }
+            None => self.device.clone(),
+        }
+    }
+
     fn get_layer_weight(&mut self, layer_idx: usize, suffixes: &[&str]) -> Result<Tensor> {
+        let layer_dev = self.device_for_layer(layer_idx);
         let prefixes = [
             format!("model.layers.{layer_idx}."),
             format!("layers.{layer_idx}."),
@@ -1664,10 +1706,16 @@ impl CausalLMPipeline {
             for suffix in suffixes {
                 let key = format!("{prefix}{suffix}");
                 if let Some(t) = self.weights_cache.get(&key) {
-                    return Ok(t.clone());
+                    if t.device().same_device(&layer_dev) {
+                        return Ok(t.clone());
+                    } else {
+                        let t_moved = t.to_device(&layer_dev).map_err(LuminaError::Candle)?;
+                        self.weights_cache.insert(key, t_moved.clone());
+                        return Ok(t_moved);
+                    }
                 }
                 if self.weights.contains(&key) {
-                    let t = self.weights.get_tensor(&key, &self.device, self.dtype)?;
+                    let t = self.weights.get_tensor(&key, &layer_dev, self.dtype)?;
                     self.weights_cache.insert(key, t.clone());
                     return Ok(t);
                 }

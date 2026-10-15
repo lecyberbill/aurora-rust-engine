@@ -37,13 +37,21 @@ fn main() -> anyhow::Result<()> {
     } else {
         0.7
     };
+    let n_gpu_layers: Option<usize> = if args.len() > 5 {
+        args[5].parse().ok()
+    } else {
+        None
+    };
+    if let Some(n) = n_gpu_layers {
+        std::env::set_var("N_GPU_LAYERS", n.to_string());
+    }
 
     println!("================================================================================");
     println!("🚀 Aurora Rust Engine — CausalLM Text Generation");
     println!("================================================================================");
     println!("📦 Loading Model: {}", model_path.display());
     println!("💬 Prompt: \"{}\"", prompt);
-    println!("⚙️  Params: max_tokens = {}, temp = {}", max_tokens, temperature);
+    println!("⚙️  Params: max_tokens = {}, temp = {}, n_gpu_layers = {:?}", max_tokens, temperature, n_gpu_layers);
 
     let device = match aurora_rust_engine::device::auto_device() {
         Ok(d) => {

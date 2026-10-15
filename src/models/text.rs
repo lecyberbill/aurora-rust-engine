@@ -123,6 +123,11 @@ impl GenerationModel for TextModel {
                 let mut params = TextGenParams::default();
                 params.max_tokens = max_tokens;
                 params.temperature = temperature;
+                if let Ok(n_str) = std::env::var("N_GPU_LAYERS") {
+                    if let Ok(n) = n_str.parse::<usize>() {
+                        params.n_gpu_layers = Some(n);
+                    }
+                }
                 let text = pipeline.generate(prompt, &params)?;
                 Ok((String::new(), text, 0.0))
             }
