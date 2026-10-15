@@ -449,6 +449,7 @@ fn resolve_tokenizer(weights: &Path, arch: &Architecture) -> Option<tokenizers::
         Architecture::Llama | Architecture::DeepSeek => vec!["llama_tokenizer.json", "tokenizer.json"],
         Architecture::Gemma => vec!["gemma_tokenizer.json", "tokenizer.json"],
         Architecture::Mistral3 => vec!["mistral_tokenizer.json", "tokenizer.json"],
+        Architecture::Lfm => vec!["lfm_tokenizer.json", "tokenizer.json"],
         _ => vec!["tokenizer.json"],
     };
     for c in candidates {
