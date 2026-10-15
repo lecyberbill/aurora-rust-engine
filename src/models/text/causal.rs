@@ -934,7 +934,7 @@ impl CausalLMPipeline {
         self.weights_cache.retain(|k, _| !prefixes.iter().any(|p| k.starts_with(p)));
 
         // 3. Final layer norm
-        let norm_w = self.get_weight_or_fallback(&["model.norm.weight", "output_norm.weight", "norm.weight"])?;
+        let norm_w = self.get_weight_or_fallback(&["model.norm.weight", "output_norm.weight", "norm.weight", "token_embd_norm.weight"])?;
         let hidden = self.apply_norm(&hidden, &norm_w)?;
 
         // 4. LM Head projection
