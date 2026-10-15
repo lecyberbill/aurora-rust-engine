@@ -38,9 +38,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     println!("\n=== Global / Normalization tensors ===");
-    for k in keys.iter().filter(|k| !k.starts_with("blk.")) {
-        if let Some(info) = archive.raw_info(k) {
-            println!("  {} -> shape: {:?}, dtype: {:?}", k, info.1, info.0);
+    for k in keys.iter() {
+        if !k.starts_with("blk.") || k.contains("output") || k.contains("norm") && !k.contains(".attn_") && !k.contains(".ffn_") {
+            if let Some(info) = archive.raw_info(k) {
+                println!("  {} -> shape: {:?}, dtype: {:?}", k, info.1, info.0);
+            }
         }
     }
 
