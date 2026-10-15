@@ -6,6 +6,7 @@ use std::time::Instant;
 
 #[cfg(feature = "rocm")]
 extern "C" {
+    #[allow(dead_code)]
     fn launch_wmma_gemv_q4k_rdna4(
         weights: *const std::ffi::c_void,
         x: *const std::ffi::c_void,

@@ -3,7 +3,8 @@ use candle_nn::VarBuilder;
 
 fn main() -> anyhow::Result<()> {
     println!("ROCm Device Probing:");
-    for _ord in 0..2 {
+    #[allow(unused_variables)]
+    for ord in 0..2 {
         #[cfg(feature = "rocm")]
         match Device::new_rocm(ord) {
             Ok(d) => {
