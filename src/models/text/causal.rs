@@ -1365,16 +1365,20 @@ impl CausalLMPipeline {
             let mut attn_out = o_l.forward(&out)?;
 
             // Gemma 2 / 3 applies post_attention_norm to attn_out before adding residual
-            if let Ok(post_attn_w) = self.get_layer_weight(layer_idx, &["post_attention_norm.weight"]) {
-                attn_out = self.apply_norm(&attn_out, &post_attn_w)?;
+            if self.config.is_gemma {
+                if let Ok(post_attn_w) = self.get_layer_weight(layer_idx, &["post_attention_norm.weight"]) {
+                    attn_out = self.apply_norm(&attn_out, &post_attn_w)?;
+                }
             }
 
             let x_res = (x + &attn_out).map_err(LuminaError::Candle)?;
             (attn_out, x_res)
         };
 
-        // Pre-feedforward layernorm (ffn_norm / post_attention_layernorm)
-        let ffn_norm_w = self.get_layer_weight(layer_idx, &["pre_feedforward_layernorm.weight", "ffn_norm.weight", "post_attention_layernorm.weight"])?;
+        // Pre-feedforward layernorm
+        // In Qwen/Llama, post_attention_norm.weight is the FFN pre-norm.
+        // In Gemma 2/3, post_attention_norm is applied to attn_out, and ffn_norm.weight / pre_feedforward_layernorm.weight is the FFN pre-norm.
+        let ffn_norm_w = self.get_layer_weight(layer_idx, &["pre_feedforward_layernorm.weight", "ffn_norm.weight", "post_attention_layernorm.weight", "post_attention_norm.weight"])?;
         let normed_post_x = self.apply_norm(&x, &ffn_norm_w)?;
 
         // Check if this layer is MoE (DeepSeek / Mixtral)
