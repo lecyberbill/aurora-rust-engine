@@ -23,6 +23,11 @@ pub enum TextBackend {
         tokenizer: Option<tokenizers::Tokenizer>,
         device: Device,
     },
+    QuantizedQwen3 {
+        model: crate::models::quantized_qwen3::ModelWeights,
+        tokenizer: Option<tokenizers::Tokenizer>,
+        device: Device,
+    },
 }
 
 impl TextBackend {
@@ -31,6 +36,7 @@ impl TextBackend {
             TextBackend::Qwen(_) | TextBackend::Mistral(_) | TextBackend::T5(_) => &Device::Cpu,
             TextBackend::CausalLM(c) => &c.device,
             TextBackend::QuantizedGemma3 { device, .. } => device,
+            TextBackend::QuantizedQwen3 { device, .. } => device,
         }
     }
 
@@ -39,6 +45,7 @@ impl TextBackend {
             TextBackend::Qwen(_) | TextBackend::Mistral(_) | TextBackend::T5(_) => DType::F16,
             TextBackend::CausalLM(c) => c.dtype,
             TextBackend::QuantizedGemma3 { .. } => DType::F32,
+            TextBackend::QuantizedQwen3 { .. } => DType::F32,
         }
     }
 }
@@ -65,6 +72,9 @@ impl TextModel {
     pub fn quantized_gemma3(id: String, model: crate::models::quantized_gemma3::ModelWeights, tokenizer: Option<tokenizers::Tokenizer>, device: Device) -> Self {
         Self { id, family: "gemma".into(), inner: TextBackend::QuantizedGemma3 { model, tokenizer, device } }
     }
+    pub fn quantized_qwen3(id: String, model: crate::models::quantized_qwen3::ModelWeights, tokenizer: Option<tokenizers::Tokenizer>, device: Device) -> Self {
+        Self { id, family: "qwen3".into(), inner: TextBackend::QuantizedQwen3 { model, tokenizer, device } }
+    }
 
     pub fn as_causal_lm_mut(&mut self) -> Option<&mut CausalLMPipeline> {
         match &mut self.inner {
@@ -78,6 +88,8 @@ impl AnyModel for TextModel {
     fn kind(&self) -> ModelKind {
         match &self.inner {
             TextBackend::CausalLM(_) => ModelKind::Text,
+            TextBackend::QuantizedGemma3 { .. } => ModelKind::Text,
+            TextBackend::QuantizedQwen3 { .. } => ModelKind::Text,
             _ => ModelKind::TextEncoder,
         }
     }
@@ -184,6 +196,56 @@ impl GenerationModel for TextModel {
                     let step_logits = model.forward(&inp, tokens.len() + i)?;
                     let step_last = step_logits.squeeze(0)?;
                     let step_vec = step_last.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+                    let mut t: Vec<_> = step_vec.iter().enumerate().collect();
+                    t.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    curr_tok = t[0].0 as u32;
+                    generated.push(curr_tok);
+                }
+
+                let text = tok.decode(&generated, true).map_err(|e| {
+                    LuminaError::Context {
+                        context: "Failed to decode generated token stream".into(),
+                        source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                    }
+                })?;
+                Ok((String::new(), text.trim().to_string(), 0.0))
+            }
+            TextBackend::QuantizedQwen3 { model, tokenizer, device } => {
+                let tok = tokenizer.as_ref().ok_or_else(|| {
+                    LuminaError::Config("Tokenizer not attached to QuantizedQwen3 model".into())
+                })?;
+
+                let formatted_prompt = if prompt.contains("<|im_start|>") {
+                    prompt.to_string()
+                } else {
+                    format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n", prompt.trim())
+                };
+
+                let tokens = tok.encode(formatted_prompt, true).map_err(|e| {
+                    LuminaError::Context {
+                        context: "Failed to tokenize prompt for Qwen3".into(),
+                        source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                    }
+                })?.get_ids().to_vec();
+
+                model.clear_kv_cache();
+                let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
+                let logits = model.forward(&input, 0)?;
+                let l_vec = logits.squeeze(0)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+
+                let mut top: Vec<_> = l_vec.iter().enumerate().collect();
+                top.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let mut curr_tok = top[0].0 as u32;
+                let mut generated = vec![curr_tok];
+
+                for i in 0..max_tokens {
+                    // Qwen3 stop tokens: <|endoftext|>=151643, <|im_end|>=151645
+                    if curr_tok == 151643 || curr_tok == 151645 {
+                        break;
+                    }
+                    let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
+                    let step_logits = model.forward(&inp, tokens.len() + i)?;
+                    let step_vec = step_logits.squeeze(0)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
                     let mut t: Vec<_> = step_vec.iter().enumerate().collect();
                     t.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
                     curr_tok = t[0].0 as u32;

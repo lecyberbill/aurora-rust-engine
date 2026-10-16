@@ -405,7 +405,37 @@ fn build_text(
                 Ok(TextModel::causal_lm(id, arch.slug(), pipeline))
             }
         }
-        Architecture::Llama | Architecture::DeepSeek | Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Lfm | Architecture::Phi => {
+        Architecture::Qwen3 => {
+            // Genuinely Qwen3-family GGUFs (`general.architecture = qwen3`) are served by
+            // Candle's official quantized_qwen3. Other "qwen*" models (e.g. qwen35 hybrid)
+            // fall back to the generic CausalLM path.
+            let is_qwen3_gguf = archive
+                .metadata("general.architecture")
+                .map(|a| a.eq_ignore_ascii_case("qwen3"))
+                .unwrap_or(false);
+            let tokenizer = resolve_tokenizer(weights, arch);
+            if is_qwen3_gguf {
+                let mut file = std::fs::File::open(weights)?;
+                let content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
+                let model = crate::models::quantized_qwen3::ModelWeights::from_gguf(
+                    content,
+                    &mut file,
+                    &device,
+                )?;
+                Ok(TextModel::quantized_qwen3(id, model, tokenizer, device.clone()))
+            } else {
+                let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
+                let pipeline = crate::models::text::CausalLMPipeline::new(
+                    archive,
+                    config,
+                    tokenizer,
+                    device.clone(),
+                    dtype,
+                );
+                Ok(TextModel::causal_lm(id, arch.slug(), pipeline))
+            }
+        }
+        Architecture::Llama | Architecture::DeepSeek | Architecture::Mistral3 | Architecture::Lfm | Architecture::Phi => {
             let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
             let tokenizer = resolve_tokenizer(weights, arch);
             let pipeline = crate::models::text::CausalLMPipeline::new(

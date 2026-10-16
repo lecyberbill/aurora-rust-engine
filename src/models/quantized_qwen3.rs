@@ -1,0 +1,660 @@
+// [WFGY] Zone: SAFE | Fallbacks: 0 | Action: ROCm-safe vendored quantized Qwen3 (bypasses Candle rms_norm/rotary gaps)
+//!
+//! This is Candle's `quantized_qwen3` vendored into the engine, with a cast-safe
+//! `RmsNorm` (F32 accumulate) to work around ROCm kernel dtype strictness — the same
+//! workaround already applied to `quantized_gemma3`. Only `RmsNorm`, `repeat_kv` and
+//! `build_additive_causal_mask` are vendored; the flash/kv-cache kernels come from the
+//! public `candle_nn` fork API.
+
+pub fn rms_norm(x: &Tensor, eps: f64) -> Result<Tensor> {
+    let last_dim = x.dims().len() - 1;
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let sq = x_f32.sqr()?;
+    let mean = sq.mean_keepdim(last_dim)?;
+    let rms = (mean + eps)?.sqrt()?;
+    let norm = x_f32.broadcast_div(&rms)?;
+    norm.to_dtype(x.dtype())
+}
+
+#[derive(Debug, Clone)]
+pub struct RmsNorm {
+    weight: Tensor,
+    eps: f64,
+}
+
+impl RmsNorm {
+    pub fn from_qtensor(weight: QTensor, eps: f64) -> Result<Self> {
+        let weight = weight.dequantize(&weight.device())?;
+        Ok(Self { weight, eps })
+    }
+
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // Universal RMSNorm safe on CPU, CUDA and ROCm (explicit F32 math).
+        let norm = rms_norm(x, self.eps)?;
+        let scaled = norm
+            .to_dtype(DType::F32)?
+            .broadcast_mul(&self.weight.to_dtype(DType::F32)?)?;
+        scaled.to_dtype(x.dtype())
+    }
+}
+
+pub fn repeat_kv(xs: Tensor, n_rep: usize) -> Result<Tensor> {
+    if n_rep == 1 {
+        Ok(xs)
+    } else {
+        let (b_sz, n_kv_head, seq_len, head_dim) = xs.dims4()?;
+        Tensor::cat(&vec![&xs; n_rep], 2)?.reshape((b_sz, n_kv_head * n_rep, seq_len, head_dim))
+    }
+}
+
+pub fn build_additive_causal_mask(
+    tgt: usize,
+    offset: usize,
+    sw: Option<usize>,
+    device: &Device,
+    dtype: DType,
+) -> Result<Tensor> {
+    let minf = f32::NEG_INFINITY;
+    let mask: Vec<_> = (0..tgt)
+        .flat_map(|i| {
+            (0..(tgt + offset)).map(move |j| {
+                let past_ok = j <= i + offset;
+                let sw_ok = match sw {
+                    Some(w) => j + w >= i + offset,
+                    None => true,
+                };
+                if past_ok && sw_ok {
+                    0.
+                } else {
+                    minf
+                }
+            })
+        })
+        .collect();
+    Tensor::from_slice(&mask, (1, 1, tgt, tgt + offset), device)?.to_dtype(dtype)
+}
+
+/// ROCm-safe (F32) rotary embedding, HF rotate_half convention.
+pub fn rope(i: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+    let dim = i.dim(3)?;
+    let half = dim / 2;
+    let x_f32 = i.to_dtype(DType::F32)?;
+    let cos_full = Tensor::cat(&[cos, cos], 1)?.unsqueeze(0)?.unsqueeze(1)?;
+    let sin_full = Tensor::cat(&[sin, sin], 1)?.unsqueeze(0)?.unsqueeze(1)?;
+    let x1 = x_f32.narrow(3, 0, half)?;
+    let x2 = x_f32.narrow(3, half, half)?;
+    let x_rot = Tensor::cat(&[&(x2.neg()?), &x1], 3)?;
+    let out = (x_f32.broadcast_mul(&cos_full)? + x_rot.broadcast_mul(&sin_full)?)?;
+    out.to_dtype(i.dtype())
+}
+
+/// ROCm-safe (F32) softmax over the last dimension.
+pub fn softmax_last_dim(x: &Tensor) -> Result<Tensor> {
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let max = x_f32.max_keepdim(candle_core::D::Minus1)?;
+    let shifted = x_f32.broadcast_sub(&max)?;
+    let exp = shifted.exp()?;
+    let sum = exp.sum_keepdim(candle_core::D::Minus1)?;
+    let out = exp.broadcast_div(&sum)?;
+    out.to_dtype(x.dtype())
+}
+
+use candle_core::quantized::QMatMul;
+use candle_core::quantized::{gguf_file, QTensor};
+use candle_core::{DType, Device, Result, Storage, Tensor};
+use candle_nn::attention::cpu_flash::causal::causal_decode_f32_interleaved;
+use candle_nn::attention::{flash_attn, AttnMask};
+use candle_nn::kv_cache::{ConcatKvCache, InterleavedKvCache, RawInterleavedKvCache};
+use candle_nn::{Activation, Embedding, Module};
+use std::io::{Read, Seek};
+use std::sync::Arc;
+
+pub struct Gguf<R: Read + Seek> {
+    ct: gguf_file::Content,
+    reader: R,
+    device: Device,
+}
+
+impl<R: Read + Seek> Gguf<R> {
+    pub fn new(ct: gguf_file::Content, reader: R, device: Device) -> Self {
+        Self { ct, reader, device }
+    }
+
+    pub fn qmatmul(&mut self, name: &str) -> Result<QMatMul> {
+        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
+        QMatMul::from_qtensor(ws)
+    }
+
+    pub fn rms_norm(&mut self, name: &str, eps: f64) -> Result<RmsNorm> {
+        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
+        RmsNorm::from_qtensor(ws, eps)
+    }
+
+    pub fn metadata(&self) -> &std::collections::HashMap<String, gguf_file::Value> {
+        &self.ct.metadata
+    }
+
+    pub fn tensor(&mut self, name: &str) -> Result<QTensor> {
+        self.ct.tensor(&mut self.reader, name, &self.device)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MlpWeights {
+    gate_proj: QMatMul,
+    up_proj: QMatMul,
+    down_proj: QMatMul,
+    act_fn: Activation,
+    span: tracing::Span,
+}
+
+impl MlpWeights {
+    fn new<R: Read + Seek>(gg: &mut Gguf<R>, prefix: &str) -> Result<Self> {
+        let gate_proj = gg.qmatmul(&format!("{prefix}.ffn_gate.weight"))?;
+        let up_proj = gg.qmatmul(&format!("{prefix}.ffn_up.weight"))?;
+        let down_proj = gg.qmatmul(&format!("{prefix}.ffn_down.weight"))?;
+        let act_fn = Activation::Silu;
+        let span = tracing::span!(tracing::Level::TRACE, "mlp");
+        Ok(Self {
+            gate_proj,
+            up_proj,
+            down_proj,
+            act_fn,
+            span,
+        })
+    }
+}
+
+impl Module for MlpWeights {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let _enter = self.span.enter();
+        let gate = self.gate_proj.forward(x)?.apply(&self.act_fn)?;
+        let up = self.up_proj.forward(x)?;
+        let gated = (gate * up)?;
+        self.down_proj.forward(&gated)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RotaryEmbedding {
+    sin: Tensor,
+    cos: Tensor,
+    /// Pre-extracted flat f32 cos/sin for fused decode (zero allocation)
+    cos_f32: Vec<f32>,
+    sin_f32: Vec<f32>,
+    half_d: usize,
+}
+
+impl RotaryEmbedding {
+    pub fn new(
+        dtype: DType,
+        head_dim: usize,
+        max_position_embeddings: usize,
+        rope_theta: f64,
+        dev: &Device,
+    ) -> Result<Self> {
+        let dim = head_dim;
+        let max_seq_len = max_position_embeddings;
+        let inv_freq: Vec<_> = (0..dim)
+            .step_by(2)
+            .map(|i| 1f32 / rope_theta.powf(i as f64 / dim as f64) as f32)
+            .collect();
+        let inv_freq_len = inv_freq.len();
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
+        let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
+            .to_dtype(dtype)?
+            .reshape((max_seq_len, 1))?;
+        let freqs = t.matmul(&inv_freq)?;
+        let sin_t = freqs.sin()?;
+        let cos_t = freqs.cos()?;
+        let cos_f32 = cos_t
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let sin_f32 = sin_t
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        Ok(Self {
+            sin: sin_t,
+            cos: cos_t,
+            cos_f32,
+            sin_f32,
+            half_d: dim / 2,
+        })
+    }
+
+    /// Apply RoPE (q, k shape: B x H x L x D)
+    pub fn apply(&self, q: &Tensor, k: &Tensor, offset: usize) -> Result<(Tensor, Tensor)> {
+        let (_, _, seq_len, _) = q.dims4()?;
+        let cos = self.cos.narrow(0, offset, seq_len)?.to_dtype(q.dtype())?;
+        let sin = self.sin.narrow(0, offset, seq_len)?.to_dtype(q.dtype())?;
+        let q_embed = rope(&q.contiguous()?, &cos, &sin)?;
+        let k_embed = rope(&k.contiguous()?, &cos, &sin)?;
+        Ok((q_embed, k_embed))
+    }
+
+    /// Zero-allocation cos/sin slices for a single position.
+    #[inline]
+    pub fn cos_sin_at(&self, pos: usize) -> (&[f32], &[f32]) {
+        let start = pos * self.half_d;
+        let end = start + self.half_d;
+        (&self.cos_f32[start..end], &self.sin_f32[start..end])
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AttentionWeights {
+    q_proj: QMatMul,
+    k_proj: QMatMul,
+    v_proj: QMatMul,
+    o_proj: QMatMul,
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
+    num_heads: usize,
+    num_kv_heads: usize,
+    num_kv_groups: usize,
+    head_dim: usize,
+    hidden_size: usize,
+    rotary_emb: Arc<RotaryEmbedding>,
+    kv_cache: Option<ConcatKvCache>,
+    interleaved_cache: Option<InterleavedKvCache>,
+    raw_cache: Option<RawInterleavedKvCache>,
+    span_attn: tracing::Span,
+}
+
+impl AttentionWeights {
+    #[allow(clippy::too_many_arguments)]
+    fn new<R: Read + Seek>(
+        gg: &mut Gguf<R>,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        rms_norm_eps: f64,
+        rotary_emb: Arc<RotaryEmbedding>,
+        device: &Device,
+        prefix: &str,
+    ) -> Result<Self> {
+        let num_kv_groups = num_heads / num_kv_heads;
+        let hidden_size = num_heads * head_dim;
+
+        let q_proj = gg.qmatmul(&format!("{prefix}.attn_q.weight"))?;
+        let k_proj = gg.qmatmul(&format!("{prefix}.attn_k.weight"))?;
+        let v_proj = gg.qmatmul(&format!("{prefix}.attn_v.weight"))?;
+        let o_proj = gg.qmatmul(&format!("{prefix}.attn_output.weight"))?;
+
+        let q_norm = gg.rms_norm(&format!("{prefix}.attn_q_norm.weight"), rms_norm_eps)?;
+        let k_norm = gg.rms_norm(&format!("{prefix}.attn_k_norm.weight"), rms_norm_eps)?;
+
+        // CPU: use interleaved + raw caches for flash attention
+        // GPU: use standard concat KV cache (fallback path)
+        let on_cpu = device.is_cpu();
+        let kv_cache = if on_cpu {
+            None
+        } else {
+            Some(ConcatKvCache::new(2))
+        };
+        let interleaved_cache = if on_cpu {
+            Some(InterleavedKvCache::new(head_dim))
+        } else {
+            None
+        };
+        let raw_cache = if on_cpu {
+            Some(RawInterleavedKvCache::new(num_kv_heads, head_dim, 4096))
+        } else {
+            None
+        };
+
+        let span_attn = tracing::span!(tracing::Level::TRACE, "attn");
+
+        Ok(Self {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            q_norm,
+            k_norm,
+            num_heads,
+            num_kv_heads,
+            num_kv_groups,
+            head_dim,
+            hidden_size,
+            rotary_emb,
+            kv_cache,
+            interleaved_cache,
+            raw_cache,
+            span_attn,
+        })
+    }
+
+    fn forward(&mut self, x: &Tensor, attn_mask: Option<&Tensor>, offset: usize) -> Result<Tensor> {
+        let _enter = self.span_attn.enter();
+        let (b, l, _) = x.dims3()?;
+
+        // QKV projections
+        let q = self.q_proj.forward(x)?;
+        let k = self.k_proj.forward(x)?;
+        let v = self.v_proj.forward(x)?;
+
+        let q = q
+            .reshape((b, l, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let k = k
+            .reshape((b, l, self.num_kv_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let v = v
+            .reshape((b, l, self.num_kv_heads, self.head_dim))?
+            .transpose(1, 2)?;
+
+        // Per-head Q/K norms (must stay as tensor ops)
+        let q_flat = q.flatten(0, 2)?;
+        let k_flat = k.flatten(0, 2)?;
+        let q_flat = self.q_norm.forward(&q_flat)?;
+        let k_flat = self.k_norm.forward(&k_flat)?;
+        let q = q_flat.reshape((b, self.num_heads, l, self.head_dim))?;
+        let k = k_flat.reshape((b, self.num_kv_heads, l, self.head_dim))?;
+
+        // RoPE
+        let (q, k) = self.rotary_emb.apply(&q, &k, offset)?;
+
+        // TODO: b > 1 needs varlen CPU flash with interleaved cache support.
+        if x.device().is_cpu() && b == 1 {
+            let scale = 1.0 / (self.head_dim as f32).sqrt();
+
+            if l == 1 && b == 1 && q.dtype() == DType::F32 {
+                // Fused decode: raw slices -> raw cache -> kernel.
+                let q_cont = q.squeeze(0)?.squeeze(1)?.contiguous()?;
+                let (q_g, q_l) = q_cont.storage_and_layout();
+                let q_data: &[f32] = match &*q_g {
+                    Storage::Cpu(cpu) => &cpu.as_slice::<f32>()?[q_l.start_offset()..],
+                    _ => candle_core::bail!("Expected CPU storage"),
+                };
+
+                let k_cont = k.squeeze(0)?.squeeze(1)?.contiguous()?;
+                let (k_g, k_l) = k_cont.storage_and_layout();
+                let k_data: &[f32] = match &*k_g {
+                    Storage::Cpu(cpu) => &cpu.as_slice::<f32>()?[k_l.start_offset()..],
+                    _ => candle_core::bail!("Expected CPU storage"),
+                };
+
+                let v_cont = v.squeeze(0)?.squeeze(1)?.contiguous()?;
+                let (v_g, v_l) = v_cont.storage_and_layout();
+                let v_data: &[f32] = match &*v_g {
+                    Storage::Cpu(cpu) => &cpu.as_slice::<f32>()?[v_l.start_offset()..],
+                    _ => candle_core::bail!("Expected CPU storage"),
+                };
+
+                // Write K, V into raw cache (no tensor allocation)
+                let k_len = self.num_kv_heads * self.head_dim;
+                let rc = self.raw_cache.as_mut().unwrap();
+                rc.write_kv(&k_data[..k_len], &v_data[..k_len]);
+
+                // Run interleaved decode kernel
+                let kv_len = rc.len();
+                let q_len = self.num_heads * self.head_dim;
+                let ctx = causal_decode_f32_interleaved(
+                    &q_data[..q_len],
+                    rc.data(),
+                    self.num_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    kv_len,
+                    scale,
+                )?;
+
+                ctx.reshape((b, l, self.hidden_size))?.apply(&self.o_proj)
+            } else {
+                // Prefill: interleaved cache + flash_attn; also populate raw cache for decode.
+                let ic = self.interleaved_cache.as_mut().unwrap();
+                let kv = ic.append(&k, &v)?;
+
+                // Populate raw cache for subsequent decode steps
+                {
+                    let k_cont = k.squeeze(0)?.transpose(0, 1)?.contiguous()?;
+                    let v_cont = v.squeeze(0)?.transpose(0, 1)?.contiguous()?;
+                    let (kg, kl) = k_cont.storage_and_layout();
+                    let k_d: &[f32] = match &*kg {
+                        Storage::Cpu(cpu) => &cpu.as_slice::<f32>()?[kl.start_offset()..],
+                        _ => candle_core::bail!("Expected CPU"),
+                    };
+                    let (vg, vl) = v_cont.storage_and_layout();
+                    let v_d: &[f32] = match &*vg {
+                        Storage::Cpu(cpu) => &cpu.as_slice::<f32>()?[vl.start_offset()..],
+                        _ => candle_core::bail!("Expected CPU"),
+                    };
+                    self.raw_cache.as_mut().unwrap().write_kv_batch(k_d, v_d, l);
+                }
+
+                let kv_k = kv.narrow(2, 0, self.head_dim)?.unsqueeze(0)?;
+                let kv_v = kv.narrow(2, self.head_dim, self.head_dim)?.unsqueeze(0)?;
+
+                let q = q.transpose(1, 2)?.contiguous()?;
+                let k = kv_k.contiguous()?;
+                let v = kv_v.contiguous()?;
+
+                let ctx = flash_attn::<f32>(
+                    &q,
+                    &k,
+                    &v,
+                    scale,
+                    AttnMask::causal_with_offset(offset),
+                    None,
+                    None,
+                )?;
+                let ctx = ctx.transpose(1, 2)?;
+                ctx.reshape((b, l, self.hidden_size))?.apply(&self.o_proj)
+            }
+        } else {
+            // Standard matmul attention (no flash)
+            let (k, v) = self.kv_cache.as_mut().unwrap().append(&k, &v)?;
+
+            let k = repeat_kv(k, self.num_kv_groups)?.contiguous()?;
+            let v = repeat_kv(v, self.num_kv_groups)?.contiguous()?;
+
+            let scale = 1.0 / (self.head_dim as f64).sqrt();
+            let mut scores = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+            if let Some(m) = attn_mask {
+                let scores_dtype = scores.dtype();
+                let mask = if m.dtype() != scores_dtype {
+                    m.to_dtype(scores_dtype)?
+                } else {
+                    m.clone()
+                };
+                scores = scores.broadcast_add(&mask)?;
+            }
+            let probs = softmax_last_dim(&scores)?;
+            let ctx = probs.matmul(&v)?;
+            let reshaped_ctx = ctx.transpose(1, 2)?.reshape((b, l, self.hidden_size))?;
+            self.o_proj.forward(&reshaped_ctx)
+        }
+    }
+
+    fn clear_kv_cache(&mut self) {
+        if let Some(c) = &mut self.kv_cache {
+            c.reset();
+        }
+        if let Some(c) = &mut self.interleaved_cache {
+            c.reset();
+        }
+        if let Some(c) = &mut self.raw_cache {
+            c.reset();
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LayerWeights {
+    self_attn: AttentionWeights,
+    mlp: MlpWeights,
+    ln1: RmsNorm,
+    ln2: RmsNorm,
+}
+
+impl LayerWeights {
+    #[allow(clippy::too_many_arguments)]
+    fn new<R: Read + Seek>(
+        gg: &mut Gguf<R>,
+        num_attention_heads: usize,
+        num_key_value_heads: usize,
+        head_dim: usize,
+        rms_norm_eps: f64,
+        rotary: Arc<RotaryEmbedding>,
+        device: &Device,
+        layer_idx: usize,
+    ) -> Result<Self> {
+        let prefix = format!("blk.{layer_idx}");
+
+        let ln1 = gg.rms_norm(&format!("{prefix}.attn_norm.weight"), rms_norm_eps)?;
+        let ln2 = gg.rms_norm(&format!("{prefix}.ffn_norm.weight"), rms_norm_eps)?;
+        let self_attn = AttentionWeights::new(
+            gg,
+            num_attention_heads,
+            num_key_value_heads,
+            head_dim,
+            rms_norm_eps,
+            rotary,
+            device,
+            &prefix,
+        )?;
+        let mlp = MlpWeights::new(gg, &prefix)?;
+        Ok(Self {
+            self_attn,
+            mlp,
+            ln1,
+            ln2,
+        })
+    }
+
+    fn forward(&mut self, x: &Tensor, mask: Option<&Tensor>, offset: usize) -> Result<Tensor> {
+        let h = self.ln1.forward(x)?;
+        let h = self.self_attn.forward(&h, mask, offset)?;
+        let x = (x + h)?;
+        let h2 = self.ln2.forward(&x)?;
+        let h2 = h2.apply(&self.mlp)?;
+        x + h2
+    }
+
+    fn clear_kv_cache(&mut self) {
+        self.self_attn.clear_kv_cache();
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelWeights {
+    embed_tokens: Embedding,
+    layers: Vec<LayerWeights>,
+    norm: RmsNorm,
+    lm_head: QMatMul,
+    device: Device,
+    dtype: DType,
+    span: tracing::Span,
+    span_output: tracing::Span,
+}
+
+impl ModelWeights {
+    pub fn from_gguf<R: Read + Seek>(
+        ct: gguf_file::Content,
+        reader: &mut R,
+        device: &Device,
+    ) -> Result<Self> {
+        let mut gg = Gguf::new(ct, reader, device.clone());
+        let md_get = |s: &str| match gg.metadata().get(s) {
+            None => candle_core::bail!("cannot find {s} in metadata"),
+            Some(v) => Ok(v),
+        };
+
+        let num_attention_heads = md_get("qwen3.attention.head_count")?.to_u32()? as usize;
+        let num_kv_heads = md_get("qwen3.attention.head_count_kv")?.to_u32()? as usize;
+        let head_dim = md_get("qwen3.attention.key_length")?.to_u32()? as usize;
+        let num_layers = md_get("qwen3.block_count")?.to_u32()? as usize;
+        let hidden_size = md_get("qwen3.embedding_length")?.to_u32()? as usize;
+        let max_position_embeddings = md_get("qwen3.context_length")?.to_u32()? as usize;
+        let rms_norm_eps = md_get("qwen3.attention.layer_norm_rms_epsilon")?.to_f32()? as f64;
+        let rope_freq_base = md_get("qwen3.rope.freq_base")?.to_f32()? as f64;
+
+        let dtype = match gg.metadata().get("general.dtype") {
+            Some(v) => match v.to_u32() {
+                Ok(0) => DType::F32,
+                Ok(1) => DType::F16,
+                _ => DType::F16,
+            },
+            None => DType::F16,
+        };
+
+        let embed_tensor = gg.tensor("token_embd.weight")?;
+        let embed_tokens = Embedding::new(embed_tensor.dequantize(device)?, hidden_size);
+
+        let rotary = Arc::new(RotaryEmbedding::new(
+            dtype,
+            head_dim,
+            max_position_embeddings,
+            rope_freq_base,
+            device,
+        )?);
+
+        let mut layers = Vec::with_capacity(num_layers);
+        for i in 0..num_layers {
+            layers.push(LayerWeights::new(
+                &mut gg,
+                num_attention_heads,
+                num_kv_heads,
+                head_dim,
+                rms_norm_eps,
+                rotary.clone(),
+                device,
+                i,
+            )?);
+        }
+
+        let norm = gg.rms_norm("output_norm.weight", rms_norm_eps)?;
+        // Load output projection tensor, falling back to tied embeddings like gemma3
+        let lm_head_tensor = match gg.tensor("output.weight") {
+            Ok(tensor) => tensor,
+            Err(_) => gg.tensor("token_embd.weight")?,
+        };
+        let lm_head = QMatMul::from_qtensor(lm_head_tensor)?;
+        let span = tracing::span!(tracing::Level::TRACE, "model");
+        let span_output = tracing::span!(tracing::Level::TRACE, "output");
+        Ok(Self {
+            embed_tokens,
+            layers,
+            norm,
+            lm_head,
+            device: device.clone(),
+            dtype,
+            span,
+            span_output,
+        })
+    }
+
+    pub fn forward(&mut self, input: &Tensor, offset: usize) -> Result<Tensor> {
+        let _enter = self.span.enter();
+        let (_b, l) = input.dims2()?;
+        let mut h = self.embed_tokens.forward(input)?;
+        // Skip mask materialization when using CPU flash attention
+        let causal_mask = if l == 1 || self.device.is_cpu() {
+            None
+        } else {
+            Some(build_additive_causal_mask(
+                l,
+                offset,
+                None,
+                &self.device,
+                self.dtype,
+            )?)
+        };
+        for layer in &mut self.layers {
+            h = layer.forward(&h, causal_mask.as_ref(), offset)?;
+        }
+        let h = self.norm.forward(&h)?;
+        let _enter = self.span_output.enter();
+        let last_hidden = h.narrow(1, l - 1, 1)?;
+        self.lm_head.forward(&last_hidden)?.squeeze(1)
+    }
+
+    pub fn clear_kv_cache(&mut self) {
+        for layer in &mut self.layers {
+            layer.clear_kv_cache();
+        }
+    }
+}
