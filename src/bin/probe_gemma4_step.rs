@@ -11,7 +11,7 @@ fn main() -> anyhow::Result<()> {
     let mut file = File::open("/models/llm/gemma-4-31B-it-UD-Q4_K_XL.gguf")?;
     let content = gguf_file::Content::read(&mut file)?;
     let mut model = aurora_rust_engine::models::quantized_gemma3::ModelWeights::from_gguf(content, &mut file, &dev)?;
-    let tokenizer = Tokenizer::from_file("gemma_tokenizer.json")
+    let tokenizer = Tokenizer::from_file("gemma4_tokenizer.json")
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let prompt = "<|turn>user\nExplain quantum computing in one sentence.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>";
