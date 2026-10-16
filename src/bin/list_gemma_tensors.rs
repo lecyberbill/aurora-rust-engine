@@ -9,9 +9,8 @@ fn main() -> anyhow::Result<()> {
     let mut keys: Vec<_> = content.tensor_infos.keys().cloned().collect();
     keys.sort();
     for k in keys {
-        if k.contains("blk.5.") || k.contains("blk.11.") || !k.contains("blk.") {
-            let info = &content.tensor_infos[&k];
-            println!("{k} => shape: {:?}, dtype: {:?}", info.shape.dims(), info.ggml_dtype);
+        if k.contains("attn_v") || k.contains("attn_k") {
+            println!("{k}");
         }
     }
     Ok(())
