@@ -20,6 +20,7 @@ pub mod esrgan;
 pub mod image;
 pub mod moonshine;
 pub mod musicgen;
+pub mod ops;
 pub mod registry;
 pub mod stable_audio;
 pub mod stable_audio_dit;

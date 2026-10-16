@@ -16,35 +16,7 @@ pub const DEFAULT_ROPE_FREQUENCY: f32 = 1_000_000.;
 pub const DEFAULT_ROPE_FREQUENCY_SLIDING: f32 = 10_000.;
 pub const DEFAULT_ROPE_FREQUENCY_SCALE_FACTOR: f32 = 1.;
 
-pub fn rms_norm(x: &Tensor, eps: f64) -> Result<Tensor> {
-    let last_dim = x.dims().len() - 1;
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let sq = x_f32.sqr()?;
-    let mean = sq.mean_keepdim(last_dim)?;
-    let rms = (mean + eps)?.sqrt()?;
-    let norm = x_f32.broadcast_div(&rms)?;
-    norm.to_dtype(x.dtype())
-}
-
-#[derive(Debug, Clone)]
-pub struct RmsNorm {
-    weight: Tensor,
-    eps: f64,
-}
-
-impl RmsNorm {
-    pub fn from_qtensor(weight: QTensor, eps: f64) -> Result<Self> {
-        let weight = weight.dequantize(&weight.device())?;
-        Ok(Self { weight, eps })
-    }
-
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Universal RMSNorm compatible with CPU, CUDA, and ROCm
-        let norm = rms_norm(x, self.eps)?;
-        let scaled = norm.to_dtype(DType::F32)?.broadcast_mul(&self.weight.to_dtype(DType::F32)?)?;
-        scaled.to_dtype(x.dtype())
-    }
-}
+use crate::models::ops::{repeat_kv, rms_norm, RmsNorm};
 
 #[derive(Debug, Clone)]
 struct QMatMul {
@@ -172,17 +144,6 @@ impl RotaryEmbedding {
         let q_embed = rotate_fn(&q.contiguous()?)?;
         let k_embed = rotate_fn(&k.contiguous()?)?;
         Ok((q_embed, k_embed))
-    }
-}
-
-fn repeat_kv(xs: Tensor, n_rep: usize) -> Result<Tensor> {
-    if n_rep == 1 {
-        Ok(xs)
-    } else {
-        let (b_sz, n_kv_head, seq_len, head_dim) = xs.dims4()?;
-        xs.unsqueeze(2)?
-            .expand((b_sz, n_kv_head, n_rep, seq_len, head_dim))?
-            .reshape((b_sz, n_kv_head * n_rep, seq_len, head_dim))
     }
 }
 
