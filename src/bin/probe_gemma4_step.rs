@@ -14,10 +14,13 @@ fn main() -> anyhow::Result<()> {
     let tokenizer = Tokenizer::from_file("gemma_tokenizer.json")
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let prompt = "Explain quantum computing in one sentence.";
+    let prompt = "<|turn>user\nExplain quantum computing in one sentence.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>";
     let encoding = tokenizer.encode(prompt, true).map_err(|e| anyhow::anyhow!(e))?;
     let tokens = encoding.get_ids();
-    println!("Prompt tokens ({}): {:?}", tokens.len(), tokens);
+    println!("Prompt tokens ({}):", tokens.len());
+    for t in tokens {
+        println!("  id {t} => {:?}", tokenizer.decode(&[*t], false).unwrap_or_default());
+    }
 
     let input_tensor = Tensor::new(tokens, &dev)?.unsqueeze(0)?;
     let logits = model.forward(&input_tensor, 0)?;
