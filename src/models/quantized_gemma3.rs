@@ -67,7 +67,11 @@ impl Module for Mlp {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let gate = self.feed_forward_gate.forward(xs)?;
         let up = self.feed_forward_up.forward(xs)?;
-        let silu = candle_nn::ops::silu(&gate)?;
+        let silu = candle_nn::ops::silu(&gate)
+            .or_else(|_| {
+                let sig = candle_nn::ops::sigmoid(&gate)?;
+                gate.mul(&sig)
+            })?;
         let gated = (silu * up)?;
         self.feed_forward_down.forward(&gated)
     }
@@ -261,7 +265,7 @@ impl LayerWeights {
             attn_weights = mask.eq(0u32)?.where_cond(&neg_inf, &attn_weights)?;
         }
 
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+        let attn_weights = crate::device::softmax_last_dim(&attn_weights)?;
         let attn_output = attn_weights.matmul(&v)?;
 
         let attn_output = attn_output
