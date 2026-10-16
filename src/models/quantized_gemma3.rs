@@ -62,6 +62,17 @@ impl QMatMul {
     }
 }
 
+fn gelu_pytorch_tanh(x: &Tensor) -> Result<Tensor> {
+    let orig_dtype = x.dtype();
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let c = (2.0f64 / std::f64::consts::PI).sqrt();
+    let x_cubed = (x_f32.sqr()? * &x_f32)?;
+    let inner = (&x_f32 + (x_cubed * 0.044715f64)?)?;
+    let tanh = (inner * c)?.tanh()?;
+    let result = ((x_f32 * 0.5)? * (tanh + 1.0)?)?;
+    result.to_dtype(orig_dtype)
+}
+
 #[derive(Debug, Clone)]
 struct Mlp {
     feed_forward_gate: QMatMul,
@@ -73,12 +84,8 @@ impl Module for Mlp {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let gate = self.feed_forward_gate.forward(xs)?;
         let up = self.feed_forward_up.forward(xs)?;
-        let silu = candle_nn::ops::silu(&gate)
-            .or_else(|_| {
-                let sig = candle_nn::ops::sigmoid(&gate)?;
-                gate.mul(&sig)
-            })?;
-        let gated = (silu * up)?;
+        let gelu = gelu_pytorch_tanh(&gate)?;
+        let gated = (gelu * up)?;
         self.feed_forward_down.forward(&gated)
     }
 }
@@ -122,28 +129,42 @@ impl RotaryEmbedding {
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
 
         let half_rotary = self.rotary_dim / 2;
-        // Duplicate cos and sin across the second half of rotary_dim: [seq_len, rotary_dim]
-        let cos = Tensor::cat(&[&cos, &cos], 1)?.unsqueeze(0)?.unsqueeze(0)?;
-        let sin = Tensor::cat(&[&sin, &sin], 1)?.unsqueeze(0)?.unsqueeze(0)?;
 
         let rotate_fn = |x: &Tensor| -> Result<Tensor> {
             let x_f32 = x.to_dtype(DType::F32)?;
             if self.rotary_dim < head_dim {
-                let x_rot_part = x_f32.narrow(3, 0, self.rotary_dim)?;
-                let x_pass_part = x_f32.narrow(3, self.rotary_dim, head_dim - self.rotary_dim)?;
+                // Gemma 4 Proportional RoPE:
+                // Let half_dim = head_dim / 2.
+                // x is split into [x_a, x_b] where each has size half_dim.
+                // First half_rotary elements of x_a and x_b are rotated together:
+                // x_a1 = x_a[..half_rotary], x_a2 = x_a[half_rotary..]
+                // x_b1 = x_b[..half_rotary], x_b2 = x_b[half_rotary..]
+                let half_dim = head_dim / 2;
+                let x_a = x_f32.narrow(3, 0, half_dim)?;
+                let x_b = x_f32.narrow(3, half_dim, half_dim)?;
 
-                let x1 = x_rot_part.narrow(3, 0, half_rotary)?;
-                let x2 = x_rot_part.narrow(3, half_rotary, half_rotary)?;
-                let x_rot = Tensor::cat(&[&(x2.neg()?), &x1], 3)?;
-                let out_rot = (x_rot_part.broadcast_mul(&cos)? + x_rot.broadcast_mul(&sin)?)?;
+                let x_a1 = x_a.narrow(3, 0, half_rotary)?;
+                let x_a2 = x_a.narrow(3, half_rotary, half_dim - half_rotary)?;
+                let x_b1 = x_b.narrow(3, 0, half_rotary)?;
+                let x_b2 = x_b.narrow(3, half_rotary, half_dim - half_rotary)?;
 
-                let out = Tensor::cat(&[&out_rot, &x_pass_part], 3)?;
+                let cos_rot = cos.unsqueeze(0)?.unsqueeze(0)?;
+                let sin_rot = sin.unsqueeze(0)?.unsqueeze(0)?;
+
+                let out_a1 = (x_a1.broadcast_mul(&cos_rot)? - x_b1.broadcast_mul(&sin_rot)?)?;
+                let out_b1 = (x_b1.broadcast_mul(&cos_rot)? + x_a1.broadcast_mul(&sin_rot)?)?;
+
+                let out = Tensor::cat(&[&out_a1, &x_a2, &out_b1, &x_b2], 3)?;
                 out.to_dtype(x.dtype())
             } else {
+                // Standard RoPE (sliding window layers: rotary_dim == head_dim)
+                let cos_full = Tensor::cat(&[&cos, &cos], 1)?.unsqueeze(0)?.unsqueeze(0)?;
+                let sin_full = Tensor::cat(&[&sin, &sin], 1)?.unsqueeze(0)?.unsqueeze(0)?;
+
                 let x1 = x_f32.narrow(3, 0, half_rotary)?;
                 let x2 = x_f32.narrow(3, half_rotary, half_rotary)?;
                 let x_rot = Tensor::cat(&[&(x2.neg()?), &x1], 3)?;
-                let out = (x_f32.broadcast_mul(&cos)? + x_rot.broadcast_mul(&sin)?)?;
+                let out = (x_f32.broadcast_mul(&cos_full)? + x_rot.broadcast_mul(&sin_full)?)?;
                 out.to_dtype(x.dtype())
             }
         };

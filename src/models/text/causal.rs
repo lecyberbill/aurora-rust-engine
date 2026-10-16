@@ -56,7 +56,7 @@ impl LayerKVCache {
             _ => (new_k.clone(), new_v.clone()),
         };
 
-        if let Some(w) = sliding_window {
+        if let Some(w) = sliding_window.filter(|&w| w > 0) {
             let total_seq = k.dim(2)?;
             if total_seq > w {
                 let start = total_seq - w;
@@ -248,6 +248,7 @@ impl CausalLMConfig {
             .unwrap_or(1e-6);
 
         let sliding_window = src.metadata_usize(&format!("{arch_prefix}attention.sliding_window"))
+            .filter(|&w| w > 0)
             .or_else(|| if is_gemma && !arch.contains("gemma3") { Some(4096) } else { None });
 
         let sliding_window_pattern = src.metadata_usize(&format!("{arch_prefix}attention.sliding_window_pattern"))

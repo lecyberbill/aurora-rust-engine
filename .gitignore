@@ -45,3 +45,6 @@ GEMINI.md
 .gemini.md
 archive/
 examples_reference/
+scratch_*.py
+test_*.py
+=
