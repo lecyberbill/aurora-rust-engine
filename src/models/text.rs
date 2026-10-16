@@ -18,6 +18,11 @@ pub enum TextBackend {
     Mistral(Mistral3TextEncoder),
     T5(T5TextEncoder),
     CausalLM(CausalLMPipeline),
+    QuantizedGemma3 {
+        model: candle_transformers::models::quantized_gemma3::ModelWeights,
+        tokenizer: Option<tokenizers::Tokenizer>,
+        device: Device,
+    },
 }
 
 impl TextBackend {
@@ -25,6 +30,7 @@ impl TextBackend {
         match self {
             TextBackend::Qwen(_) | TextBackend::Mistral(_) | TextBackend::T5(_) => &Device::Cpu,
             TextBackend::CausalLM(c) => &c.device,
+            TextBackend::QuantizedGemma3 { device, .. } => device,
         }
     }
 
@@ -32,6 +38,7 @@ impl TextBackend {
         match self {
             TextBackend::Qwen(_) | TextBackend::Mistral(_) | TextBackend::T5(_) => DType::F16,
             TextBackend::CausalLM(c) => c.dtype,
+            TextBackend::QuantizedGemma3 { .. } => DType::F32,
         }
     }
 }
@@ -54,6 +61,9 @@ impl TextModel {
     }
     pub fn causal_lm(id: String, family: String, pipeline: CausalLMPipeline) -> Self {
         Self { id, family, inner: TextBackend::CausalLM(pipeline) }
+    }
+    pub fn quantized_gemma3(id: String, model: candle_transformers::models::quantized_gemma3::ModelWeights, tokenizer: Option<tokenizers::Tokenizer>, device: Device) -> Self {
+        Self { id, family: "gemma".into(), inner: TextBackend::QuantizedGemma3 { model, tokenizer, device } }
     }
 
     pub fn as_causal_lm_mut(&mut self) -> Option<&mut CausalLMPipeline> {
@@ -140,6 +150,54 @@ impl GenerationModel for TextModel {
                 let text = pipeline.generate(&formatted_prompt, &params)?;
                 Ok((String::new(), text, 0.0))
             }
+            TextBackend::QuantizedGemma3 { model, tokenizer, device } => {
+                let tok = tokenizer.as_ref().ok_or_else(|| {
+                    LuminaError::Config("Tokenizer not attached to QuantizedGemma3 model".into())
+                })?;
+
+                let formatted_prompt = if !prompt.contains("<start_of_turn>") {
+                    format!("<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n", prompt.trim())
+                } else {
+                    prompt.to_string()
+                };
+
+                let tokens = tok.encode(formatted_prompt, true).map_err(|e| {
+                    LuminaError::Context {
+                        context: "Failed to tokenize prompt for Gemma 3".into(),
+                        source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                    }
+                })?.get_ids().to_vec();
+
+                let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
+                let logits = model.forward(&input, 0)?;
+                let last = logits.squeeze(0)?;
+                let l_vec = last.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+
+                let mut top: Vec<_> = l_vec.iter().enumerate().collect();
+                top.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let mut curr_tok = top[0].0 as u32;
+                let mut generated = vec![curr_tok];
+
+                for i in 0..max_tokens {
+                    if curr_tok == 1 || curr_tok == 106 { break; }
+                    let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
+                    let step_logits = model.forward(&inp, tokens.len() + i)?;
+                    let step_last = step_logits.squeeze(0)?;
+                    let step_vec = step_last.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+                    let mut t: Vec<_> = step_vec.iter().enumerate().collect();
+                    t.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    curr_tok = t[0].0 as u32;
+                    generated.push(curr_tok);
+                }
+
+                let text = tok.decode(&generated, true).map_err(|e| {
+                    LuminaError::Context {
+                        context: "Failed to decode generated token stream".into(),
+                        source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                    }
+                })?;
+                Ok((String::new(), text.trim().to_string(), 0.0))
+            }
             _ => Err(LuminaError::UnsupportedOp("This model is a text encoder only, not a CausalLM".into())),
         }
     }
@@ -190,6 +248,67 @@ impl GenerationModel for TextModel {
                 params.max_tokens = max_tokens;
                 params.temperature = temperature;
                 pipeline.generate_with_callback(prompt, &params, on_token)
+            }
+            TextBackend::QuantizedGemma3 { model, tokenizer, device } => {
+                let tok = tokenizer.as_ref().ok_or_else(|| {
+                    LuminaError::Config("Tokenizer not attached to QuantizedGemma3 model".into())
+                })?;
+
+                let formatted_prompt = if !prompt.contains("<start_of_turn>") {
+                    format!("<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n", prompt.trim())
+                } else {
+                    prompt.to_string()
+                };
+
+                let tokens = tok.encode(formatted_prompt, true).map_err(|e| {
+                    LuminaError::Context {
+                        context: "Failed to tokenize prompt for Gemma 3".into(),
+                        source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                    }
+                })?.get_ids().to_vec();
+
+                let mut mut_cb = on_token;
+                let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
+                let logits = model.forward(&input, 0)?;
+                let last = logits.squeeze(0)?;
+                let l_vec = last.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+
+                let mut top: Vec<_> = l_vec.iter().enumerate().collect();
+                top.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let mut curr_tok = top[0].0 as u32;
+                let mut generated = vec![curr_tok];
+
+                if let Some(ref mut cb) = mut_cb {
+                    if let Ok(piece) = tok.decode(&[curr_tok], false) {
+                        cb(&piece);
+                    }
+                }
+
+                for i in 0..max_tokens {
+                    if curr_tok == 1 || curr_tok == 106 { break; }
+                    let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
+                    let step_logits = model.forward(&inp, tokens.len() + i)?;
+                    let step_last = step_logits.squeeze(0)?;
+                    let step_vec = step_last.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+                    let mut t: Vec<_> = step_vec.iter().enumerate().collect();
+                    t.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    curr_tok = t[0].0 as u32;
+                    generated.push(curr_tok);
+
+                    if let Some(ref mut cb) = mut_cb {
+                        if let Ok(piece) = tok.decode(&[curr_tok], false) {
+                            if !cb(&piece) { break; }
+                        }
+                    }
+                }
+
+                let text = tok.decode(&generated, true).map_err(|e| {
+                    LuminaError::Context {
+                        context: "Failed to decode generated token stream".into(),
+                        source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                    }
+                })?;
+                Ok(text.trim().to_string())
             }
             _ => {
                 let text = self.generate(prompt, max_tokens, temperature)?;

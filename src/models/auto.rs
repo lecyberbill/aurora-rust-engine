@@ -381,26 +381,39 @@ fn build_text(
     let archive = crate::weights::open_auto(weights)?;
 
     match arch {
-        Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma | Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Lfm | Architecture::Phi => {
-            let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
-            let text_dtype = if config.is_gemma {
-                // Gemma 3 activations naturally peak up to ~58,800 at layer 47.
-                // Standard F16 (max 65,504) overflows into +inf, zeroing out RMSNorm logits.
-                // Gemma 3 MUST run in BF16 (on GPU) or F32 (on CPU).
-                match device {
+        Architecture::Gemma => {
+            let is_gguf = weights.to_string_lossy().to_lowercase().ends_with(".gguf");
+            let tokenizer = resolve_tokenizer(weights, arch);
+            if is_gguf {
+                let mut file = std::fs::File::open(weights)?;
+                let content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
+                let model = candle_transformers::models::quantized_gemma3::ModelWeights::from_gguf(content, &mut file, &device)?;
+                Ok(TextModel::quantized_gemma3(id, model, tokenizer, device.clone()))
+            } else {
+                let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
+                let text_dtype = match device {
                     Device::Cpu => DType::F32,
                     _ => DType::BF16,
-                }
-            } else {
-                dtype
-            };
+                };
+                let pipeline = crate::models::text::CausalLMPipeline::new(
+                    archive,
+                    config,
+                    tokenizer,
+                    device.clone(),
+                    text_dtype,
+                );
+                Ok(TextModel::causal_lm(id, arch.slug(), pipeline))
+            }
+        }
+        Architecture::Llama | Architecture::DeepSeek | Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Lfm | Architecture::Phi => {
+            let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
             let tokenizer = resolve_tokenizer(weights, arch);
             let pipeline = crate::models::text::CausalLMPipeline::new(
                 archive,
                 config,
                 tokenizer,
                 device.clone(),
-                text_dtype,
+                dtype,
             );
             Ok(TextModel::causal_lm(id, arch.slug(), pipeline))
         }
