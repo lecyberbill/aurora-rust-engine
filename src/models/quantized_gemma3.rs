@@ -16,6 +16,16 @@ pub const DEFAULT_ROPE_FREQUENCY: f32 = 1_000_000.;
 pub const DEFAULT_ROPE_FREQUENCY_SLIDING: f32 = 10_000.;
 pub const DEFAULT_ROPE_FREQUENCY_SCALE_FACTOR: f32 = 1.;
 
+pub fn rms_norm(x: &Tensor, eps: f64) -> Result<Tensor> {
+    let last_dim = x.dims().len() - 1;
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let sq = x_f32.sqr()?;
+    let mean = sq.mean_keepdim(last_dim)?;
+    let rms = (mean + eps)?.sqrt()?;
+    let norm = x_f32.broadcast_div(&rms)?;
+    norm.to_dtype(x.dtype())
+}
+
 #[derive(Debug, Clone)]
 pub struct RmsNorm {
     weight: Tensor,
@@ -30,13 +40,8 @@ impl RmsNorm {
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         // Universal RMSNorm compatible with CPU, CUDA, and ROCm
-        let last_dim = x.dims().len() - 1;
-        let x_f32 = x.to_dtype(DType::F32)?;
-        let sq = x_f32.sqr()?;
-        let mean = sq.mean_keepdim(last_dim)?;
-        let rms = (mean + self.eps)?.sqrt()?;
-        let norm = x_f32.broadcast_div(&rms)?;
-        let scaled = norm.broadcast_mul(&self.weight.to_dtype(DType::F32)?)?;
+        let norm = rms_norm(x, self.eps)?;
+        let scaled = norm.to_dtype(DType::F32)?.broadcast_mul(&self.weight.to_dtype(DType::F32)?)?;
         scaled.to_dtype(x.dtype())
     }
 }
@@ -154,7 +159,7 @@ fn repeat_kv(xs: Tensor, n_rep: usize) -> Result<Tensor> {
 struct LayerWeights {
     attention_wq: QMatMul,
     attention_wk: QMatMul,
-    attention_wv: QMatMul,
+    attention_wv: Option<QMatMul>,
     attention_wo: QMatMul,
 
     attention_q_norm: RmsNorm,
@@ -176,6 +181,9 @@ struct LayerWeights {
 
     rotary_embedding: RotaryEmbedding,
     neg_inf: Tensor,
+
+    layer_output_scale: Option<Tensor>,
+    rms_norm_eps: f64,
 
     kv_cache: Option<(Tensor, Tensor)>,
 }
@@ -227,7 +235,10 @@ impl LayerWeights {
 
         let q = self.attention_wq.forward(x)?;
         let k = self.attention_wk.forward(x)?;
-        let v = self.attention_wv.forward(x)?;
+        let v = match &self.attention_wv {
+            Some(wv) => wv.forward(x)?,
+            None => k.clone(),
+        };
 
         let q = q
             .reshape((b_sz, seq_len, self.n_head, self.head_dim))?
@@ -241,6 +252,11 @@ impl LayerWeights {
 
         let q = self.attention_q_norm.forward(&q.contiguous()?)?;
         let k = self.attention_k_norm.forward(&k.contiguous()?)?;
+        let v = if self.attention_wv.is_none() {
+            rms_norm(&v.contiguous()?, self.rms_norm_eps)?
+        } else {
+            v
+        };
 
         let (q, k) = self
             .rotary_embedding
@@ -411,7 +427,7 @@ impl ModelWeights {
 
             let attention_wq = ct.tensor(reader, &format!("{prefix}.attn_q.weight"), device)?;
             let attention_wk = ct.tensor(reader, &format!("{prefix}.attn_k.weight"), device)?;
-            let attention_wv = ct.tensor(reader, &format!("{prefix}.attn_v.weight"), device)?;
+            let attention_wv = ct.tensor(reader, &format!("{prefix}.attn_v.weight"), device).ok();
             let attention_wo =
                 ct.tensor(reader, &format!("{prefix}.attn_output.weight"), device)?;
 
@@ -454,6 +470,11 @@ impl ModelWeights {
             let feed_forward_up = ct.tensor(reader, &format!("{prefix}.ffn_up.weight"), device)?;
             let feed_forward_down =
                 ct.tensor(reader, &format!("{prefix}.ffn_down.weight"), device)?;
+
+            let layer_output_scale = ct
+                .tensor(reader, &format!("{prefix}.layer_output_scale.weight"), device)
+                .ok()
+                .and_then(|t| t.dequantize(device).ok());
 
             let mlp = Mlp {
                 feed_forward_gate: QMatMul::from_qtensor(feed_forward_gate)?,
@@ -498,10 +519,15 @@ impl ModelWeights {
             let rotary_embedding = RotaryEmbedding::new(layer_head_dim, layer_rope_frequency, partial_rotary_factor, device)?;
             let q_dim = head_count * layer_head_dim;
 
+            let attention_wv = match attention_wv {
+                Some(wv) => Some(QMatMul::from_qtensor(wv)?),
+                None => None,
+            };
+
             layers.push(LayerWeights {
                 attention_wq: QMatMul::from_qtensor(attention_wq)?,
                 attention_wk: QMatMul::from_qtensor(attention_wk)?,
-                attention_wv: QMatMul::from_qtensor(attention_wv)?,
+                attention_wv,
                 attention_wo: QMatMul::from_qtensor(attention_wo)?,
                 attention_q_norm,
                 attention_k_norm,
@@ -517,6 +543,8 @@ impl ModelWeights {
                 sliding_window_size,
                 rotary_embedding,
                 neg_inf: neg_inf.clone(),
+                layer_output_scale,
+                rms_norm_eps,
                 kv_cache: None,
             })
         }
@@ -556,7 +584,12 @@ impl ModelWeights {
             let x = layer.ffn_norm.forward(&x)?;
             let x = layer.mlp.forward(&x)?;
             let x = layer.post_ffn_norm.forward(&x)?;
-            let x = (x + residual)?;
+            let mut x = (x + residual)?;
+
+            if let Some(scale) = &layer.layer_output_scale {
+                let scale_broad = scale.broadcast_as(x.shape())?;
+                x = (x * scale_broad)?;
+            }
 
             layer_in = x;
         }
