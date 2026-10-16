@@ -19,7 +19,7 @@ pub enum TextBackend {
     T5(T5TextEncoder),
     CausalLM(CausalLMPipeline),
     QuantizedGemma3 {
-        model: candle_transformers::models::quantized_gemma3::ModelWeights,
+        model: crate::models::quantized_gemma3::ModelWeights,
         tokenizer: Option<tokenizers::Tokenizer>,
         device: Device,
     },
@@ -62,7 +62,7 @@ impl TextModel {
     pub fn causal_lm(id: String, family: String, pipeline: CausalLMPipeline) -> Self {
         Self { id, family, inner: TextBackend::CausalLM(pipeline) }
     }
-    pub fn quantized_gemma3(id: String, model: candle_transformers::models::quantized_gemma3::ModelWeights, tokenizer: Option<tokenizers::Tokenizer>, device: Device) -> Self {
+    pub fn quantized_gemma3(id: String, model: crate::models::quantized_gemma3::ModelWeights, tokenizer: Option<tokenizers::Tokenizer>, device: Device) -> Self {
         Self { id, family: "gemma".into(), inner: TextBackend::QuantizedGemma3 { model, tokenizer, device } }
     }
 

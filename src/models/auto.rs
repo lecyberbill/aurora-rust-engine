@@ -387,7 +387,7 @@ fn build_text(
             if is_gguf {
                 let mut file = std::fs::File::open(weights)?;
                 let content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
-                let model = candle_transformers::models::quantized_gemma3::ModelWeights::from_gguf(content, &mut file, &device)?;
+                let model = crate::models::quantized_gemma3::ModelWeights::from_gguf(content, &mut file, &device)?;
                 Ok(TextModel::quantized_gemma3(id, model, tokenizer, device.clone()))
             } else {
                 let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
