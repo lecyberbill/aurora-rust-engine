@@ -10,7 +10,7 @@ fn main() -> anyhow::Result<()> {
     keys.sort();
     let mut v_layers = Vec::new();
     let mut k_layers = Vec::new();
-    for k in keys {
+    for k in &keys {
         if k.ends_with(".attn_v.weight") {
             v_layers.push(k.clone());
         }
