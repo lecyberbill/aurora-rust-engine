@@ -1,7 +1,8 @@
-// [WFGY] Zone: TRANSIT | λ: 0.15 | Fallbacks: 0 | Action: ROCm-compatible quantized Gemma 3 implementation
-//! Custom implementation of quantized Gemma 3 with universal RMSNorm (works on CPU, CUDA, and AMD ROCm).
-//! The official candle-transformers `quantized_gemma3` uses `candle_nn::ops::rms_norm`, which lacks ROCm kernels.
-//! This implementation replaces it with pure elementwise operations fully accelerated on ROCm.
+// [WFGY] Zone: TRANSIT | λ: 0.15 | Fallbacks: 0 | Action: ROCm-compatible quantized Gemma 3 and Gemma 4 implementation
+//! Custom implementation of quantized Gemma 3 and Gemma 4 with universal RMSNorm (works on CPU, CUDA, and AMD ROCm).
+//! Solves Candle kernel gaps for ROCm: `rms_norm`, `rotary_emb`, `softmax_last_dim`.
+//! Supports Gemma 4 hybrid per-layer head dimension (256 SWA / 512 Global), alternating head_count_kv,
+//! and final_logit_softcapping.
 
 use candle_core::quantized::gguf_file;
 use candle_core::quantized::QTensor;
@@ -9,7 +10,7 @@ use candle_core::D;
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{Embedding, Module};
 
-pub const MAX_SEQ_LEN: usize = 131072;
+pub const MAX_SEQ_LEN: usize = 262144;
 pub const DEFAULT_SLIDING_WINDOW_TYPE: usize = 6;
 pub const DEFAULT_ROPE_FREQUENCY: f32 = 1_000_000.;
 pub const DEFAULT_ROPE_FREQUENCY_SLIDING: f32 = 10_000.;
@@ -84,12 +85,20 @@ struct RotaryEmbedding {
 }
 
 impl RotaryEmbedding {
-    fn new(head_dim: usize, rope_frequency: f32, device: &Device) -> Result<Self> {
-        let theta: Vec<_> = (0..head_dim)
-            .step_by(2)
-            .map(|i| 1f32 / rope_frequency.powf(i as f32 / head_dim as f32))
-            .collect();
-        let theta = Tensor::new(theta.as_slice(), device)?;
+    fn new(head_dim: usize, rope_frequency: f32, partial_rotary_factor: f32, device: &Device) -> Result<Self> {
+        let half_dim = head_dim / 2;
+        let rope_angles = (partial_rotary_factor * (head_dim as f32) / 2.0).round() as usize;
+        let rope_angles = rope_angles.min(half_dim).max(1);
+
+        let mut inv_freq_vec = Vec::with_capacity(half_dim);
+        for i in 0..rope_angles {
+            inv_freq_vec.push(1f32 / rope_frequency.powf((2 * i) as f32 / head_dim as f32));
+        }
+        if half_dim > rope_angles {
+            inv_freq_vec.extend(std::iter::repeat_n(0f32, half_dim - rope_angles));
+        }
+
+        let theta = Tensor::new(inv_freq_vec.as_slice(), device)?;
         let idx_theta = Tensor::arange(0, MAX_SEQ_LEN as u32, device)?
             .to_dtype(DType::F32)?
             .reshape((MAX_SEQ_LEN, 1))?
@@ -283,6 +292,7 @@ pub struct ModelWeights {
     layers: Vec<LayerWeights>,
     norm: RmsNorm,
     output: QMatMul,
+    final_logit_softcapping: Option<f64>,
 }
 
 impl ModelWeights {
@@ -291,11 +301,12 @@ impl ModelWeights {
         reader: &mut R,
         device: &Device,
     ) -> Result<Self> {
-        let prefix = ["gemma3", "gemma2", "gemma", "gemma-embedding"]
+        let prefix = ["gemma4", "gemma3", "gemma2", "gemma", "gemma-embedding"]
             .iter()
             .find(|p| {
                 ct.metadata
                     .contains_key(&format!("{}.attention.head_count", p))
+                    || ct.metadata.contains_key(&format!("{}.block_count", p))
             })
             .copied()
             .unwrap_or("gemma3");
@@ -308,28 +319,79 @@ impl ModelWeights {
             }
         };
 
-        let head_count = md_get("attention.head_count")?.to_u32()? as usize;
-        let head_count_kv = md_get("attention.head_count_kv")?.to_u32()? as usize;
         let block_count = md_get("block_count")?.to_u32()? as usize;
         let embedding_length = md_get("embedding_length")?.to_u32()? as usize;
-        let key_length = md_get("attention.key_length")?.to_u32()? as usize;
-        let _value_length = md_get("attention.value_length")?.to_u32()? as usize;
+        let head_count = md_get("attention.head_count")?.to_u32()? as usize;
         let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?.to_f32()? as f64;
-        let sliding_window_size = md_get("attention.sliding_window")?.to_u32()? as usize;
+
+        // Final logit softcapping (e.g. 30.0 in Gemma 4)
+        let final_logit_softcapping = md_get("final_logit_softcapping")
+            .ok()
+            .and_then(|v| v.to_f32().ok())
+            .map(|f| f as f64);
+
+        // Pattern of head_count_kv across layers
+        let head_count_kv_arr: Option<Vec<usize>> = ct.metadata
+            .get(&format!("{prefix}.attention.head_count_kv"))
+            .and_then(|v| match v {
+                gguf_file::Value::Array(arr) => {
+                    let res: std::result::Result<Vec<usize>, _> = arr.iter().map(|x| match x {
+                        gguf_file::Value::I32(i) => Ok(*i as usize),
+                        gguf_file::Value::U32(u) => Ok(*u as usize),
+                        _ => Err(()),
+                    }).collect();
+                    res.ok()
+                }
+                _ => None,
+            });
+
+        // Default head_count_kv if not array
+        let default_head_count_kv = if head_count_kv_arr.is_none() {
+            md_get("attention.head_count_kv").and_then(|v| Ok(v.to_u32()? as usize)).unwrap_or(head_count)
+        } else {
+            head_count
+        };
+
+        // Sliding window pattern
+        let sliding_window_pattern: Option<Vec<bool>> = ct.metadata
+            .get(&format!("{prefix}.attention.sliding_window_pattern"))
+            .and_then(|v| match v {
+                gguf_file::Value::Array(arr) => {
+                    let res: std::result::Result<Vec<bool>, _> = arr.iter().map(|x| match x {
+                        gguf_file::Value::Bool(b) => Ok(*b),
+                        _ => Err(()),
+                    }).collect();
+                    res.ok()
+                }
+                _ => None,
+            });
+
+        let default_sliding_window_size = md_get("attention.sliding_window")
+            .and_then(|v| Ok(v.to_u32()? as usize))
+            .unwrap_or(1024);
 
         let sliding_window_type = md_get("attention.sliding_window_type")
             .and_then(|m| Ok(m.to_u32()? as usize))
             .unwrap_or(DEFAULT_SLIDING_WINDOW_TYPE);
 
+        // Base RoPE frequencies
         let rope_freq_base = md_get("rope.freq_base")
             .and_then(|m| m.to_f32())
             .unwrap_or(DEFAULT_ROPE_FREQUENCY);
 
-        let rope_freq_base_sliding = md_get("rope.local_freq_base")
+        let rope_freq_base_sliding = md_get("rope.freq_base_swa")
+            .or_else(|_| md_get("rope.local_freq_base"))
             .and_then(|m| m.to_f32())
             .unwrap_or(DEFAULT_ROPE_FREQUENCY_SLIDING);
 
-        let q_dim = head_count * key_length;
+        let key_length_global = md_get("attention.key_length")
+            .and_then(|m| Ok(m.to_u32()? as usize))
+            .unwrap_or(256);
+
+        let key_length_swa = md_get("attention.key_length_swa")
+            .and_then(|m| Ok(m.to_u32()? as usize))
+            .unwrap_or(key_length_global);
+
         let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?;
 
         let tok_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
@@ -399,15 +461,42 @@ impl ModelWeights {
                 feed_forward_down: QMatMul::from_qtensor(feed_forward_down)?,
             };
 
-            let is_sliding = (layer_idx + 1) % sliding_window_type > 0;
-            let sliding_window_size = is_sliding.then_some(sliding_window_size);
+            // Determine if current layer is sliding window
+            let is_sliding = if let Some(pattern) = &sliding_window_pattern {
+                pattern.get(layer_idx).copied().unwrap_or(true)
+            } else {
+                (layer_idx + 1) % sliding_window_type > 0
+            };
+
+            let sliding_window_size = is_sliding.then_some(default_sliding_window_size);
             let layer_rope_frequency = if is_sliding {
                 rope_freq_base_sliding
             } else {
                 rope_freq_base
             };
 
-            let rotary_embedding = RotaryEmbedding::new(key_length, layer_rope_frequency, device)?;
+            let layer_kv_heads = if let Some(arr) = &head_count_kv_arr {
+                arr.get(layer_idx).copied().unwrap_or(default_head_count_kv)
+            } else {
+                default_head_count_kv
+            };
+
+            // Head dim: 256 for sliding (SWA), 512 for global
+            let layer_head_dim = if is_sliding {
+                key_length_swa
+            } else {
+                key_length_global
+            };
+
+            // In Gemma 4 global layers, partial rotary factor is 0.25 (512 * 0.25 = 128 angles)
+            let partial_rotary_factor = if is_sliding {
+                1.0f32
+            } else {
+                0.25f32
+            };
+
+            let rotary_embedding = RotaryEmbedding::new(layer_head_dim, layer_rope_frequency, partial_rotary_factor, device)?;
+            let q_dim = head_count * layer_head_dim;
 
             layers.push(LayerWeights {
                 attention_wq: QMatMul::from_qtensor(attention_wq)?,
@@ -422,8 +511,8 @@ impl ModelWeights {
                 post_ffn_norm,
                 mlp,
                 n_head: head_count,
-                n_kv_head: head_count_kv,
-                head_dim: key_length,
+                n_kv_head: layer_kv_heads,
+                head_dim: layer_head_dim,
                 q_dim,
                 sliding_window_size,
                 rotary_embedding,
@@ -438,6 +527,7 @@ impl ModelWeights {
             layers,
             norm,
             output: QMatMul::from_qtensor(output)?,
+            final_logit_softcapping,
         })
     }
 
@@ -473,8 +563,14 @@ impl ModelWeights {
 
         let x = layer_in.i((.., seq_len - 1, ..))?;
         let x = self.norm.forward(&x)?;
-        let output = self.output.forward(&x)?;
+        let logits = self.output.forward(&x)?;
 
-        Ok(output)
+        if let Some(sc) = self.final_logit_softcapping {
+            let scaled = (logits / sc)?;
+            let tanh = scaled.tanh()?;
+            tanh * sc
+        } else {
+            Ok(logits)
+        }
     }
 }
