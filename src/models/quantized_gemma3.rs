@@ -253,7 +253,10 @@ impl LayerWeights {
 
         let q = self.attention_q_norm.forward(&q.contiguous()?)?;
         let k = self.attention_k_norm.forward(&k.contiguous()?)?;
-        let v = if self.attention_wv.is_none() {
+        let v = if self.attention_scale == 1.0f64 {
+            // Gemma 4: always apply scale-free RMSNorm to Vcur
+            rms_norm(&v.contiguous()?, self.rms_norm_eps)?
+        } else if self.attention_wv.is_none() {
             rms_norm(&v.contiguous()?, self.rms_norm_eps)?
         } else {
             v
