@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     let tokenizer = Tokenizer::from_file("gemma4_tokenizer.json")
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let prompt = "<|turn>user\nExplain quantum computing in one sentence.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>";
+    let prompt = "<|turn>system\n<|think|>\n<turn|>\n<|turn>user\nExplain quantum computing in one sentence.<turn|>\n<|turn>model\n";
     let encoding = tokenizer.encode(prompt, true).map_err(|e| anyhow::anyhow!(e))?;
     let tokens = encoding.get_ids();
     println!("Prompt tokens ({}):", tokens.len());
