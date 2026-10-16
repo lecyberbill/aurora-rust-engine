@@ -444,12 +444,28 @@ fn resolve_tokenizer(weights: &Path, arch: &Architecture) -> Option<tokenizers::
         _ => "tokenizer.json",
     };
 
-    let search_roots = [
+    let mut search_roots = vec![
         PathBuf::from("."),
         PathBuf::from("assets/tokenizers"),
         PathBuf::from("/srv/dev/aurora-rust-engine"),
         PathBuf::from("/srv/dev/aurora-rust-engine/assets/tokenizers"),
     ];
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            search_roots.push(exe_dir.to_path_buf());
+            search_roots.push(exe_dir.join("assets/tokenizers"));
+            if let Some(parent) = exe_dir.parent() {
+                search_roots.push(parent.join("assets/tokenizers"));
+            }
+        }
+    }
+
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        let m_path = PathBuf::from(manifest);
+        search_roots.push(m_path.clone());
+        search_roots.push(m_path.join("assets/tokenizers"));
+    }
 
     for root in &search_roots {
         let p = root.join(filename);

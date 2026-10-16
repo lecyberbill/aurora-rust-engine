@@ -119,7 +119,25 @@ impl GenerationModel for TextModel {
                         params.n_gpu_layers = Some(n);
                     }
                 }
-                let text = pipeline.generate(prompt, &params)?;
+
+                // If prompt doesn't already contain chat markers, wrap it in family chat template
+                let formatted_prompt = if !prompt.contains("<start_of_turn>")
+                    && !prompt.contains("<|im_start|>")
+                    && !prompt.contains("<|start_header_id|>")
+                {
+                    let family_lower = self.family.to_lowercase();
+                    if family_lower.contains("gemma") {
+                        format!("<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n", prompt.trim())
+                    } else if family_lower.contains("llama") || family_lower.contains("deepseek") {
+                        format!("<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", prompt.trim())
+                    } else {
+                        format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n", prompt.trim())
+                    }
+                } else {
+                    prompt.to_string()
+                };
+
+                let text = pipeline.generate(&formatted_prompt, &params)?;
                 Ok((String::new(), text, 0.0))
             }
             _ => Err(LuminaError::UnsupportedOp("This model is a text encoder only, not a CausalLM".into())),

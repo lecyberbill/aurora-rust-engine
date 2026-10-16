@@ -356,8 +356,8 @@ impl Default for TextGenParams {
             temperature: 0.7,
             top_p: 0.9,
             top_k: 40,
-            repetition_penalty: 1.1,
-            stop_tokens: vec![151643, 151645, 128001, 128009, 2, 1], // Common EOS across Qwen, Llama3, Gemma
+            repetition_penalty: 1.0,
+            stop_tokens: vec![151643, 151645, 128001, 128009, 2, 1, 106], // Common EOS across Qwen, Llama3, Gemma (<end_of_turn> = 106)
             n_gpu_layers: None,
         }
     }
@@ -385,9 +385,10 @@ impl LogitsProcessor {
         let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
         let mut logits_vec: Vec<f32> = logits.to_vec1().map_err(LuminaError::Candle)?;
 
-        // Apply repetition penalty
-        if self.repetition_penalty != 1.0 {
-            for &token in generated_tokens {
+        // Apply repetition penalty over the last 64 tokens if penalty > 1.0
+        if self.repetition_penalty > 1.0 {
+            let start = generated_tokens.len().saturating_sub(64);
+            for &token in &generated_tokens[start..] {
                 if let Some(logit) = logits_vec.get_mut(token as usize) {
                     if *logit > 0.0 {
                         *logit /= self.repetition_penalty;
