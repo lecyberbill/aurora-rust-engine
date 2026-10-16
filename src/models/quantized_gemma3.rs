@@ -10,7 +10,7 @@ use candle_core::D;
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{Embedding, Module};
 
-pub const MAX_SEQ_LEN: usize = 262144;
+pub const MAX_SEQ_LEN: usize = 8192;
 pub const DEFAULT_SLIDING_WINDOW_TYPE: usize = 6;
 pub const DEFAULT_ROPE_FREQUENCY: f32 = 1_000_000.;
 pub const DEFAULT_ROPE_FREQUENCY_SLIDING: f32 = 10_000.;
