@@ -184,6 +184,7 @@ struct LayerWeights {
 
     layer_output_scale: Option<Tensor>,
     rms_norm_eps: f64,
+    attention_scale: f64,
 
     kv_cache: Option<(Tensor, Tensor)>,
 }
@@ -281,7 +282,7 @@ impl LayerWeights {
         let v = repeat_kv(v, self.n_head / self.n_kv_head)?;
 
         // Scaled Dot-Product Attention
-        let scale = 1.0 / (self.head_dim as f64).sqrt();
+        let scale = self.attention_scale;
         let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
 
         if let Some(mask) = mask {
@@ -524,6 +525,13 @@ impl ModelWeights {
                 None => None,
             };
 
+            let is_gemma4 = prefix == "gemma4";
+            let attention_scale = if is_gemma4 {
+                1.0f64
+            } else {
+                1.0 / (layer_head_dim as f64).sqrt()
+            };
+
             layers.push(LayerWeights {
                 attention_wq: QMatMul::from_qtensor(attention_wq)?,
                 attention_wk: QMatMul::from_qtensor(attention_wk)?,
@@ -545,6 +553,7 @@ impl ModelWeights {
                 neg_inf: neg_inf.clone(),
                 layer_output_scale,
                 rms_norm_eps,
+                attention_scale,
                 kv_cache: None,
             })
         }
