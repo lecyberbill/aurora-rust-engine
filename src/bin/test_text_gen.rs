@@ -71,12 +71,6 @@ fn main() -> anyhow::Result<()> {
     };
 
     let start_load = Instant::now();
-    let archive = aurora_rust_engine::weights::open_auto(&model_path)?;
-    println!("🔍 Sample tensor keys in GGUF (first 20):");
-    for k in archive.keys().iter().take(20) {
-        println!("   - {}", k);
-    }
-
     let boxed_model = AutoModel::from_local(&model_path, device, DType::F16)?;
     let load_time = start_load.elapsed();
     println!("✅ Model loaded in {:.2}s", load_time.as_secs_f64());
