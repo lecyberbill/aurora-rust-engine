@@ -48,3 +48,7 @@ examples_reference/
 scratch_*.py
 test_*.py
 =
+# Throwaway investigation binaries (probe/test/run)
+src/bin/probe_*.rs
+src/bin/test_*.rs
+src/bin/run_*.rs
