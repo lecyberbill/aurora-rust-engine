@@ -101,11 +101,27 @@ impl RotaryEmbedding {
         k: &Tensor,
         index_pos: usize,
     ) -> Result<(Tensor, Tensor)> {
-        let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
+        let (_b_sz, _h, seq_len, head_dim) = q.dims4()?;
+        let half_dim = head_dim / 2;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
-        let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
-        let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
+
+        // Duplicate cos and sin across the second half of head_dim: [seq_len, head_dim]
+        // Then reshape to [1, 1, seq_len, head_dim] for broadcast over (batch, heads, seq, head_dim)
+        let cos = Tensor::cat(&[&cos, &cos], 1)?.unsqueeze(0)?.unsqueeze(0)?;
+        let sin = Tensor::cat(&[&sin, &sin], 1)?.unsqueeze(0)?.unsqueeze(0)?;
+
+        let rotate_fn = |x: &Tensor| -> Result<Tensor> {
+            let x_f32 = x.to_dtype(DType::F32)?;
+            let x1 = x_f32.narrow(3, 0, half_dim)?;
+            let x2 = x_f32.narrow(3, half_dim, half_dim)?;
+            let x_rot = Tensor::cat(&[&(x2.neg()?), &x1], 3)?;
+            let out = (x_f32.broadcast_mul(&cos)? + x_rot.broadcast_mul(&sin)?)?;
+            out.to_dtype(x.dtype())
+        };
+
+        let q_embed = rotate_fn(&q.contiguous()?)?;
+        let k_embed = rotate_fn(&k.contiguous()?)?;
         Ok((q_embed, k_embed))
     }
 }
