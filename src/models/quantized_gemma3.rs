@@ -87,20 +87,18 @@ impl Module for Mlp {
 struct RotaryEmbedding {
     sin: Tensor,
     cos: Tensor,
+    rotary_dim: usize,
 }
 
 impl RotaryEmbedding {
     fn new(head_dim: usize, rope_frequency: f32, partial_rotary_factor: f32, device: &Device) -> Result<Self> {
-        let half_dim = head_dim / 2;
-        let rope_angles = (partial_rotary_factor * (head_dim as f32) / 2.0).round() as usize;
-        let rope_angles = rope_angles.min(half_dim).max(1);
+        let rotary_dim = (partial_rotary_factor * (head_dim as f32)).round() as usize;
+        let rotary_dim = rotary_dim.min(head_dim).max(2);
+        let half_rotary = rotary_dim / 2;
 
-        let mut inv_freq_vec = Vec::with_capacity(half_dim);
-        for i in 0..rope_angles {
+        let mut inv_freq_vec = Vec::with_capacity(half_rotary);
+        for i in 0..half_rotary {
             inv_freq_vec.push(1f32 / rope_frequency.powf((2 * i) as f32 / head_dim as f32));
-        }
-        if half_dim > rope_angles {
-            inv_freq_vec.extend(std::iter::repeat_n(0f32, half_dim - rope_angles));
         }
 
         let theta = Tensor::new(inv_freq_vec.as_slice(), device)?;
@@ -110,7 +108,7 @@ impl RotaryEmbedding {
             .matmul(&theta.reshape((1, theta.elem_count()))?)?;
         let cos = idx_theta.cos()?;
         let sin = idx_theta.sin()?;
-        Ok(Self { sin, cos })
+        Ok(Self { sin, cos, rotary_dim })
     }
 
     fn apply_rotary_emb_qkv(
@@ -120,22 +118,34 @@ impl RotaryEmbedding {
         index_pos: usize,
     ) -> Result<(Tensor, Tensor)> {
         let (_b_sz, _h, seq_len, head_dim) = q.dims4()?;
-        let half_dim = head_dim / 2;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
 
-        // Duplicate cos and sin across the second half of head_dim: [seq_len, head_dim]
-        // Then reshape to [1, 1, seq_len, head_dim] for broadcast over (batch, heads, seq, head_dim)
+        let half_rotary = self.rotary_dim / 2;
+        // Duplicate cos and sin across the second half of rotary_dim: [seq_len, rotary_dim]
         let cos = Tensor::cat(&[&cos, &cos], 1)?.unsqueeze(0)?.unsqueeze(0)?;
         let sin = Tensor::cat(&[&sin, &sin], 1)?.unsqueeze(0)?.unsqueeze(0)?;
 
         let rotate_fn = |x: &Tensor| -> Result<Tensor> {
             let x_f32 = x.to_dtype(DType::F32)?;
-            let x1 = x_f32.narrow(3, 0, half_dim)?;
-            let x2 = x_f32.narrow(3, half_dim, half_dim)?;
-            let x_rot = Tensor::cat(&[&(x2.neg()?), &x1], 3)?;
-            let out = (x_f32.broadcast_mul(&cos)? + x_rot.broadcast_mul(&sin)?)?;
-            out.to_dtype(x.dtype())
+            if self.rotary_dim < head_dim {
+                let x_rot_part = x_f32.narrow(3, 0, self.rotary_dim)?;
+                let x_pass_part = x_f32.narrow(3, self.rotary_dim, head_dim - self.rotary_dim)?;
+
+                let x1 = x_rot_part.narrow(3, 0, half_rotary)?;
+                let x2 = x_rot_part.narrow(3, half_rotary, half_rotary)?;
+                let x_rot = Tensor::cat(&[&(x2.neg()?), &x1], 3)?;
+                let out_rot = (x_rot_part.broadcast_mul(&cos)? + x_rot.broadcast_mul(&sin)?)?;
+
+                let out = Tensor::cat(&[&out_rot, &x_pass_part], 3)?;
+                out.to_dtype(x.dtype())
+            } else {
+                let x1 = x_f32.narrow(3, 0, half_rotary)?;
+                let x2 = x_f32.narrow(3, half_rotary, half_rotary)?;
+                let x_rot = Tensor::cat(&[&(x2.neg()?), &x1], 3)?;
+                let out = (x_f32.broadcast_mul(&cos)? + x_rot.broadcast_mul(&sin)?)?;
+                out.to_dtype(x.dtype())
+            }
         };
 
         let q_embed = rotate_fn(&q.contiguous()?)?;
