@@ -531,7 +531,7 @@ impl ModelWeights {
             let attention_mask = if seq_len == 1 {
                 None
             } else {
-                Some(layer.mask(b_sz, seq_len, index_pos, x.dtype(), x.device())?)
+                Some(layer.mask(b_sz, seq_len, index_pos, layer_in.dtype(), x.device())?)
             };
 
             // Attention block
