@@ -26,14 +26,21 @@ Ce rapport documente l'état d'implémentation et de compatibilité des modèles
   - Le code interprétait `Some(0)` comme une fenêtre de 0 tokens, tronquant le tenseur KV à une dimension nulle (`[1, 40, 9, 0]`) provoquant un crash `broadcast_add` avec le masque causal.
   - Résolution : Filtrage strict `sliding_window.filter(|&w| w > 0)` dans `CausalLMConfig` et `LayerKVCache::append_with_window`.
 
-### Google Gemma 4 (`gemma3` architecture étendue)
-- **Status :** 🔬 **Chantier mathématique en cours (Hors Candle officiel)**
-- **Spécificités rétro-ingéniérées & validées :**
-  1. **RoPE Proportionnel ($0.25$ factor) :** Décomposition exacte prouvée équivalente à PyTorch Hugging Face (`test_exact_equiv.py` diff = 0.0). Seul le premier quart des dimensions ($dim/4$) subit les angles de rotation cos/sin, les dimensions restantes transitent en identité directe.
-  2. **Activation FFN :** `gelu_pytorch_tanh` ($c = \sqrt{2/\pi}$, $x + 0.044715 x^3$) conforme Hugging Face `Gemma4TextMLP` et llama.cpp `LLM_FFN_GELU`.
-  3. **Pattern de couches hybrides :** Alternance 5 couches locales (SWA 1024, head_dim 256, RoPE theta 10k) et 1 couche globale (Full, head_dim 512, RoPE theta 1M).
-  4. **Tokens spéciaux de chat :** `<|turn>=105`, `<turn|>=106`, `<|channel>=100`, `<channel|>=101`, `<|think|>=98`.
-- **Point de blocage actuel :** Dérive des logits sur les couches profondes due au calage de l'attention scaling ($1.0$ vs $1/\sqrt{head\_dim}$) et à l'interaction des projections Q/K sur les têtes hybrides.
+### Google Gemma 4 (31B GGUF `gemma4` architecture)
+- **Status :** ✅ **100% Opérationnel sur ROCm (Radeon AI PRO R9700)**
+- **Sonde empirique :** `cargo run --release --features rocm --bin probe_gemma4_chat`
+- **Résultat réel mesuré :**
+  - **Prompt :** `<|turn>user\nWhat is the capital of France and why is it known as the City of Light?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>`
+  - **Réponse modèle :**
+    > *"The capital of France is **Paris**.*
+    > *It is known as the **"City of Light"** (La Ville Lumière) for two primary reasons:*
+    > ***1. Intellectual Enlightenment** During the 18th century (the Age of Enlightenment), Paris was the center of education, philosophy, and science..."*
+  - **Débit :** ~2.83 à 3.92 tokens/sec natif en inférence complète 60 couches sur GPU gfx1201.
+- **Clés de l'alignement architectural :**
+  1. **Attention Scaling unitaire ($1.0$) :** Dans Gemma 4, la mise à l'échelle d'attention n'utilise pas $1/\sqrt{d_k}$ car les projections Query/Key sont normalisées par des RMSNorm entraînables dédiées (`attention_q_norm`, `attention_k_norm`). L'échelle est fixée à $1.0$.
+  2. **Tenseurs `layer_output_scale` :** Présents sur les 60 couches du modèle, multipliant directement la sortie du bloc après addition du résidu (`x = (x + residual) * layer_output_scale`).
+  3. **RMSNorm sans décalage $+1$ :** Le convertisseur GGUF (`convert_hf_to_gguf.py`) intègre déjà le décalage $+1.0$ dans les poids sérialisés. Le calcul standard `norm(x) * weight` est donc strictement exact.
+  4. **Chat Template officiel :** Utilisation des balises de tour et de canal (`<|turn>user`, `<turn|>`, `<|turn>model`, `<|channel>thought`, `<channel|>`).
 
 ### Qwen 3.8 27B (`qwen35` hybrid SSM / Attention)
 - **Status :** 🔬 **En cours d'intégration (Hors Candle officiel)**

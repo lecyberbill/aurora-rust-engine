@@ -136,7 +136,6 @@ struct LayerWeights {
     sliding_window_size: Option<usize>,
 
     rotary_embedding: RotaryEmbedding,
-    neg_inf: Tensor,
 
     layer_output_scale: Option<Tensor>,
     rms_norm_eps: f64,
@@ -365,7 +364,6 @@ impl ModelWeights {
             .and_then(|m| Ok(m.to_u32()? as usize))
             .unwrap_or(key_length_global);
 
-        let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?;
 
         let tok_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
         let tok_embeddings = tok_embeddings.dequantize(device)?;
@@ -482,7 +480,11 @@ impl ModelWeights {
             };
 
             let is_gemma4 = model_prefix == "gemma4";
-            let attention_scale = 1.0 / (layer_head_dim as f64).sqrt();
+            let attention_scale = if is_gemma4 {
+                1.0f64
+            } else {
+                1.0 / (layer_head_dim as f64).sqrt()
+            };
 
             layers.push(LayerWeights {
                 attention_wq: QMatMul::from_qtensor(attention_wq)?,
@@ -502,7 +504,6 @@ impl ModelWeights {
                 q_dim,
                 sliding_window_size,
                 rotary_embedding,
-                neg_inf: neg_inf.clone(),
                 layer_output_scale,
                 rms_norm_eps,
                 attention_scale,

@@ -1,6 +1,7 @@
 use candle_core::{Device, Tensor, DType, quantized::gguf_file};
 use tokenizers::Tokenizer;
 use std::fs::File;
+use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
     #[cfg(feature = "rocm")]
@@ -8,41 +9,54 @@ fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "rocm"))]
     let dev = Device::Cpu;
 
+    println!("Loading Gemma 4 (31B) GGUF on ROCm device: {:?}", dev);
+    let start_load = Instant::now();
     let mut file = File::open("/models/llm/gemma-4-31B-it-UD-Q4_K_XL.gguf")?;
     let content = gguf_file::Content::read(&mut file)?;
     let mut model = aurora_rust_engine::models::quantized_gemma3::ModelWeights::from_gguf(content, &mut file, &dev)?;
-    let tokenizer = Tokenizer::from_file("gemma4_tokenizer.json")
-        .map_err(|e| anyhow::anyhow!(e))?;
+    println!("Model loaded in {:.2?}", start_load.elapsed());
 
-    let prompt = "<|turn>user\nExplain quantum computing in one sentence.<turn|>\n<|turn>model\n<|channel>thought\n";
-    let encoding = tokenizer.encode(prompt, true).map_err(|e| anyhow::anyhow!(e))?;
-    let mut tokens = encoding.get_ids().to_vec();
+    let tokenizer = Tokenizer::from_file("gemma4_tokenizer.json").map_err(|e| anyhow::anyhow!(e))?;
 
-    let mut next_token = 0u32;
-    for step in 0..15 {
-        let (input_tensor, index_pos) = if step == 0 {
-            (Tensor::new(tokens.as_slice(), &dev)?.unsqueeze(0)?, 0)
-        } else {
-            (Tensor::new(&[next_token], &dev)?.unsqueeze(0)?, tokens.len() - 1)
-        };
+    let prompt = "The capital of France is";
+    let mut tokens = tokenizer.encode(prompt, true).map_err(|e| anyhow::anyhow!(e))?.get_ids().to_vec();
+    print!("Prompt: {:?} -> Generation: {}", prompt, prompt);
+    use std::io::Write;
+    std::io::stdout().flush()?;
 
-        let logits = model.forward(&input_tensor, index_pos)?;
-        let logits_v: Vec<f32> = logits.squeeze(0)?.to_dtype(DType::F32)?.to_vec1()?;
-        let mut indexed: Vec<(usize, f32)> = logits_v.into_iter().enumerate().collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let max_gen_tokens = 30;
+    let start_gen = Instant::now();
+    let mut gen_count = 0;
 
-        println!("step {step} top 5 candidates:");
-        for i in 0..5 {
-            let (id, logit) = indexed[i];
-            let piece = tokenizer.decode(&[id as u32], false).unwrap_or_default();
-            println!("   candidate {i}: token_id {id} ({piece:?}) logit {logit:.3}");
+    for _ in 0..max_gen_tokens {
+        let inp = Tensor::new(tokens.as_slice(), &dev)?.unsqueeze(0)?;
+        let logits = model.forward(&inp, 0)?;
+        let last_logits: Vec<f32> = logits.to_dtype(DType::F32)?.squeeze(0)?.to_vec1()?;
+        
+        let mut max_id = 0;
+        let mut max_logit = f32::NEG_INFINITY;
+        for (id, val) in last_logits.into_iter().enumerate() {
+            if val > max_logit {
+                max_logit = val;
+                max_id = id;
+            }
         }
 
-        next_token = indexed[0].0 as u32;
-        tokens.push(next_token);
+        tokens.push(max_id as u32);
+        gen_count += 1;
+
+        let piece = tokenizer.decode(&[max_id as u32], false).unwrap_or_default();
+        print!("{}", piece);
+        std::io::stdout().flush()?;
+
+        // Stop on EOS or end of turn
+        if max_id == 1 || max_id == 107 || piece.contains("<end_of_turn>") {
+            break;
+        }
     }
 
-    let full_text = tokenizer.decode(&tokens, false).unwrap_or_default();
-    println!("\nGenerated Text:\n{}", full_text);
+    let elapsed = start_gen.elapsed();
+    println!("\n\n--- Finished: generated {} tokens in {:.2?} ({:.2} tok/s) ---", gen_count, elapsed, gen_count as f64 / elapsed.as_secs_f64());
+
     Ok(())
 }
