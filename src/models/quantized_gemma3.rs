@@ -16,7 +16,7 @@ pub const DEFAULT_ROPE_FREQUENCY: f32 = 1_000_000.;
 pub const DEFAULT_ROPE_FREQUENCY_SLIDING: f32 = 10_000.;
 pub const DEFAULT_ROPE_FREQUENCY_SCALE_FACTOR: f32 = 1.;
 
-use crate::models::ops::{repeat_kv, rms_norm, RmsNorm};
+use crate::models::ops::{repeat_kv, rms_norm, rope, RmsNorm};
 
 #[derive(Debug, Clone)]
 struct QMatMul {
@@ -105,8 +105,8 @@ impl RotaryEmbedding {
         let (_b_sz, _h, seq_len, _head_dim) = q.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
-        let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
-        let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
+        let q_embed = rope(&q.contiguous()?, &cos, &sin)?;
+        let k_embed = rope(&k.contiguous()?, &cos, &sin)?;
         Ok((q_embed, k_embed))
     }
 }
