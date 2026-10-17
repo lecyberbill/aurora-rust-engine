@@ -62,9 +62,22 @@ Un correctif upstream unique dans le backend HIP de Candle consisterait à :
 2. **Gestion transparente du layout non-contigu :** Insérer automatiquement la copie contiguë ou utiliser les strides appropriés dans les descripteurs rocBLAS / hipBLAS lors d'un `matmul` sur tenseur transposé.
 3. **Bénéfice :** L'élimination complète de tous les `rocm_contiguous` et des wrappers `ops.rs` spécifiques dans `aurora-rust-engine`, rendant le code 100 % idiomatique Candle quel que soit le backend (CUDA, ROCm, Metal, CPU).
 
+### Validation Empirique sur GPU Radeon AI PRO R9700 (ROCm 7.15)
+Le correctif a été implémenté et validé directement dans le dépôt upstream [`candle-rocm-upstream`](file:///srv/dev/candle-rocm-upstream) (branche `fix/rocm-matmul-non-contiguous`) :
+1. **Test unitaire non-contiguous matmul (`candle-core/tests/non_contiguous_matmul_test.rs`) :**
+   - Tenseurs d'attention $Q [1, 32, 9, 128]$ et $K^T [1, 32, 128, 9]$ transposés non-contigus.
+   - **Résultat :** `test test_rocm_matmul_transposed_attention ... ok` (0.55s). L'erreur `MatMulNonContiguous` est interceptée et résolue sans panique.
+2. **Test unitaire mixed-dtype RMSNorm (`candle-nn/tests/rmsnorm_dtype_mismatch_test.rs`) :**
+   - Activations $X$ en F16 / BF16 avec poids $\alpha$ en F32.
+   - **Résultat :** `test test_rmsnorm_mixed_dtype_rocm ... ok` (0.09s). Sortie conforme F16/BF16 sans régression.
+3. **Suite de régression matmul standard (`matmul_tests.rs`) :**
+   - `20 passed; 0 failed; finished in 1.84s`.
+4. **Artéfact produit :** Patch exporté dans [`patches/0001-fix-rocm-handle-non-contiguous-matmul-operands-and-m.patch`](file:///d:/image_to_text/TransRust/patches/0001-fix-rocm-handle-non-contiguous-matmul-operands-and-m.patch), prêt pour soumission sur `xmiksay/candle` ou le dépôt Candle officiel.
+
 ---
 
 ## 4. Changelog Récent
-- `TECHNICAL_REPORT.md` : Rectification du titre, clarification de l'absence de Gemma 4 et Qwen 3.8 dans Candle officiel, et formalisation de l'analyse du bug ROCm F16/F32 pour proposition de PR upstream.
-- `src/models/text/causal.rs` : Filtrage `sliding_window.filter(|&w| w > 0)` pour garantir l'inférence fluide de Phi-4.
+- `TECHNICAL_REPORT.md` : Clarification de l'absence de Gemma 4 & Qwen 3.8 dans Candle, et validation empirique du correctif ROCm upstream.
+- `patches/` : Génération du patch officiel `0001-fix-rocm-handle-non-contiguous-matmul-operands-and-m.patch`.
+- `src/models/text/causal.rs` : Filtrage `sliding_window.filter(|&w| w > 0)` pour Phi-4.
 - `src/models/quantized_gemma3.rs` : Intégration de RoPE proportionnel et `gelu_pytorch_tanh` pour Gemma 4.
