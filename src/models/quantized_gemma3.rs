@@ -66,28 +66,34 @@ impl Module for Mlp {
 struct RotaryEmbedding {
     sin: Tensor,
     cos: Tensor,
-    rotary_dim: usize,
 }
 
 impl RotaryEmbedding {
-    fn new(head_dim: usize, rope_frequency: f32, partial_rotary_factor: f32, device: &Device) -> Result<Self> {
-        let rotary_dim = (partial_rotary_factor * (head_dim as f32)).round() as usize;
-        let rotary_dim = rotary_dim.min(head_dim).max(2);
-        let half_rotary = rotary_dim / 2;
+    fn new(
+        head_dim: usize,
+        rope_frequency: f32,
+        partial_rotary_factor: f32,
+        device: &Device,
+    ) -> Result<Self> {
+        let half_dim = head_dim / 2;
+        let rope_angles = (partial_rotary_factor * head_dim as f32 / 2.0).round() as usize;
+        let rope_angles = rope_angles.min(half_dim).max(1);
 
-        let mut inv_freq_vec = Vec::with_capacity(half_rotary);
-        for i in 0..half_rotary {
+        let mut inv_freq_vec = Vec::with_capacity(half_dim);
+        for i in 0..rope_angles {
             inv_freq_vec.push(1f32 / rope_frequency.powf((2 * i) as f32 / head_dim as f32));
         }
+        // Pad with zeros for non-rotated dimensions -> cos=1, sin=0 -> identity
+        inv_freq_vec.extend(std::iter::repeat_n(0f32, half_dim - rope_angles));
 
-        let theta = Tensor::new(inv_freq_vec.as_slice(), device)?;
-        let idx_theta = Tensor::arange(0, MAX_SEQ_LEN as u32, device)?
+        let inv_freq = Tensor::from_vec(inv_freq_vec, (1, half_dim), device)?;
+        let t = Tensor::arange(0u32, MAX_SEQ_LEN as u32, device)?
             .to_dtype(DType::F32)?
-            .reshape((MAX_SEQ_LEN, 1))?
-            .matmul(&theta.reshape((1, theta.elem_count()))?)?;
-        let cos = idx_theta.cos()?;
-        let sin = idx_theta.sin()?;
-        Ok(Self { sin, cos, rotary_dim })
+            .reshape((MAX_SEQ_LEN, 1))?;
+        let freqs = t.matmul(&inv_freq)?;
+        let cos = freqs.cos()?;
+        let sin = freqs.sin()?;
+        Ok(Self { cos, sin })
     }
 
     fn apply_rotary_emb_qkv(
@@ -96,53 +102,11 @@ impl RotaryEmbedding {
         k: &Tensor,
         index_pos: usize,
     ) -> Result<(Tensor, Tensor)> {
-        let (_b_sz, _h, seq_len, head_dim) = q.dims4()?;
+        let (_b_sz, _h, seq_len, _head_dim) = q.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
-
-        let half_rotary = self.rotary_dim / 2;
-
-        let rotate_fn = |x: &Tensor| -> Result<Tensor> {
-            let x_f32 = x.to_dtype(DType::F32)?;
-            if self.rotary_dim < head_dim {
-                // Gemma 4 Proportional RoPE:
-                // Let half_dim = head_dim / 2.
-                // x is split into [x_a, x_b] where each has size half_dim.
-                // First half_rotary elements of x_a and x_b are rotated together:
-                // x_a1 = x_a[..half_rotary], x_a2 = x_a[half_rotary..]
-                // x_b1 = x_b[..half_rotary], x_b2 = x_b[half_rotary..]
-                let half_dim = head_dim / 2;
-                let x_a = x_f32.narrow(3, 0, half_dim)?;
-                let x_b = x_f32.narrow(3, half_dim, half_dim)?;
-
-                let x_a1 = x_a.narrow(3, 0, half_rotary)?;
-                let x_a2 = x_a.narrow(3, half_rotary, half_dim - half_rotary)?;
-                let x_b1 = x_b.narrow(3, 0, half_rotary)?;
-                let x_b2 = x_b.narrow(3, half_rotary, half_dim - half_rotary)?;
-
-                let cos_rot = cos.unsqueeze(0)?.unsqueeze(0)?;
-                let sin_rot = sin.unsqueeze(0)?.unsqueeze(0)?;
-
-                let out_a1 = (x_a1.broadcast_mul(&cos_rot)? - x_b1.broadcast_mul(&sin_rot)?)?;
-                let out_b1 = (x_b1.broadcast_mul(&cos_rot)? + x_a1.broadcast_mul(&sin_rot)?)?;
-
-                let out = Tensor::cat(&[&out_a1, &x_a2, &out_b1, &x_b2], 3)?;
-                out.to_dtype(x.dtype())
-            } else {
-                // Standard RoPE (sliding window layers: rotary_dim == head_dim)
-                let cos_full = Tensor::cat(&[&cos, &cos], 1)?.unsqueeze(0)?.unsqueeze(0)?;
-                let sin_full = Tensor::cat(&[&sin, &sin], 1)?.unsqueeze(0)?.unsqueeze(0)?;
-
-                let x1 = x_f32.narrow(3, 0, half_rotary)?;
-                let x2 = x_f32.narrow(3, half_rotary, half_rotary)?;
-                let x_rot = Tensor::cat(&[&(x2.neg()?), &x1], 3)?;
-                let out = (x_f32.broadcast_mul(&cos_full)? + x_rot.broadcast_mul(&sin_full)?)?;
-                out.to_dtype(x.dtype())
-            }
-        };
-
-        let q_embed = rotate_fn(&q.contiguous()?)?;
-        let k_embed = rotate_fn(&k.contiguous()?)?;
+        let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
+        let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
         Ok((q_embed, k_embed))
     }
 }
@@ -177,6 +141,7 @@ struct LayerWeights {
     layer_output_scale: Option<Tensor>,
     rms_norm_eps: f64,
     attention_scale: f64,
+    is_gemma4: bool,
 
     kv_cache: Option<(Tensor, Tensor)>,
 }
@@ -245,10 +210,8 @@ impl LayerWeights {
 
         let q = self.attention_q_norm.forward(&q.contiguous()?)?;
         let k = self.attention_k_norm.forward(&k.contiguous()?)?;
-        let v = if self.attention_scale == 1.0f64 {
-            // Gemma 4: always apply scale-free RMSNorm to Vcur
-            rms_norm(&v.contiguous()?, self.rms_norm_eps)?
-        } else if self.attention_wv.is_none() {
+        let v = if self.is_gemma4 || self.attention_wv.is_none() {
+            // Gemma 4 & Gemma 3 without v_proj: always apply scale-free RMSNorm to Vcur
             rms_norm(&v.contiguous()?, self.rms_norm_eps)?
         } else {
             v
@@ -313,7 +276,7 @@ impl ModelWeights {
         reader: &mut R,
         device: &Device,
     ) -> Result<Self> {
-        let prefix = ["gemma4", "gemma3", "gemma2", "gemma", "gemma-embedding"]
+        let model_prefix = ["gemma4", "gemma3", "gemma2", "gemma", "gemma-embedding"]
             .iter()
             .find(|p| {
                 ct.metadata
@@ -324,7 +287,7 @@ impl ModelWeights {
             .unwrap_or("gemma3");
 
         let md_get = |s: &str| {
-            let key = format!("{prefix}.{s}");
+            let key = format!("{model_prefix}.{s}");
             match ct.metadata.get(&key) {
                 None => candle_core::bail!("cannot find {key} in metadata"),
                 Some(v) => Ok(v),
@@ -344,7 +307,7 @@ impl ModelWeights {
 
         // Pattern of head_count_kv across layers
         let head_count_kv_arr: Option<Vec<usize>> = ct.metadata
-            .get(&format!("{prefix}.attention.head_count_kv"))
+            .get(&format!("{model_prefix}.attention.head_count_kv"))
             .and_then(|v| match v {
                 gguf_file::Value::Array(arr) => {
                     let res: std::result::Result<Vec<usize>, _> = arr.iter().map(|x| match x {
@@ -366,7 +329,7 @@ impl ModelWeights {
 
         // Sliding window pattern
         let sliding_window_pattern: Option<Vec<bool>> = ct.metadata
-            .get(&format!("{prefix}.attention.sliding_window_pattern"))
+            .get(&format!("{model_prefix}.attention.sliding_window_pattern"))
             .and_then(|v| match v {
                 gguf_file::Value::Array(arr) => {
                     let res: std::result::Result<Vec<bool>, _> = arr.iter().map(|x| match x {
@@ -520,12 +483,8 @@ impl ModelWeights {
                 None => None,
             };
 
-            let is_gemma4 = prefix == "gemma4";
-            let attention_scale = if is_gemma4 {
-                1.0f64
-            } else {
-                1.0 / (layer_head_dim as f64).sqrt()
-            };
+            let is_gemma4 = model_prefix == "gemma4";
+            let attention_scale = 1.0 / (layer_head_dim as f64).sqrt();
 
             layers.push(LayerWeights {
                 attention_wq: QMatMul::from_qtensor(attention_wq)?,
@@ -549,6 +508,7 @@ impl ModelWeights {
                 layer_output_scale,
                 rms_norm_eps,
                 attention_scale,
+                is_gemma4,
                 kv_cache: None,
             })
         }
