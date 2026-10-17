@@ -160,16 +160,16 @@ impl LayerWeights {
                 .flat_map(|i| {
                     (0..seq_len).map(move |j| {
                         if i < j || j + sliding_window_size < i {
-                            0u32
+                            f32::NEG_INFINITY
                         } else {
-                            1u32
+                            0f32
                         }
                     })
                 })
                 .collect()
         } else {
             (0..seq_len)
-                .flat_map(|i| (0..seq_len).map(move |j| if i < j { 0u32 } else { 1u32 }))
+                .flat_map(|i| (0..seq_len).map(move |j| if i < j { f32::NEG_INFINITY } else { 0f32 }))
                 .collect()
         };
         let mask = Tensor::from_slice(&mask, (seq_len, seq_len), device)?;
@@ -244,9 +244,7 @@ impl LayerWeights {
         let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
 
         if let Some(mask) = mask {
-            let mask = mask.broadcast_as(attn_weights.shape())?;
-            let neg_inf = self.neg_inf.broadcast_as(attn_weights.dims())?;
-            attn_weights = mask.eq(0u32)?.where_cond(&neg_inf, &attn_weights)?;
+            attn_weights = attn_weights.broadcast_add(mask)?;
         }
 
         let attn_weights = crate::device::softmax_last_dim(&attn_weights)?;
