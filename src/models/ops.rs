@@ -124,3 +124,66 @@ pub fn ensure_contiguous(t: &Tensor) -> Result<Tensor> {
     }
     Ok(t.clone())
 }
+
+/// Undo the GGUF tiled v-head layout along the leading dimension.
+///
+/// Qwen3.5/3.8 GGUF checkpoints store GatedDeltaNet v-heads interleaved with
+/// their key groups as `[num_v_per_k, num_k_heads, head_dim, ...]`. This restores
+/// the canonical `[num_v_heads, head_dim, ...]` ordering. No-op when
+/// `num_k_heads == num_v_heads`.
+pub fn undo_tiled_v_heads_first_dim(
+    x: &Tensor,
+    num_k_heads: usize,
+    num_v_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    if num_k_heads == num_v_heads {
+        return Ok(x.clone());
+    }
+    let num_v_per_k = num_v_heads / num_k_heads;
+    let dims = x.dims().to_vec();
+    if dims.is_empty() || dims[0] != num_v_heads * head_dim {
+        candle_core::bail!(
+            "undo_tiled_v_heads_first_dim expects leading dim {}, got {:?}",
+            num_v_heads * head_dim,
+            x.shape()
+        );
+    }
+    let mut reshaped = vec![num_v_per_k, num_k_heads, head_dim];
+    reshaped.extend_from_slice(&dims[1..]);
+    x.reshape(reshaped)?
+        .transpose(0, 1)?
+        .contiguous()?
+        .reshape(dims)
+}
+
+/// Undo the GGUF tiled v-head layout along the trailing dimension.
+pub fn undo_tiled_v_heads_last_dim(
+    x: &Tensor,
+    num_k_heads: usize,
+    num_v_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    if num_k_heads == num_v_heads {
+        return Ok(x.clone());
+    }
+    let num_v_per_k = num_v_heads / num_k_heads;
+    let dims = x.dims().to_vec();
+    let last = *dims.last().ok_or_else(|| {
+        candle_core::Error::Msg("undo_tiled_v_heads_last_dim expects non-empty tensor".into())
+    })?;
+    if last != num_v_heads * head_dim {
+        candle_core::bail!(
+            "undo_tiled_v_heads_last_dim expects trailing dim {}, got {:?}",
+            num_v_heads * head_dim,
+            x.shape()
+        );
+    }
+    let split_dim = dims.len() - 1;
+    let mut reshaped = dims[..split_dim].to_vec();
+    reshaped.extend_from_slice(&[num_v_per_k, num_k_heads, head_dim]);
+    x.reshape(reshaped)?
+        .transpose(split_dim, split_dim + 1)?
+        .contiguous()?
+        .reshape(dims)
+}

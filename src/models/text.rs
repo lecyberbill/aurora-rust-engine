@@ -28,6 +28,11 @@ pub enum TextBackend {
         tokenizer: Option<tokenizers::Tokenizer>,
         device: Device,
     },
+    QuantizedQwen35 {
+        model: crate::models::quantized_qwen35::ModelWeights,
+        tokenizer: Option<tokenizers::Tokenizer>,
+        device: Device,
+    },
 }
 
 impl TextBackend {
@@ -37,6 +42,7 @@ impl TextBackend {
             TextBackend::CausalLM(c) => &c.device,
             TextBackend::QuantizedGemma3 { device, .. } => device,
             TextBackend::QuantizedQwen3 { device, .. } => device,
+            TextBackend::QuantizedQwen35 { device, .. } => device,
         }
     }
 
@@ -46,6 +52,7 @@ impl TextBackend {
             TextBackend::CausalLM(c) => c.dtype,
             TextBackend::QuantizedGemma3 { .. } => DType::F32,
             TextBackend::QuantizedQwen3 { .. } => DType::F32,
+            TextBackend::QuantizedQwen35 { .. } => DType::F32,
         }
     }
 }
@@ -75,6 +82,9 @@ impl TextModel {
     pub fn quantized_qwen3(id: String, model: crate::models::quantized_qwen3::ModelWeights, tokenizer: Option<tokenizers::Tokenizer>, device: Device) -> Self {
         Self { id, family: "qwen3".into(), inner: TextBackend::QuantizedQwen3 { model, tokenizer, device } }
     }
+    pub fn quantized_qwen35(id: String, model: crate::models::quantized_qwen35::ModelWeights, tokenizer: Option<tokenizers::Tokenizer>, device: Device) -> Self {
+        Self { id, family: "qwen3".into(), inner: TextBackend::QuantizedQwen35 { model, tokenizer, device } }
+    }
 
     pub fn as_causal_lm_mut(&mut self) -> Option<&mut CausalLMPipeline> {
         match &mut self.inner {
@@ -90,6 +100,7 @@ impl AnyModel for TextModel {
             TextBackend::CausalLM(_) => ModelKind::Text,
             TextBackend::QuantizedGemma3 { .. } => ModelKind::Text,
             TextBackend::QuantizedQwen3 { .. } => ModelKind::Text,
+            TextBackend::QuantizedQwen35 { .. } => ModelKind::Text,
             _ => ModelKind::TextEncoder,
         }
     }
@@ -173,7 +184,7 @@ impl GenerationModel for TextModel {
                     prompt.to_string()
                 };
 
-                let tokens = tok.encode(formatted_prompt, true).map_err(|e| {
+                let tokens = tok.encode(formatted_prompt.as_str(), true).map_err(|e| {
                     LuminaError::Context {
                         context: "Failed to tokenize prompt for Gemma 3".into(),
                         source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
@@ -221,7 +232,7 @@ impl GenerationModel for TextModel {
                     format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n", prompt.trim())
                 };
 
-                let tokens = tok.encode(formatted_prompt, true).map_err(|e| {
+                let tokens = tok.encode(formatted_prompt.as_str(), true).map_err(|e| {
                     LuminaError::Context {
                         context: "Failed to tokenize prompt for Qwen3".into(),
                         source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
@@ -241,6 +252,64 @@ impl GenerationModel for TextModel {
                 for i in 0..max_tokens {
                     // Qwen3 stop tokens: <|endoftext|>=151643, <|im_end|>=151645
                     if curr_tok == 151643 || curr_tok == 151645 {
+                        break;
+                    }
+                    let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
+                    let step_logits = model.forward(&inp, tokens.len() + i)?;
+                    let step_vec = step_logits.squeeze(0)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+                    let mut t: Vec<_> = step_vec.iter().enumerate().collect();
+                    t.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    curr_tok = t[0].0 as u32;
+                    generated.push(curr_tok);
+                }
+
+                let text = tok.decode(&generated, true).map_err(|e| {
+                    LuminaError::Context {
+                        context: "Failed to decode generated token stream".into(),
+                        source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                    }
+                })?;
+                Ok((String::new(), text.trim().to_string(), 0.0))
+            }
+            TextBackend::QuantizedQwen35 { model, tokenizer, device } => {
+                let tok = tokenizer.as_ref().ok_or_else(|| {
+                    LuminaError::Config("Tokenizer not attached to QuantizedQwen35 model".into())
+                })?;
+
+                let formatted_prompt = if prompt.contains("<|im_start|>") {
+                    prompt.to_string()
+                } else {
+                    format!("<|im_start|>user\n{} /no_think<|im_end|>\n<|im_start|>assistant\n", prompt.trim())
+                };
+
+                let tokens = tok.encode(formatted_prompt.as_str(), true).map_err(|e| {
+                    LuminaError::Context {
+                        context: "Failed to tokenize prompt for Qwen3.8".into(),
+                        source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                    }
+                })?.get_ids().to_vec();
+
+                model.reset_cache();
+                let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
+                let logits = model.forward(&input, 0)?;
+                let l_vec = logits.squeeze(0)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+
+                let mut top: Vec<_> = l_vec.iter().enumerate().collect();
+                top.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let mut curr_tok = top[0].0 as u32;
+                let mut generated = vec![curr_tok];
+
+                let stop_ids: Vec<u32> = [
+                    model.eos_token_id(),
+                    tok.token_to_id("<|im_end|>"),
+                    tok.token_to_id("<|endoftext|>"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+
+                for i in 0..max_tokens {
+                    if stop_ids.contains(&curr_tok) {
                         break;
                     }
                     let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
@@ -322,7 +391,7 @@ impl GenerationModel for TextModel {
                     prompt.to_string()
                 };
 
-                let tokens = tok.encode(formatted_prompt, true).map_err(|e| {
+                let tokens = tok.encode(formatted_prompt.as_str(), true).map_err(|e| {
                     LuminaError::Context {
                         context: "Failed to tokenize prompt for Gemma 3".into(),
                         source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),

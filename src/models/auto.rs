@@ -406,15 +406,20 @@ fn build_text(
             }
         }
         Architecture::Qwen3 => {
-            // Genuinely Qwen3-family GGUFs (`general.architecture = qwen3`) are served by
-            // Candle's official quantized_qwen3. Other "qwen*" models (e.g. qwen35 hybrid)
-            // fall back to the generic CausalLM path.
-            let is_qwen3_gguf = archive
+            // `general.architecture` selects the concrete implementation:
+            //  - "qwen3"  -> quantized_qwen3 (standard dense attention)
+            //  - "qwen35" -> quantized_qwen35 (hybrid SSM, e.g. Qwen3.8)
+            //  - other    -> generic CausalLM fallback
+            let arch_name = archive
                 .metadata("general.architecture")
-                .map(|a| a.eq_ignore_ascii_case("qwen3"))
-                .unwrap_or(false);
-            let tokenizer = resolve_tokenizer(weights, arch);
-            if is_qwen3_gguf {
+                .unwrap_or_default()
+                .to_lowercase();
+            let tokenizer = if arch_name == "qwen35" {
+                resolve_tokenizer_named(weights, "qwen35_tokenizer.json", arch)
+            } else {
+                resolve_tokenizer(weights, arch)
+            };
+            if arch_name == "qwen3" {
                 let mut file = std::fs::File::open(weights)?;
                 let content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
                 let model = crate::models::quantized_qwen3::ModelWeights::from_gguf(
@@ -423,6 +428,32 @@ fn build_text(
                     &device,
                 )?;
                 Ok(TextModel::quantized_qwen3(id, model, tokenizer, device.clone()))
+            } else if arch_name == "qwen35" {
+                let mut file = std::fs::File::open(weights)?;
+                let content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
+                let model = crate::models::quantized_qwen35::ModelWeights::from_gguf(
+                    content,
+                    &mut file,
+                    &device,
+                )?;
+                if let Some(tok) = &tokenizer {
+                    if tok.get_vocab_size(true) > model.vocab_size() {
+                        return Err(LuminaError::Config(format!(
+                            "Qwen3.5 tokenizer vocabulary ({}) exceeds model embedding rows ({})",
+                            tok.get_vocab_size(true),
+                            model.vocab_size()
+                        )));
+                    }
+                    if let Some(eos) = model.eos_token_id() {
+                        let tok_eos = tok.token_to_id("<|im_end|>");
+                        if tok_eos != Some(eos) {
+                            return Err(LuminaError::Config(format!(
+                                "Qwen3.5 tokenizer/model mismatch: tokenizer <|im_end|> id {tok_eos:?} != GGUF eos {eos}"
+                            )));
+                        }
+                    }
+                }
+                Ok(TextModel::quantized_qwen35(id, model, tokenizer, device.clone()))
             } else {
                 let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
                 let pipeline = crate::models::text::CausalLMPipeline::new(
@@ -463,20 +494,6 @@ fn build_text(
 }
 
 fn resolve_tokenizer(weights: &Path, arch: &Architecture) -> Option<tokenizers::Tokenizer> {
-    // 1. Try local tokenizer.json in model dir or alongside file
-    let local_dir = if weights.is_dir() {
-        weights.to_path_buf()
-    } else {
-        weights.parent().unwrap_or(Path::new(".")).to_path_buf()
-    };
-    let local_tok = local_dir.join("tokenizer.json");
-    if local_tok.exists() {
-        if let Ok(t) = tokenizers::Tokenizer::from_file(&local_tok) {
-            return Some(t);
-        }
-    }
-
-    // 2. Try standard root cache and assets/tokenizers directories
     let filename = match arch {
         Architecture::Qwen3 => "qwen_tokenizer.json",
         Architecture::Llama | Architecture::DeepSeek => "llama_tokenizer.json",
@@ -486,6 +503,29 @@ fn resolve_tokenizer(weights: &Path, arch: &Architecture) -> Option<tokenizers::
         Architecture::Phi => "phi_tokenizer.json",
         _ => "tokenizer.json",
     };
+    resolve_tokenizer_named(weights, filename, arch)
+}
+
+fn resolve_tokenizer_named(
+    weights: &Path,
+    filename: &str,
+    arch: &Architecture,
+) -> Option<tokenizers::Tokenizer> {
+    // 1. Try local tokenizer.json in model dir or alongside file
+    let local_dir = if weights.is_dir() {
+        weights.to_path_buf()
+    } else {
+        weights.parent().unwrap_or(Path::new(".")).to_path_buf()
+    };
+    for candidate in [local_dir.join(filename), local_dir.join("tokenizer.json")] {
+        if candidate.exists() {
+            if let Ok(t) = tokenizers::Tokenizer::from_file(&candidate) {
+                return Some(t);
+            }
+        }
+    }
+
+    // 2. Try standard root cache and assets/tokenizers directories
 
     let mut search_roots = vec![
         PathBuf::from("."),

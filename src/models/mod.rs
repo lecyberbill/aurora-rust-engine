@@ -30,6 +30,7 @@ pub mod t5;
 pub mod text;
 pub mod quantized_gemma3;
 pub mod quantized_qwen3;
+pub mod quantized_qwen35;
 pub mod vlm;
 
 pub use acestep::{AceStepConditionEncoder, AceStepTransformer1D, AceStepTransformerConfig, FlowMatchConfig};
