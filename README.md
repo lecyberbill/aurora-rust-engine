@@ -27,7 +27,7 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 | **Video (DiT 3D)** | **CogVideoX-2B** (3D Spatio-Temporal DiT + Causal RoPE + Flow Matching ODE) |
 | **Super-Resolution / Upscaling** | **Real-ESRGAN** (x2/x4/x8), **4x-UltraSharp**, **NMKD**, **SRVGGNetCompact** (Anime-6B) with Bounded Tiling & Seam Blending |
 | **Vision-Language (VLM)** | **Qwen2-VL**, **Qwen2.5-VL**, **Qwen3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, **SmolVLM** |
-| **Text (CausalLM)** | Qwen 2.5/3(.5), Llama 3, Mistral, Gemma 2/3, DeepSeek — GGUF (Q4_K_M/Q8_0) & SafeTensors |
+| **Text (CausalLM)** | Qwen 2.5/3, **Qwen 3.5/3.8 hybrid (Gated DeltaNet)**, Llama 3, Mistral, Gemma 2/3, DeepSeek — GGUF (Q4_K_M/Q8_0) & SafeTensors |
 | **Speech-to-Text** | Whisper Large-v3 / Turbo, **Moonshine** (native Mel + encoder/decoder) |
 | **Text-to-Speech** | Parler-TTS, Kokoro-82M, **ChatTTS** (Conversational Prosody & Vocos) |
 | **Text-to-Music & Editing** | ACE-Step 1.5 — Turbo / Base / SFT / XL, 48 kHz stereo, lyrics, WAV / OGG / MP3, **cover / repaint / extract / lego / complete** |
@@ -42,7 +42,7 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 - **Universal Multi-Container Zero-Copy Loader**: Direct mmap and slice-based ingestion across **GGUF (v2/v3)**, **SafeTensors**, and **ONNX Initializers** with zero external Protobuf runtime dependencies and alignment-safe zero-copy buffers (`Cow<'_, [T]>`).
 - **Unified HuggingFace AutoModel Facade**: Standard `AutoModel::from_local` and `AutoModel::from_pretrained` interface supporting both generative diffusion pipelines and autoregressive text models.
 - **Vision-Language Multimodal Understanding (Pure Rust VLM)**: Complete SigLIP/ViT visual encoder + Multimodal MLP Projector + Causal LLM decoder supporting **Qwen2/2.5/3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, and **SmolVLM** for Visual Question Answering (VQA) and dense image captioning.
-- **CausalLM Text-to-Text Generation (Pure Rust)**: Autoregressive text generation with GPU KV-Cache supporting **Llama 3 / DeepSeek V3/R1**, **Qwen 2.5/3.5**, **Gemma 2/4** (with unit-offset RMSNorm & attention logit softcapping), and **Mistral** in both **GGUF** (quantized Q4_K_M, Q8_0) and **SafeTensors** formats.
+- **CausalLM Text-to-Text Generation (Pure Rust)**: Autoregressive text generation with GPU KV-Cache supporting **Llama 3 / DeepSeek V3/R1**, **Qwen 2.5/3**, **Qwen 3.5/3.8 hybrid (Gated DeltaNet + full attention)**, **Gemma 2/4** (with unit-offset RMSNorm & attention logit softcapping), and **Mistral** in both **GGUF** (quantized Q4_K_M, Q8_0) and **SafeTensors** formats.
 - **Token-by-Token Native Streaming Callback**: Clean zero-overhead streaming via `TokenCallback` without pulling web/async dependencies into the inference core.
 - **Dynamic Sparse MoE Top-K Routing**: Normalized Top-K dispatch across independent and shared experts for DeepSeek V3/R1 and Mixtral architectures.
 - **Super-Resolution & Neural Upscaling (Real-ESRGAN & 4x-UltraSharp)**: High-speed pure Rust neural upscaling (x2, x4, x8) powered by `RRDBNet` and `SRVGGNetCompact` with bounded-memory tiled processing, seam blending, and transparency preservation.
@@ -145,8 +145,9 @@ cargo run --release --features cuda --bin test_tts
 
 ### 11. CausalLM Text Generation (Pure Rust / RDNA4 & CUDA)
 LLM / CausalLM inference (e.g., Qwen3.8-27B, DeepSeek-R1, Llama 3) with native GGUF 4-bit (`Q4_K_M`) support:
-- **AMD RDNA 4 (`gfx1201`) on ROCm 10**: Native hardware acceleration via WMMA INT4 instructions (`__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12`) achieving **~74.5 tok/s in token decoding** and **~148–216 tok/s in prompt prefill**.
+- **AMD RDNA 4 (`gfx1201`) on ROCm 10**: portable `QMatMul` GEMM path. An experimental WMMA INT4 kernel (`__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12`) is available via the standalone `test_wmma_q4k` binary but is not yet wired into the model path. Measured Qwen3.8-27B hybrid (GDN): **~9.4 tok/s** decode, **71.25 s** load.
 - **NVIDIA CUDA**: High-throughput decoding via CUDA Tensor Cores with cross-platform compatibility and zero API regression.
+- **Qwen 3.5/3.8 tokenizer**: hybrid checkpoints require `assets/tokenizers/qwen35_tokenizer.json` (auto-resolved and EOS-checked against the GGUF).
 
 ```bash
 # AMD ROCm / HIP (Linux / RDNA 4)
@@ -336,10 +337,14 @@ cargo run --release --bin server --features cuda,flash-attn
 
 | Model | Checkpoint File | Size | Load Time | Generation Throughput | Test Case |
 |---|---|---|---|---|---|
-| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **0.23 s** | **61.60 tok/s** | Multilingual prompt generation |
+| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.25 s** | **~9.44 tok/s** | ChatML, 32 tokens, greedy (GDN path) |
 | **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **0.18 s** | **174.07 tok/s** | Prompt enrichment & French translation |
 | **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **0.39 s** | **133.29 tok/s** | 1024-token long-form poem stress test |
 | **Phi-4 Reasoning Plus 15B** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.16 s** | Native GGUF | Autoregressive reasoning continuation |
+
+> **Qwen 3.5 / 3.8 note:** hybrid checkpoints declare `general.architecture = qwen35`. The engine auto-loads `assets/tokenizers/qwen35_tokenizer.json` (248k vocab) and refuses to start when its `<|im_end|>` id does not match the GGUF EOS. Generation is currently greedy, batch size 1, and the GDN recurrence runs in F32 through portable `QMatMul` (no experimental WMMA kernel).
+>
+> Only the Qwen 3.8 row was re-measured after the GDN fix (2026-10-19); the other rows predate the current quantized loader and should be re-benchmarked before being quoted.
 
 ---
 

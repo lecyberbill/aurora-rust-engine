@@ -1613,9 +1613,11 @@ To compile and execute natively with NVIDIA CUDA 13.4 and MSVC under Windows:
 
 | Model | Checkpoint File | Size | Load Time | Generation Throughput | Test Case |
 |---|---|---|---|---|---|
-| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **0.23 s** | **61.60 tok/s** | Multilingual prompt generation |
+| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.25 s** | **~9.44 tok/s** | ChatML, 32 tokens, greedy (GDN path) |
 | **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **0.18 s** | **174.07 tok/s** | Prompt enrichment & French translation |
 | **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **0.39 s** | **133.29 tok/s** | 1024-token long-form poem stress test |
+
+> Only the Qwen 3.8 row was re-measured after the GDN fix (ROCm `gfx1201`, 2026-10-19); the Gemma rows predate the current quantized loader and should be re-benchmarked before being quoted.
 
 ---
 
@@ -1692,11 +1694,13 @@ FP8 ($E4M3FN$ & $E5M2$) weights are transformed directly to target datatypes (`b
 
 #### 6. CausalLM LLM Inference & RDNA 4 Native WMMA INT4 (`gfx1201`)
 Aurora Engine features a unified CausalLM inference pipeline for large language models (e.g., Qwen3.8-27B, Llama 3, DeepSeek, and Liquid AI LFM2.5) supporting 4-bit GGUF quantization (`Q4_K_M`):
-- **AMD RDNA 4 (`gfx1201`, ROCm 10.0)**: Hardware-accelerated matrix-vector multiplication using the native `__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12` instruction via a specialized HIP kernel (`src/kernels/wmma_q4k_rdna4.hip`) for native INT4 execution and INT32 accumulation.
-- **Empirical Benchmarks on AMD Radeon AI PRO R9700 (34 GB VRAM)**:
-  - **Prefill (Prompt Evaluation)**: **~148 to 216 tok/s**
-  - **Decode (Sequential Generation)**: **~74.5 tok/s** (physical VRAM bandwidth saturation limit)
-  - **VRAM Footprint**: 16.64 GB (27B weights) + 9.53 GB (KV Cache) = 26.17 GB / 31.86 GB (0% memory swap)
+- **AMD RDNA 4 (`gfx1201`, ROCm 10.0)**: an experimental HIP kernel (`src/kernels/wmma_q4k_rdna4.hip`) implements native INT4 GEMV through `__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12`. It is currently exercised by the standalone `test_wmma_q4k` binary; the production CausalLM path (including Qwen 3.5/3.8) uses portable `candle_core::quantized::QMatMul`.
+- **Qwen 3.5 / 3.8 hybrid Gated DeltaNet path (verified on ROCm `gfx1201`)**:
+  - Detected from `general.architecture = qwen35`; 64 decoder layers are executed (`blk.64` is the MTP draft head and is excluded).
+  - Requires the dedicated 248k tokenizer: `assets/tokenizers/qwen35_tokenizer.json`. It is loaded automatically and cross-checked against the GGUF `tokenizer.ggml.eos_token_id`; a mismatched tokenizer is a hard error.
+  - GGUF v-heads are stored tiled (`[num_v_per_k, num_k_heads, head_dim]`); the loader de-tiles `v`, `z`, `alpha`, `beta`, `ssm_a`, `ssm_dt`, conv weights and `ssm_out`, then re-quantizes to the original GGML dtype. `ssm_a` already stores `-exp(A_log)`.
+  - Measured with `Qwen3.8-27B-Q4_K_M.gguf` (32 tokens, greedy): **71.25 s load**, **~9.44 tok/s**, 17.44 GB. Verified outputs: `Paris.`, `2 + 2 = **4**`, `... is **Jupiter**.` (match the llama.cpp/Ollama oracle).
+  - Current limits: greedy decoding only, batch size 1, F32 recurrence; no fused GDN kernel yet.
 - **Liquid AI LFM2.5 Hybrid ShortConv-MoE Architecture**:
   - Full native support for Liquid Foundation Models (`LFM2.5-8B-A1B-Q4_K_M.gguf`).
   - Double-gated Linear Input-Varying (LIV) 1D depthwise convolutions with circular rolling state buffer ($K=3$).

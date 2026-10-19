@@ -482,7 +482,7 @@ loading/merging/stacking stack. This turns `aurora-rust-engine` from a pure infe
 - [x] **End-to-End CLI Test Runner (`src/bin/test_text_gen.rs`)**:
   - Verified on local quantized checkpoints (`DeepSeek-R1-Distill-Llama-8B-Q8_0.gguf`).
   - **Empirical Hardware Validation on AMD ROCm Server (Radeon AI PRO R9700 `gfx1201`)**:
-    - **Qwen3.8-27B (`Qwen3.8-27B-Q4_K_M.gguf`, 17.44 GB)**: Model loaded in **0.23s**, generated 16 tokens at **61.60 tok/s**.
+    - **Qwen3.8-27B (`Qwen3.8-27B-Q4_K_M.gguf`, 17.44 GB)**: GDN hybrid path verified. Model loaded in **71.25 s** (includes dequantize/de-tile/re-quantize of the GDN weights), generated 32 tokens at **~9.44 tok/s** (greedy, ChatML).
     - **Gemma-3-12B (`gemma-3-12b-it-q4_k_m.gguf`, 7.30 GB)**: Model loaded in **0.18s**, generated 40 tokens at **174.07 tok/s** (prompt enrichment & French translation validated).
     - **Gemma-4-31B-UD (`gemma-4-31B-it-UD-Q4_K_XL.gguf`, 18.82 GB)**: Loaded in **0.39s**. **Stress Test**: Long-context generation of **1024 tokens** sustained uninterrupted at **133.29 tok/s** (total time: 7.68s) on the 22-stanza poem on muscle hypertrophy.
     - **Microsoft Phi-4 Reasoning Plus 15B (`Phi-4-reasoning-plus-Q4_K_M.gguf`, 8.50 GB)**: Model loaded in **0.16s**. Successfully validated on pure Rust CausalLM pipeline (`test_text_gen`): Prompt *"What is the capital of France?"* generated bit-exact continuation `assistantThe capital`. Handled Phi-specific fused `blk.{i}.ffn_up.weight` [35840, 5120] split into gate/up projections, GQA Sniffing 40/10 heads (`blk.{i}.attn_qkv.weight`), and 100k vocabulary mapping.
@@ -681,7 +681,7 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 - [x] **Native Hardware GEMM & Fused Kernels (AMD RDNA 4 & NVIDIA CUDA)**:
   - Integrated native HIP WMMA INT4 kernel (`__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12`) for AMD RDNA 4 (`gfx1201`) on ROCm 10.0 (`src/kernels/wmma_q4k_rdna4.hip`).
   - Integrated native HIP Fused SDPA Attention Kernel with Online Softmax (`src/kernels/fused_sdpa_rdna4.hip` & `launch_hip_fused_sdpa_f16`) for AMD ROCm (`gfx1201`) with automatic fallback.
-  - Direct Q4_K_M matrix-vector dequantization and multiplication on dedicated hardware units reaching physical GPU limits (~74.5 tok/s in 27B decoding and ~148–216 tok/s in prefill).
+  - Direct Q4_K_M matrix-vector dequantization and multiplication on dedicated hardware units: the HIP WMMA kernel is compiled and exercised by the standalone `test_wmma_q4k` binary; wiring it into the model path is still pending. Measured Qwen3.8 GDN decode on the portable `QMatMul` path: **~9.44 tok/s**.
   - Strict preservation of NVIDIA CUDA cross-platform compatibility (`--features cuda`) with zero API regression.
 
 ---
