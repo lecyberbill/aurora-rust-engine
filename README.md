@@ -27,7 +27,7 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 | **Video (DiT 3D)** | **CogVideoX-2B** (3D Spatio-Temporal DiT + Causal RoPE + Flow Matching ODE) |
 | **Super-Resolution / Upscaling** | **Real-ESRGAN** (x2/x4/x8), **4x-UltraSharp**, **NMKD**, **SRVGGNetCompact** (Anime-6B) with Bounded Tiling & Seam Blending |
 | **Vision-Language (VLM)** | **Qwen2-VL**, **Qwen2.5-VL**, **Qwen3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, **SmolVLM** |
-| **Text (CausalLM)** | Qwen 2.5/3, **Qwen 3.5/3.8 hybrid (Gated DeltaNet)**, Llama 3, Mistral, Gemma 2/3, DeepSeek — GGUF (Q4_K_M/Q8_0) & SafeTensors |
+| **Text (CausalLM)** | Qwen 2.5/3, **Qwen 3.5/3.8 hybrid (Gated DeltaNet)**, **Gemma 3 & Gemma 4 (31B)**, **Microsoft Phi-4 (15B)**, **Liquid AI LFM 2.5 (ShortConv-MoE)**, Llama 3, Mistral, DeepSeek — GGUF (Q4_K_M/Q8_0) & SafeTensors |
 | **Speech-to-Text** | Whisper Large-v3 / Turbo, **Moonshine** (native Mel + encoder/decoder) |
 | **Text-to-Speech** | Parler-TTS, Kokoro-82M, **ChatTTS** (Conversational Prosody & Vocos) |
 | **Text-to-Music & Editing** | ACE-Step 1.5 — Turbo / Base / SFT / XL, 48 kHz stereo, lyrics, WAV / OGG / MP3, **cover / repaint / extract / lego / complete** |
@@ -145,7 +145,8 @@ cargo run --release --features cuda --bin test_tts
 
 ### 11. CausalLM Text Generation (Pure Rust / RDNA4 & CUDA)
 LLM / CausalLM inference (e.g., Qwen3.8-27B, DeepSeek-R1, Llama 3) with native GGUF 4-bit (`Q4_K_M`) support:
-- **AMD RDNA 4 (`gfx1201`) on ROCm 10**: portable `QMatMul` GEMM path. An experimental WMMA INT4 kernel (`__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12`) is available via the standalone `test_wmma_q4k` binary but is not yet wired into the model path. Measured Qwen3.8-27B hybrid (GDN): **~9.4 tok/s** decode, **71.25 s** load.
+- **AMD RDNA 4 (`gfx1201`) on ROCm 10**: portable `QMatMul` GEMM path. An experimental WMMA INT4 kernel (`__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12`) is available via the standalone `test_wmma_q4k` binary but is not yet wired into the model path. Measured Qwen3.8-27B hybrid (GDN): **~11.7 tok/s** decode (400 tokens, temp 0.7), **71.7 s** load.
+- **Sampling & streaming**: `TextGenParams` (`temperature`, `top_p`, `top_k`, `repetition_penalty`, `stop_tokens`) and `generate_stream_with_params` are wired for Qwen 3.5/3.8 and Gemma; greedy is used when `temperature <= 0`. The dense Qwen3 non-stream path still uses its existing generator.
 - **NVIDIA CUDA**: High-throughput decoding via CUDA Tensor Cores with cross-platform compatibility and zero API regression.
 - **Qwen 3.5/3.8 tokenizer**: hybrid checkpoints require `assets/tokenizers/qwen35_tokenizer.json` (auto-resolved and EOS-checked against the GGUF).
 
@@ -337,14 +338,15 @@ cargo run --release --bin server --features cuda,flash-attn
 
 | Model | Checkpoint File | Size | Load Time | Generation Throughput | Test Case |
 |---|---|---|---|---|---|
-| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.25 s** | **~9.44 tok/s** | ChatML, 32 tokens, greedy (GDN path) |
-| **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **0.18 s** | **174.07 tok/s** | Prompt enrichment & French translation |
-| **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **0.39 s** | **133.29 tok/s** | 1024-token long-form poem stress test |
-| **Phi-4 Reasoning Plus 15B** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.16 s** | Native GGUF | Autoregressive reasoning continuation |
+| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.68 s** | **11.73 tok/s** (401 tok / 34.19 s) | French poem, temp 0.7 (GDN path) |
+| **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **3.85 s** | **17.80 tok/s** (65 tok / 3.65 s) | Ocean paragraph, greedy |
+| **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **7.92 s** | **11.25 tok/s** (65 tok / 5.78 s) | Ocean paragraph, greedy |
+| **Phi-4 Reasoning Plus 15B** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.13 s** (lazy) | **5.53 tok/s** (31 tok / 5.61 s) | Partial: ChatML roles echoed, template not handled |
+| **LFM 2.5 8B** | `LFM2.5-8B-A1B-Q4_K_M.gguf` | 4.80 GB | **0.35 s** (lazy) | **3.15 tok/s** (65 tok / 20.65 s) | Degenerate output (`?` tokens); engine does not crash |
 
-> **Qwen 3.5 / 3.8 note:** hybrid checkpoints declare `general.architecture = qwen35`. The engine auto-loads `assets/tokenizers/qwen35_tokenizer.json` (248k vocab) and refuses to start when its `<|im_end|>` id does not match the GGUF EOS. Generation is currently greedy, batch size 1, and the GDN recurrence runs in F32 through portable `QMatMul` (no experimental WMMA kernel).
+> **Qwen 3.5 / 3.8 note:** hybrid checkpoints declare `general.architecture = qwen35`. The engine auto-loads `assets/tokenizers/qwen35_tokenizer.json` (248k vocab) and refuses to start when its `<|im_end|>` id does not match the GGUF EOS. Sampling (temperature/top-p/top-k/repetition) is available for Qwen 3.5/3.8 and Gemma; greedy when `temperature <= 0`. Batch size is 1 and the GDN recurrence runs in F32 through portable `QMatMul` (no experimental WMMA kernel).
 >
-> Only the Qwen 3.8 row was re-measured after the GDN fix (2026-10-19); the other rows predate the current quantized loader and should be re-benchmarked before being quoted.
+> Benchmarked on 2026-10-20 with the corrected CLI (actual tokens counted by the streaming callback). Phi-4 and LFM load times are metadata-only (lazy loading); their outputs are not usable as-is.
 
 ---
 

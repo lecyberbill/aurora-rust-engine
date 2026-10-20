@@ -1,47 +1,49 @@
-// [WFGY] Zone: SAFE | λ: 0.20 | Fallbacks: 0 | Action: CLI runner for CausalLM Text Generation via AutoModel facade
-
 use std::path::PathBuf;
 use std::time::Instant;
 use candle_core::{DType, Device};
 use aurora_rust_engine::models::{AnyModel, AutoModel, GenerationModel, downcast_model};
-use aurora_rust_engine::models::text::TextModel;
+use aurora_rust_engine::models::text::{TextGenParams, TextModel};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        println!("================================================================================");
-        println!("🚀 Aurora Rust Engine — CausalLM Text-to-Text Generator (Pure Rust)");
-        println!("================================================================================");
-        println!("Usage: test_text_gen <model_path_or_gguf> [prompt] [max_tokens] [temperature]");
-        println!();
-        println!("Examples:");
-        println!(r#"  test_text_gen "E:\LMSTUDIO_MODELES\lmstudio-community\Qwen3.5-2B-GGUF\Qwen3.5-2B-Q4_K_M.gguf" "Explain quantum computing in 3 sentences." 128 0.7"#);
-        println!(r#"  test_text_gen "E:\LMSTUDIO_MODELES\lmstudio-community\DeepSeek-R1-Distill-Llama-8B-GGUF\DeepSeek-R1-Distill-Llama-8B-Q8_0.gguf" "Solve: what is 25 * 34?" 256 0.6"#);
-        println!("================================================================================");
+        eprintln!(
+            "Usage: test_text_gen <model> [prompt] [max_tokens] [temperature] [n_gpu_layers]"
+        );
+        eprintln!(
+            "  Quote the prompt when it contains spaces and you also pass max_tokens/temperature."
+        );
         return Ok(());
     }
 
     let model_path = PathBuf::from(&args[1]);
+
+    // Positional CLI: <model> <prompt> <max_tokens> <temperature> [n_gpu_layers].
+    // If the trailing arguments are not numeric, treat everything as an unquoted prompt.
+    let mut max_tokens = 128usize;
+    let mut temperature = 0.7f64;
+    let mut n_gpu_layers: Option<usize> = None;
+
     let prompt = if args.len() > 2 {
-        args[2].clone()
+        let positional = args.len() >= 4
+            && args[3].parse::<usize>().is_ok()
+            && (args.len() < 5 || args[4].parse::<f64>().is_ok());
+        if positional {
+            max_tokens = args[3].parse().unwrap_or(128);
+            if args.len() > 4 {
+                temperature = args[4].parse().unwrap_or(0.7);
+            }
+            if args.len() > 5 {
+                n_gpu_layers = args[5].parse().ok();
+            }
+            args[2].clone()
+        } else {
+            args[2..].join(" ")
+        }
     } else {
         "Explain what makes Rust a modern, memory-safe language in 3 bullet points:".to_string()
     };
-    let max_tokens: usize = if args.len() > 3 {
-        args[3].parse().unwrap_or(128)
-    } else {
-        128
-    };
-    let temperature: f64 = if args.len() > 4 {
-        args[4].parse().unwrap_or(0.7)
-    } else {
-        0.7
-    };
-    let n_gpu_layers: Option<usize> = if args.len() > 5 {
-        args[5].parse().ok()
-    } else {
-        None
-    };
+
     if let Some(n) = n_gpu_layers {
         std::env::set_var("N_GPU_LAYERS", n.to_string());
     }
@@ -51,23 +53,14 @@ fn main() -> anyhow::Result<()> {
     println!("================================================================================");
     println!("📦 Loading Model: {}", model_path.display());
     println!("💬 Prompt: \"{}\"", prompt);
-    println!("⚙️  Params: max_tokens = {}, temp = {}, n_gpu_layers = {:?}", max_tokens, temperature, n_gpu_layers);
+    println!(
+        "⚙️  Params: max_tokens = {}, temp = {}, n_gpu_layers = {:?}",
+        max_tokens, temperature, n_gpu_layers
+    );
 
     let device = match aurora_rust_engine::device::auto_device() {
-        Ok(d) => {
-            match &d {
-                Device::Cuda(_) => println!("⚡ Device: NVIDIA CUDA (GPU)"),
-                #[cfg(feature = "rocm")]
-                Device::Rocm(_) => println!("⚡ Device: AMD ROCm (GPU)"),
-                Device::Metal(_) => println!("⚡ Device: Apple Metal (GPU)"),
-                Device::Cpu => println!("🖥️  Device: CPU"),
-            }
-            d
-        }
-        Err(e) => {
-            println!("⚠️ Failed to initialize auto_device: {e}, using CPU");
-            Device::Cpu
-        }
+        Ok(d) => d,
+        Err(_) => Device::Cpu,
     };
 
     let start_load = Instant::now();
@@ -83,16 +76,42 @@ fn main() -> anyhow::Result<()> {
     println!("--------------------------------------------------------------------------------");
     println!("🤖 Generating text...");
 
+    let mut params = TextGenParams::default();
+    params.max_tokens = max_tokens;
+    params.temperature = temperature;
+
+    let mut token_count = 0usize;
     let start_gen = Instant::now();
-    let generated = text_model.generate(&prompt, max_tokens, temperature)?;
+    let generated = {
+        let mut on_token = |_piece: &str| -> bool {
+            token_count += 1;
+            true
+        };
+        text_model.generate_stream_with_params(&prompt, &params, Some(&mut on_token))?
+    };
     let gen_time = start_gen.elapsed();
 
     println!("--------------------------------------------------------------------------------");
     println!("📝 Generated Output:");
     println!("{}", generated);
     println!("================================================================================");
-    let tok_per_sec = (max_tokens as f64) / gen_time.as_secs_f64().max(0.001);
-    println!("⏱️  Generation completed in {:.2}s (~{:.2} tok/s)", gen_time.as_secs_f64(), tok_per_sec);
+
+    let secs = gen_time.as_secs_f64().max(0.001);
+    if token_count > 1 {
+        println!(
+            "⏱️  Generation completed in {:.2}s ({} tokens, {:.2} tok/s)",
+            secs,
+            token_count,
+            token_count as f64 / secs
+        );
+    } else {
+        println!(
+            "⏱️  Generation completed in {:.2}s (~up to {} tokens, {:.2} tok/s)",
+            secs,
+            max_tokens,
+            max_tokens as f64 / secs
+        );
+    }
     println!("================================================================================");
 
     Ok(())

@@ -342,7 +342,7 @@ struct GatedDeltaNetWeights {
 
     key_dim: usize,     // 16 * 128 = 2048
     value_dim: usize,   // 48 * 128 = 6144
-    conv_dim: usize,    // 2048 * 2 + 6144 = 10240
+    _conv_dim: usize,   // 2048 * 2 + 6144 = 10240
     num_k_heads: usize, // 16
     num_v_heads: usize, // 48
     head_k_dim: usize,  // 128
@@ -443,7 +443,7 @@ impl GatedDeltaNetWeights {
             ssm_norm,
             key_dim: 2048,
             value_dim: 6144,
-            conv_dim: 10240,
+            _conv_dim: 10240,
             num_k_heads: 16,
             num_v_heads: 48,
             head_k_dim: 128,
@@ -710,8 +710,8 @@ pub struct ModelWeights {
     layers: Vec<LayerWeights>,
     output_norm: RmsNorm,
     lm_head: QMatMul,
-    device: Device,
-    dtype: DType,
+    _device: Device,
+    _dtype: DType,
     vocab_size: usize,
     eos_token_id: Option<u32>,
 }
@@ -765,8 +765,8 @@ impl ModelWeights {
             layers,
             output_norm,
             lm_head,
-            device: device.clone(),
-            dtype,
+            _device: device.clone(),
+            _dtype: dtype,
             vocab_size,
             eos_token_id,
         })

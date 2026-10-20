@@ -71,6 +71,132 @@ impl LayerKVCache {
     }
 }
 
+/// Compact 8-bit quantized entry for a single key or value cache tensor.
+/// Compresses [B, H, S, D] float tensors to [B, H, S, D] u8 with per-channel/per-token scales [B, H, S, 1].
+/// Reduces resident cache memory by 75% compared to F32 and 50% compared to F16.
+#[derive(Debug, Clone)]
+pub struct QuantizedKVCacheEntry {
+    /// Quantized uint8 data centered around 128
+    pub data: Tensor,
+    /// Per-token/channel scaling factor in F32
+    pub scale: Tensor,
+    /// Original sequence length
+    pub seq_len: usize,
+}
+
+impl QuantizedKVCacheEntry {
+    /// Quantize a [B, H, S, D] float tensor into symmetric uint8 representation
+    pub fn quantize(x: &Tensor) -> CandleResult<Self> {
+        let x_f32 = x.to_dtype(DType::F32)?;
+        let dims = x.shape().dims();
+        let seq_len = if dims.len() >= 3 { dims[2] } else { 0 };
+
+        // Absolute maximum along the last dimension (dim -1: head_dim D)
+        let abs_x = x_f32.abs()?;
+        let max_val = abs_x.max_keepdim(candle_core::D::Minus1)?;
+        let eps = 1e-8f64;
+        let scale = ((max_val + eps)? * (1.0 / 127.0))?; // scale = max / 127.0
+
+        // normalized = x / scale  => [-127, 127]
+        let norm = x_f32.broadcast_div(&scale)?;
+        // shifted = round(norm) + 128 => [1, 255] in U8
+        let shifted = (norm + 128.0)?;
+        let data = shifted.to_dtype(DType::U8)?;
+
+        Ok(Self {
+            data,
+            scale,
+            seq_len,
+        })
+    }
+
+    /// Dequantize back to high precision target dtype
+    pub fn dequantize(&self, target_dtype: DType) -> CandleResult<Tensor> {
+        let shifted = self.data.to_dtype(DType::F32)?;
+        let norm = (shifted - 128.0)?;
+        let float_tensor = norm.broadcast_mul(&self.scale)?;
+        float_tensor.to_dtype(target_dtype)
+    }
+
+    /// Truncate entry to maintain sliding window bound
+    pub fn truncate_window(&self, window_size: usize) -> CandleResult<Self> {
+        if self.seq_len <= window_size {
+            return Ok(self.clone());
+        }
+        let start = self.seq_len - window_size;
+        let data = self.data.narrow(2, start, window_size)?;
+        let scale = self.scale.narrow(2, start, window_size)?;
+        Ok(Self {
+            data,
+            scale,
+            seq_len: window_size,
+        })
+    }
+
+    /// Concatenate a newly generated step onto this quantized entry along sequence dimension
+    pub fn concat_step(&self, step: &QuantizedKVCacheEntry) -> CandleResult<Self> {
+        let data = Tensor::cat(&[&self.data, &step.data], 2)?;
+        let scale = Tensor::cat(&[&self.scale, &step.scale], 2)?;
+        Ok(Self {
+            data,
+            scale,
+            seq_len: self.seq_len + step.seq_len,
+        })
+    }
+}
+
+/// Quantized Layer KV-Cache providing compact 8-bit memory storage with on-the-fly dequantization.
+#[derive(Debug, Clone)]
+pub struct QuantizedLayerKVCache {
+    pub k: Option<QuantizedKVCacheEntry>,
+    pub v: Option<QuantizedKVCacheEntry>,
+}
+
+impl QuantizedLayerKVCache {
+    pub fn new() -> Self {
+        Self { k: None, v: None }
+    }
+
+    pub fn reset(&mut self) {
+        self.k = None;
+        self.v = None;
+    }
+
+    /// Append key and value states, quantizing them to 8-bit storage and returning dequantized tensors.
+    pub fn append_with_window(
+        &mut self,
+        new_k: &Tensor,
+        new_v: &Tensor,
+        sliding_window: Option<usize>,
+    ) -> CandleResult<(Tensor, Tensor)> {
+        let target_dtype = new_k.dtype();
+        let step_k = QuantizedKVCacheEntry::quantize(new_k)?;
+        let step_v = QuantizedKVCacheEntry::quantize(new_v)?;
+
+        let mut q_k = match &self.k {
+            Some(prev_k) => prev_k.concat_step(&step_k)?,
+            None => step_k,
+        };
+        let mut q_v = match &self.v {
+            Some(prev_v) => prev_v.concat_step(&step_v)?,
+            None => step_v,
+        };
+
+        if let Some(w) = sliding_window.filter(|&w| w > 0) {
+            q_k = q_k.truncate_window(w)?;
+            q_v = q_v.truncate_window(w)?;
+        }
+
+        let deq_k = q_k.dequantize(target_dtype)?;
+        let deq_v = q_v.dequantize(target_dtype)?;
+
+        self.k = Some(q_k);
+        self.v = Some(q_v);
+
+        Ok((deq_k, deq_v))
+    }
+}
+
 /// Global KV-Cache across all transformer layers.
 pub struct KVCache {
     pub layers: Vec<LayerKVCache>,
@@ -467,9 +593,35 @@ impl LogitsProcessor {
 }
 
 fn rand_f32() -> f32 {
+    use std::cell::Cell;
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
-    (nanos as f32) / (1_000_000_000.0f32)
+
+    fn seed() -> u64 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15);
+        let stack = &nanos as *const u64 as u64;
+        (nanos ^ stack.rotate_left(17)) | 1
+    }
+
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new(0);
+    }
+
+    STATE.with(|cell| {
+        let mut x = cell.get();
+        if x == 0 {
+            x = seed();
+        }
+        // xorshift64*: fast, statistically sound for sampling (not cryptographic).
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        cell.set(x);
+        let r = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        ((r >> 40) as f32) / (1u64 << 24) as f32
+    })
 }
 
 /// The ROCm Candle backend only supports contiguous operands for `matmul`.
@@ -1436,7 +1588,14 @@ impl CausalLMPipeline {
             let is_lfm = self.weights.contains(&"blk.0.shortconv.in_proj.weight".to_string())
                 || self.weights_cache.contains_key("blk.0.shortconv.in_proj.weight");
             let router_probs = if is_lfm {
-                candle_nn::ops::sigmoid(&router_logits).map_err(LuminaError::Candle)?
+                // Portable sigmoid in F32: (1 + exp(-x))^-1
+                let orig_dt = router_logits.dtype();
+                let f32_logits = router_logits.to_dtype(DType::F32).map_err(LuminaError::Candle)?;
+                let neg = f32_logits.neg().map_err(LuminaError::Candle)?;
+                let exp = neg.exp().map_err(LuminaError::Candle)?;
+                let denom = (exp + 1.0).map_err(LuminaError::Candle)?;
+                let sig = denom.recip().map_err(LuminaError::Candle)?;
+                sig.to_dtype(orig_dt).map_err(LuminaError::Candle)?
             } else {
                 crate::device::softmax_last_dim(&router_logits).map_err(LuminaError::Candle)?
             };
@@ -1960,6 +2119,7 @@ mod tests {
             final_logit_softcapping: Some(30.0),
             unit_offset_norm: true,
             sliding_window_pattern: None,
+            rope_scaling_factor: 1.0,
             moe_num_experts: 0,
             moe_top_k: 0,
             moe_shared_experts: 0,
@@ -2000,6 +2160,7 @@ mod tests {
             final_logit_softcapping: Some(30.0),
             unit_offset_norm: true,
             sliding_window_pattern: None,
+            rope_scaling_factor: 1.0,
             moe_num_experts: 0,
             moe_top_k: 0,
             moe_shared_experts: 0,
@@ -2098,5 +2259,76 @@ mod tests {
 
         assert_eq!(accepted, vec![101, 102, 999]);
         assert_eq!(accepted.len(), 3);
+    }
+
+    #[test]
+    fn test_quantized_kv_cache_roundtrip() -> Result<()> {
+        let device = Device::Cpu;
+        // Shape [B=1, H=2, S=4, D=16]
+        let data: Vec<f32> = (0..(1 * 2 * 4 * 16))
+            .map(|i| ((i as f32) * 0.1).sin() * 2.5)
+            .collect();
+        let tensor = Tensor::from_slice(&data, (1, 2, 4, 16), &device).map_err(LuminaError::Candle)?;
+
+        let entry = QuantizedKVCacheEntry::quantize(&tensor).map_err(LuminaError::Candle)?;
+        assert_eq!(entry.data.dtype(), DType::U8);
+        assert_eq!(entry.seq_len, 4);
+
+        let reconstructed = entry.dequantize(DType::F32).map_err(LuminaError::Candle)?;
+        let rec_vec: Vec<f32> = reconstructed.flatten_all().map_err(LuminaError::Candle)?.to_vec1().map_err(LuminaError::Candle)?;
+
+        // Measure cosine similarity between original and reconstructed
+        let dot: f32 = data.iter().zip(rec_vec.iter()).map(|(a, b)| a * b).sum();
+        let norm_a: f32 = data.iter().map(|a| a * a).sum::<f32>().sqrt();
+        let norm_b: f32 = rec_vec.iter().map(|b| b * b).sum::<f32>().sqrt();
+        let cosine_sim = dot / (norm_a * norm_b);
+
+        assert!(
+            cosine_sim > 0.99,
+            "Cosine similarity ({cosine_sim}) must exceed 0.99 for 8-bit quantized KV roundtrip"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_quantized_kv_cache_sliding_window() -> Result<()> {
+        let device = Device::Cpu;
+        let mut cache = QuantizedLayerKVCache::new();
+
+        let k1 = Tensor::zeros((1, 2, 3, 16), DType::F32, &device).map_err(LuminaError::Candle)?;
+        let v1 = Tensor::zeros((1, 2, 3, 16), DType::F32, &device).map_err(LuminaError::Candle)?;
+
+        // Append 3 tokens with sliding window 4 -> total 3 tokens
+        let (k, v) = cache.append_with_window(&k1, &v1, Some(4)).map_err(LuminaError::Candle)?;
+        assert_eq!(k.dim(2).map_err(LuminaError::Candle)?, 3);
+        assert_eq!(v.dim(2).map_err(LuminaError::Candle)?, 3);
+
+        // Append 3 more tokens -> window 4 truncates from 6 to 4 tokens
+        let (k_trunc, v_trunc) = cache.append_with_window(&k1, &v1, Some(4)).map_err(LuminaError::Candle)?;
+        assert_eq!(k_trunc.dim(2).map_err(LuminaError::Candle)?, 4);
+        assert_eq!(v_trunc.dim(2).map_err(LuminaError::Candle)?, 4);
+        assert_eq!(cache.k.as_ref().unwrap().seq_len, 4);
+        assert_eq!(cache.v.as_ref().unwrap().seq_len, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_quantized_kv_cache_memory_footprint() -> Result<()> {
+        let device = Device::Cpu;
+        // Large sequence of 256 tokens with head dim 128 across 8 heads
+        let k = Tensor::zeros((1, 8, 256, 128), DType::F32, &device).map_err(LuminaError::Candle)?;
+        let entry = QuantizedKVCacheEntry::quantize(&k).map_err(LuminaError::Candle)?;
+
+        let float_bytes = 1 * 8 * 256 * 128 * 4; // F32 = 4 bytes per elem = 1,048,576 bytes
+        let quant_data_bytes = entry.data.elem_count() * 1; // U8 = 1 byte
+        let scale_bytes = entry.scale.elem_count() * 4; // F32 scales [1, 8, 256, 1] = 2048 * 4 = 8,192 bytes
+        let total_quant_bytes = quant_data_bytes + scale_bytes;
+
+        let ratio = (total_quant_bytes as f64) / (float_bytes as f64);
+        assert!(
+            ratio <= 0.30,
+            "Quantized KV memory ({total_quant_bytes} bytes) must be <= 30% of F32 footprint ({float_bytes} bytes, ratio {ratio})"
+        );
+        Ok(())
     }
 }

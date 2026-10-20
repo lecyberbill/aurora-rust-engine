@@ -3,7 +3,7 @@
 
 **Version**: 0.3.0-dev  
 **Language**: 100% Pure Rust (Candle, CUDA / cuDNN, FlashAttention-2, FP16)  
-**Target Hardware**: NVIDIA GPUs (Ada Lovelace, Ampere, Turing, Pascal) / Apple Silicon (Metal) / CPU (AVX-512)
+**Target Hardware**: AMD Radeon GPUs (RDNA 4 gfx1201 / ROCm 10 core-10.0, RDNA 3, RDNA 2) / NVIDIA GPUs (Ada Lovelace, Ampere, Turing) / Apple Silicon (Metal) / CPU (AVX-512)
 
 ---
 
@@ -482,11 +482,11 @@ loading/merging/stacking stack. This turns `aurora-rust-engine` from a pure infe
 - [x] **End-to-End CLI Test Runner (`src/bin/test_text_gen.rs`)**:
   - Verified on local quantized checkpoints (`DeepSeek-R1-Distill-Llama-8B-Q8_0.gguf`).
   - **Empirical Hardware Validation on AMD ROCm Server (Radeon AI PRO R9700 `gfx1201`)**:
-    - **Qwen3.8-27B (`Qwen3.8-27B-Q4_K_M.gguf`, 17.44 GB)**: GDN hybrid path verified. Model loaded in **71.25 s** (includes dequantize/de-tile/re-quantize of the GDN weights), generated 32 tokens at **~9.44 tok/s** (greedy, ChatML).
-    - **Gemma-3-12B (`gemma-3-12b-it-q4_k_m.gguf`, 7.30 GB)**: Model loaded in **0.18s**, generated 40 tokens at **174.07 tok/s** (prompt enrichment & French translation validated).
-    - **Gemma-4-31B-UD (`gemma-4-31B-it-UD-Q4_K_XL.gguf`, 18.82 GB)**: Loaded in **0.39s**. **Stress Test**: Long-context generation of **1024 tokens** sustained uninterrupted at **133.29 tok/s** (total time: 7.68s) on the 22-stanza poem on muscle hypertrophy.
-    - **Microsoft Phi-4 Reasoning Plus 15B (`Phi-4-reasoning-plus-Q4_K_M.gguf`, 8.50 GB)**: Model loaded in **0.16s**. Successfully validated on pure Rust CausalLM pipeline (`test_text_gen`): Prompt *"What is the capital of France?"* generated bit-exact continuation `assistantThe capital`. Handled Phi-specific fused `blk.{i}.ffn_up.weight` [35840, 5120] split into gate/up projections, GQA Sniffing 40/10 heads (`blk.{i}.attn_qkv.weight`), and 100k vocabulary mapping.
-    - **Liquid AI LFM2.5-8B (`LFM2.5-8B-A1B-Q4_K_M.gguf`, 5.15 GB)**: Architectural audit revealed a hybrid **`lfm2moe`** architecture: 1D short convolutions (`shortconv.conv.weight`, `in_proj`, `out_proj`) on layers 0, 1, 3.. interspersed with standard QKV attention (layers 2, 6, 10, 14, 18, 21) and MoE FFN experts (`ffn_down_exps`, `ffn_gate_exps`, `ffn_up_exps`). Pure Transformer fallback detected missing attention weights on layer 0; scheduled for dedicated `lfm2moe` hybrid block support (see Milestone 18).
+    - **Qwen3.8-27B (`Qwen3.8-27B-Q4_K_M.gguf`, 17.44 GB)**: GDN hybrid path verified. Model loaded in **71.68 s** (includes dequantize/de-tile/re-quantize of the GDN weights), generated **11.73 tok/s** (401 tokens, temp 0.7, French poem); 9.44 tok/s in greedy 32-token mode.
+    - **Gemma-3-12B (`gemma-3-12b-it-q4_k_m.gguf`, 7.30 GB)**: Model loaded in **3.85 s**, generated 65 tokens at **17.80 tok/s** (greedy, coherent English paragraph).
+    - **Gemma-4-31B-UD (`gemma-4-31B-it-UD-Q4_K_XL.gguf`, 18.82 GB)**: Loaded in **7.92 s**, generated 65 tokens at **11.25 tok/s** (greedy, coherent; emits `<unused94>thought` markers).
+    - **Microsoft Phi-4 Reasoning Plus 15B (`Phi-4-reasoning-plus-Q4_K_M.gguf`, 8.50 GB)**: Lazy load in **0.13 s**, **5.53 tok/s** (31 tokens). The Phi ChatML template is not handled yet: roles are echoed in the output. Handled Phi-specific fused `blk.{i}.ffn_up.weight` [35840, 5120] split into gate/up projections, GQA Sniffing 40/10 heads (`blk.{i}.attn_qkv.weight`), and 100k vocabulary mapping.
+    - **Liquid AI LFM2.5-8B (`LFM2.5-8B-A1B-Q4_K_M.gguf`, 5.15 GB)**: Hybrid **`lfm2moe`** audit: 1D short convolutions (`shortconv.conv.weight`, `in_proj`, `out_proj`) on layers 0, 1, 3.. interspersed with standard QKV attention (layers 2, 6, 10, 14, 18, 21) and MoE FFN experts (`ffn_down_exps`, `ffn_gate_exps`, `ffn_up_exps`). Lazy load **0.35 s**, **3.15 tok/s** (65 tokens), but output is degenerate (`?`) due to recurrent MoE/Conv1D state drift; the portable sigmoid fix only removes the ROCm crash.
 
 #### First concrete use-case: prompt enrichment & translation (for image generation)
 
@@ -681,7 +681,7 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 - [x] **Native Hardware GEMM & Fused Kernels (AMD RDNA 4 & NVIDIA CUDA)**:
   - Integrated native HIP WMMA INT4 kernel (`__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12`) for AMD RDNA 4 (`gfx1201`) on ROCm 10.0 (`src/kernels/wmma_q4k_rdna4.hip`).
   - Integrated native HIP Fused SDPA Attention Kernel with Online Softmax (`src/kernels/fused_sdpa_rdna4.hip` & `launch_hip_fused_sdpa_f16`) for AMD ROCm (`gfx1201`) with automatic fallback.
-  - Direct Q4_K_M matrix-vector dequantization and multiplication on dedicated hardware units: the HIP WMMA kernel is compiled and exercised by the standalone `test_wmma_q4k` binary; wiring it into the model path is still pending. Measured Qwen3.8 GDN decode on the portable `QMatMul` path: **~9.44 tok/s**.
+  - Direct Q4_K_M matrix-vector dequantization and multiplication on dedicated hardware units: the HIP WMMA kernel is compiled and exercised by the standalone `test_wmma_q4k` binary; wiring it into the model path is still pending. Measured Qwen3.8 GDN decode on the portable `QMatMul` path: **11.73 tok/s** (400 tokens, temp 0.7) / **9.44 tok/s** greedy.
   - Strict preservation of NVIDIA CUDA cross-platform compatibility (`--features cuda`) with zero API regression.
 
 ---
@@ -743,20 +743,53 @@ Offered as a `pipeline.enhance_prompt(text) -> String` / `--enrich` CLI flag alo
 
 ---
 
-## 🔬 Empirical Hardware & Real-Weight Validation (RTX 4070 Ti 12 GB, CUDA 13.4)
+## ✅ Milestone 30: Native Hybrid SSM / Attention Architectures & SOTA LLM Parity (QWEN/GEMMA VERIFIED; PHI/LFM PARTIAL)
 
-All pipelines have been validated end-to-end with real physical weights on real GPU hardware (`--release --features cuda`), confirming zero synthetic stubbing and zero regression:
+**Goal.** Provide native, pure-Rust implementations of modern hybrid architectures (Gated DeltaNet + Full Attention) and latest CausalLM models without relying on Python runtimes, llama.cpp, or missing upstream Candle implementations:
+
+- [x] **Qwen 3.5 / 3.8 27B Hybrid Engine (`src/models/quantized_qwen35.rs`, `src/models/auto.rs`)**:
+  - Full native 64-layer hybrid pipeline on AMD ROCm 10 (`gfx1201`): 48 layers Gated DeltaNet (conv1d $k=4$, recurrence $[48, 128, 128]$, untiled v-heads, $ssm\_a = -\exp(A_{\log})$, RMSNormGated) + 16 layers Full Softmax Attention (QK-RMSNorm, partial RoPE 64/256, GQA 24/4, sigmoid gate).
+  - Dedicated 248k tokenizer (`assets/tokenizers/qwen35_tokenizer.json`) with EOS token guard against GGUF metadata.
+  - Measured: 71.68 s load, 11.73 tok/s decode (401 tokens, temp 0.7), verified semantically conformant with Ollama ground truth (Paris, 2+2=4, Jupiter) and a coherent 5-stanza French poem.
+- [x] **Google Gemma 4 31B Engine (`src/models/quantized_gemma3.rs`)**:
+  - Proportional RoPE (scaling factor 0.25), unit attention scale ($1.0$), `layer_output_scale` tensors across 60 layers, and ChatML/turn channel routing.
+  - Measured: 11.25 tok/s (65 tokens, greedy); coherent output (emits `<unused94>thought` markers).
+- [x] **Sampling & Streaming Pipeline (`src/models/text.rs`, `src/models/common.rs`)**:
+  - Native `LogitsProcessor` (temperature, top_p, top_k, repetition_penalty) wired into `QuantizedQwen35` (stream and non-stream) and the Gemma streaming path; `CausalLM` keeps its existing sampling loop.
+  - Strict deterministic greedy decode when `temperature <= 0.0`.
+  - Synchronous streaming (`generate_stream_with_params` via `TokenCallback`) with early abort. The dense Qwen3 non-stream path still uses its legacy greedy generator.
+
+---
+
+## 🚀 Milestone 31: Frictionless Candle Ecosystem Tooling ("Transformers in Pure Rust") (ACTIVE ROADMAP)
+
+**Goal.** Transform `aurora-rust-engine` into the definitive ergonomic toolkit for Candle, removing all boilerplate, friction, and missing upstream features for developers deploying modern models:
+
+- [x] **Zero-Boilerplate Model Instantiation (`AutoModel`)**: Single entry point `from_local` / `from_pretrained` with automatic architecture sniffing, container detection (GGUF, Safetensors), and hardware placement (ROCm 10, CUDA, CPU).
+- [x] **Unified Generation & Token Streaming API (`GenerationModel`)**: Uniform `generate`, `generate_chat`, `generate_with_reasoning`, and `generate_stream` contracts across all architectures.
+- [ ] **Native Quantized KV-Cache (FP8 / Q4_0 / Q8_0)**: Memory-bounded context scaling for 32k+ token windows without VRAM explosion.
+- [ ] **Cross-Platform Candle Upstream Contributions**: Upstream packaging of the non-contiguous matmul and mixed-dtype RMSNorm HIP patches (`patches/0001-fix-rocm-handle-non-contiguous-matmul-operands-and-m.patch`) to benefit the wider Rust ML community.
+- [ ] **Prompt Enhancement & Translation Tooling**: Built-in pre-generation pipe rewriting French / natural language prompts into optimized diffusion prompts.
+
+---
+
+## 🔬 Empirical Hardware & Real-Weight Validation (Radeon AI PRO R9700 gfx1201 / ROCm 10 & RTX 4070 Ti)
+
+All advertised models load on real weights; Qwen 3.5/3.8 and Gemma produce coherent output. Phi-4 and LFM are partial (see table):
 
 | Modality | Model & Weights | Hardware Device | Input / Parameters | Metric & Result | Artifact Generated |
 |---|---|---|---|---|---|
+| **Text Generation (Hybrid SSM)** | `Qwen3.8-27B-Q4_K_M.gguf` (17.44 Go) | AMD ROCm 10 (R9700 gfx1201) | 400 max tokens, temp 0.7, ChatML | **71.68 s** load, **11.73 tok/s** (401 tok) | Poème français 5 strophes (dernière tronquée à 400 tokens) |
+| **Text Generation (LLM 12B)** | `gemma-3-12b-it-q4_k_m.gguf` (7.30 Go) | AMD ROCm 10 (R9700 gfx1201) | 64 tokens, greedy | **3.85 s** load, **17.80 tok/s** (65 tok) | Paragraphe anglais cohérent |
+| **Text Generation (LLM 31B)** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` (18.82 Go) | AMD ROCm 10 (R9700 gfx1201) | 64 tokens, greedy | **7.92 s** load, **11.25 tok/s** (65 tok) | Paragraphe cohérent (marqueurs `<unused94>thought`) |
+| **Reasoning LLM (15B)** | `Phi-4-reasoning-plus-Q4_K_M.gguf` (8.50 Go) | AMD ROCm 10 (R9700 gfx1201) | 64 tokens, greedy | **0.13 s** lazy load, **5.53 tok/s** (31 tok) | ⚠️ Partial: ChatML roles echoed, template not handled |
+| **Hybrid MoE Agent (LLM)** | `LFM2.5-8B-A1B-Q4_K_M.gguf` (4.8 Go) | AMD ROCm 10 (R9700 gfx1201) | 64 tokens, greedy | **0.35 s** lazy load, **3.15 tok/s** (65 tok) | ⚠️ Sigmoid ROCm fixed; output degenerate (`?`) |
+| **DiT Image Synthesis** | `FLUX.2-Klein-4B` (7.75 Go) + Qwen3-4B + VAE 32ch | NVIDIA CUDA (RTX 4070 Ti) | 1024×1024, 4-step Euler Flow Matching | **25.85s** ODE (0.15 it/s), 3.64s VAE decode | `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` (1.88 Mo) |
 | **Super-Resolution (4x)** | `RealESRGAN_x4.safetensors` (66.8 Mo) | NVIDIA CUDA (RTX 4070 Ti) | 512×512 PNG, tiled 256px, pad 16px | **5.51s** upscaling time, 0.14s load | `output/upscaled_step_4_real.png` (2048×2048, 4.78 Mo) |
 | **Speech-to-Text (STT)** | `moonshine-tiny` (108 Mo) | NVIDIA CUDA (RTX 4070 Ti) | 48 000 samples @ 16 kHz WAV | **1.6s** greedy decode | Bit-exact transcript: `"Thank you for watching."` |
-| **Text Generation (LLM)** | `TinyLlama-1.1B-Chat` (2.2 Go) | NVIDIA CUDA (RTX 4070 Ti) | 32 max tokens, temp 0.7 | **2.06s** load, **5.38 tok/s** decode (5.95s) | Generated autoregressive text with KV-cache |
-| **Hybrid MoE Agent (LLM)** | `LFM2.5-8B-A1B-Q4_K_M.gguf` (4.8 Go) | AMD ROCm / Linux | 32 max tokens, ChatML, temp 0.2 | **0.39s** load, LIV ShortConv + MoE Top-4 | Verified coherent agentic assistant output (`\boxed{\text{...}}`) |
-| **DiT Image Synthesis** | `FLUX.2-Klein-4B` (7.75 Go) + Qwen3-4B + VAE 32ch | NVIDIA CUDA (RTX 4070 Ti) | 1024×1024, 4-step Euler Flow Matching | **25.85s** ODE (0.15 it/s), 3.64s VAE decode | `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` (1.88 Mo) |
 
 - [x] **Speculative Decoding & On-The-Fly W8A16 Kernel (`src/models/text/causal.rs`)**:
   - Verification loop with draft model acceleration (`generate_speculative`), automatic deviation rollback, and streaming alignment.
   - Direct W8A16 on-the-fly symmetric dequantization in `matmul_linear`.
-- **Unit Test Suite:** 84/84 tests passing (`cargo test --lib` -> 84 passed, 0 failed, 12.88s).
-- **Environment & Build:** Locked in `.cargo/config.toml` for CUDA 13.x toolchain + MSVC CCCL conforming preprocessor.
+- **Unit Test Suite:** 92/92 tests passing (`cargo test --lib` -> 92 passed, 0 failed).
+- **Environment & Build:** Locked for ROCm 10 (core-10.0 / LLVM gfx1201) on AMD Linux and CUDA 13.x on Windows.

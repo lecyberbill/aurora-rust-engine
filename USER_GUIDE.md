@@ -1609,15 +1609,18 @@ To compile and execute natively with NVIDIA CUDA 13.4 and MSVC under Windows:
 | **Text Generation** | TinyLlama-1.1B (2.2 Go) | 32 tokens, greedy/temp 0.7 | **5.95 s** (~5.38 tok/s) | Autoregressive token stream |
 | **DiT Generation** | FLUX.2-Klein-4B (7.75 Go) | 1024², 4 steps Euler ODE | **25.85 s** ODE, 3.64s VAE | `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` |
 
-#### Empirical LLM Inference Benchmarks (AMD ROCm / Radeon AI PRO R9700 `gfx1201`)
+#### Empirical LLM Inference Benchmarks (AMD ROCm 10 / Radeon AI PRO R9700 `gfx1201`)
+Mesures du 2026-10-20 avec le CLI corrigé (tokens réels comptés via le callback de streaming).
 
-| Model | Checkpoint File | Size | Load Time | Generation Throughput | Test Case |
+| Model | Checkpoint File | Size | Load Time | Generation Throughput | Test Case & Empirical Status |
 |---|---|---|---|---|---|
-| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.25 s** | **~9.44 tok/s** | ChatML, 32 tokens, greedy (GDN path) |
-| **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **0.18 s** | **174.07 tok/s** | Prompt enrichment & French translation |
-| **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **0.39 s** | **133.29 tok/s** | 1024-token long-form poem stress test |
+| **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **3.85 s** | **17.80 tok/s** (65 tok / 3.65 s) | ✅ Paragraphe anglais cohérent (greedy) |
+| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.68 s** | **11.73 tok/s** (401 tok / 34.19 s) | ✅ Poème français en 5 strophes, temp 0.7, sans `<think>` |
+| **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **7.92 s** | **11.25 tok/s** (65 tok / 5.78 s) | ✅ Paragraphe cohérent (marqueurs `<unused94>thought`) |
+| **Phi-4 Reasoning Plus** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.13 s** (lazy) | **5.53 tok/s** (31 tok / 5.61 s) | ⚠️ Pas de crash, mais les rôles ChatML sont recopiés (template Phi non géré) |
+| **LFM 2.5 8B** | `LFM2.5-8B-A1B-Q4_K_M.gguf` | 4.80 GB | **0.35 s** (lazy) | **3.15 tok/s** (65 tok / 20.65 s) | ⚠️ Sortie dégénérée (`?`) : sigmoid ROCm corrigé, dérive récurrente MoE/Conv1D |
 
-> Only the Qwen 3.8 row was re-measured after the GDN fix (ROCm `gfx1201`, 2026-10-19); the Gemma rows predate the current quantized loader and should be re-benchmarked before being quoted.
+> Prompts : Qwen = poème français (400 tokens, temp 0.7) ; les autres = courte phrase anglaise (64 tokens, greedy). Les temps de chargement Phi/LFM sont des temps « lazy » (métadonnées) et ne sont pas comparables au chargement eager de Qwen.
 
 ---
 
@@ -1699,12 +1702,22 @@ Aurora Engine features a unified CausalLM inference pipeline for large language 
   - Detected from `general.architecture = qwen35`; 64 decoder layers are executed (`blk.64` is the MTP draft head and is excluded).
   - Requires the dedicated 248k tokenizer: `assets/tokenizers/qwen35_tokenizer.json`. It is loaded automatically and cross-checked against the GGUF `tokenizer.ggml.eos_token_id`; a mismatched tokenizer is a hard error.
   - GGUF v-heads are stored tiled (`[num_v_per_k, num_k_heads, head_dim]`); the loader de-tiles `v`, `z`, `alpha`, `beta`, `ssm_a`, `ssm_dt`, conv weights and `ssm_out`, then re-quantizes to the original GGML dtype. `ssm_a` already stores `-exp(A_log)`.
-  - Measured with `Qwen3.8-27B-Q4_K_M.gguf` (32 tokens, greedy): **71.25 s load**, **~9.44 tok/s**, 17.44 GB. Verified outputs: `Paris.`, `2 + 2 = **4**`, `... is **Jupiter**.` (match the llama.cpp/Ollama oracle).
-  - Current limits: greedy decoding only, batch size 1, F32 recurrence; no fused GDN kernel yet.
+  - Measured with `Qwen3.8-27B-Q4_K_M.gguf`: **71.68 s load**, **11.73 tok/s** (401 tokens, temp 0.7, French poem). Verified factual outputs: `Paris.`, `2 + 2 = **4**`, `... is **Jupiter**.` (match the llama.cpp/Ollama oracle).
+  - Sampling: `TextGenParams` (temperature, top_p, top_k, repetition_penalty) is wired for Qwen 3.5/3.8; greedy when `temperature <= 0`. Limits: batch size 1, F32 recurrence, no fused GDN kernel.
+- **Google Gemma 3 & Gemma 4 Architecture (`gemma-3-12b-it`, `gemma-4-31B-it`)** :
+  - Architecture dense native intégrant le RoPE proportionnel (`scaling_factor = 0.25`), l'attention scaling unitaire ($1.0$), et les tenseurs de pondération résiduelle `layer_output_scale` sur l'ensemble des couches.
+  - Support natif des balises de tour et canaux de pensée (`<|turn>user`, `<turn|>`, `<|turn>model`, `<unused94>thought<unused95>`).
+  - Débit mesuré (64 tokens, greedy) : **17.80 tok/s** sur Gemma 3 12B et **11.25 tok/s** sur Gemma 4 31B sur GPU R9700 `gfx1201`.
+- **Microsoft Phi-4 Reasoning Plus (`phi3` architecture, 15B)** :
+  - Support GQA avec projections fusionnées QKV et SwiGLU MLP.
+  - Résolution de l'anomalie `sliding_window = 0` dans les métadonnées GGUF (évite le tenseur KV nul).
+  - Débit mesuré : **5.53 tok/s** (31 tokens). Le template ChatML de Phi n'est pas encore géré : les rôles sont recopiés dans la sortie, donc le résultat n'est pas exploitable tel quel.
 - **Liquid AI LFM2.5 Hybrid ShortConv-MoE Architecture**:
   - Full native support for Liquid Foundation Models (`LFM2.5-8B-A1B-Q4_K_M.gguf`).
   - Double-gated Linear Input-Varying (LIV) 1D depthwise convolutions with circular rolling state buffer ($K=3$).
   - Sparse Mixture-of-Experts (MoE) with 32 experts (Top-4 active), Sigmoid gating (`expert_gating_func = 2`), and aux-loss-free expert selection bias (`exp_probs_b.bias`).
+  - Correctif ROCm : Kernel logiciel portable `sigmoid` $F(x) = (1 + \exp(-x))^{-1}$ pour compenser l'absence du kernel HIP natif.
+  - Débit mesuré : **3.15 tok/s** (65 tokens) ; la sortie reste dégénérée (`?`) malgré le correctif sigmoid.
   - Built-in ChatML role conditioning:
   ```rust
   let mut model = AutoModel::from_local("LFM2.5-8B-A1B-Q4_K_M.gguf", device, DType::F16)?;

@@ -9,7 +9,7 @@ pub mod qwen;
 use candle_core::{DType, Device, Tensor};
 use crate::error::{LuminaError, Result};
 use crate::text::{Mistral3TextEncoder, Qwen3TextEncoder, T5TextEncoder};
-pub use causal::{CausalLM, CausalLMConfig, CausalLMPipeline, ChatMessage, ChatRole, TextGenParams};
+pub use causal::{CausalLM, CausalLMConfig, CausalLMPipeline, ChatMessage, ChatRole, LogitsProcessor, TextGenParams};
 use super::common::{AnyModel, EncodeModel, GenerationModel, ModelKind};
 
 /// A text backend boxed into one type.
@@ -279,7 +279,7 @@ impl GenerationModel for TextModel {
                 let formatted_prompt = if prompt.contains("<|im_start|>") {
                     prompt.to_string()
                 } else {
-                    format!("<|im_start|>user\n{} /no_think<|im_end|>\n<|im_start|>assistant\n", prompt.trim())
+                    format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n</think>\n", prompt.trim())
                 };
 
                 let tokens = tok.encode(formatted_prompt.as_str(), true).map_err(|e| {
@@ -289,14 +289,13 @@ impl GenerationModel for TextModel {
                     }
                 })?.get_ids().to_vec();
 
+                let processor = LogitsProcessor::new(temperature, 0.95, 50, 1.1);
+
                 model.reset_cache();
                 let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
                 let logits = model.forward(&input, 0)?;
-                let l_vec = logits.squeeze(0)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
 
-                let mut top: Vec<_> = l_vec.iter().enumerate().collect();
-                top.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
-                let mut curr_tok = top[0].0 as u32;
+                let mut curr_tok = processor.sample(&logits, &tokens)?;
                 let mut generated = vec![curr_tok];
 
                 let stop_ids: Vec<u32> = [
@@ -314,10 +313,7 @@ impl GenerationModel for TextModel {
                     }
                     let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
                     let step_logits = model.forward(&inp, tokens.len() + i)?;
-                    let step_vec = step_logits.squeeze(0)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-                    let mut t: Vec<_> = step_vec.iter().enumerate().collect();
-                    t.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    curr_tok = t[0].0 as u32;
+                    curr_tok = processor.sample(&step_logits, &generated)?;
                     generated.push(curr_tok);
                 }
 
@@ -366,19 +362,15 @@ impl GenerationModel for TextModel {
         self.generate_with_reasoning(&prompt, max_tokens, temperature, reasoning_effort)
     }
 
-    fn generate_stream(
+    fn generate_stream_with_params(
         &mut self,
         prompt: &str,
-        max_tokens: usize,
-        temperature: f64,
+        params: &TextGenParams,
         on_token: Option<crate::models::common::TokenCallback>,
     ) -> Result<String> {
         match &mut self.inner {
             TextBackend::CausalLM(pipeline) => {
-                let mut params = TextGenParams::default();
-                params.max_tokens = max_tokens;
-                params.temperature = temperature;
-                pipeline.generate_with_callback(prompt, &params, on_token)
+                pipeline.generate_with_callback(prompt, params, on_token)
             }
             TextBackend::QuantizedGemma3 { model, tokenizer, device } => {
                 let tok = tokenizer.as_ref().ok_or_else(|| {
@@ -398,32 +390,43 @@ impl GenerationModel for TextModel {
                     }
                 })?.get_ids().to_vec();
 
+                let processor = LogitsProcessor::new(
+                    params.temperature,
+                    params.top_p,
+                    params.top_k,
+                    params.repetition_penalty,
+                );
+
                 let mut mut_cb = on_token;
                 let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
                 let logits = model.forward(&input, 0)?;
-                let last = logits.squeeze(0)?;
-                let l_vec = last.to_dtype(DType::F32)?.to_vec1::<f32>()?;
 
-                let mut top: Vec<_> = l_vec.iter().enumerate().collect();
-                top.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
-                let mut curr_tok = top[0].0 as u32;
+                let mut curr_tok = processor.sample(&logits, &tokens)?;
                 let mut generated = vec![curr_tok];
 
                 if let Some(ref mut cb) = mut_cb {
                     if let Ok(piece) = tok.decode(&[curr_tok], false) {
-                        cb(&piece);
+                        if !cb(&piece) {
+                            let text = tok.decode(&generated, true).map_err(|e| {
+                                LuminaError::Context {
+                                    context: "Failed to decode generated token stream".into(),
+                                    source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                                }
+                            })?;
+                            return Ok(text.trim().to_string());
+                        }
                     }
                 }
 
-                for i in 0..max_tokens {
-                    if curr_tok == 1 || curr_tok == 106 { break; }
+                let mut stop_ids = params.stop_tokens.clone();
+                if !stop_ids.contains(&1) { stop_ids.push(1); }
+                if !stop_ids.contains(&106) { stop_ids.push(106); }
+
+                for i in 0..params.max_tokens {
+                    if stop_ids.contains(&curr_tok) { break; }
                     let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
                     let step_logits = model.forward(&inp, tokens.len() + i)?;
-                    let step_last = step_logits.squeeze(0)?;
-                    let step_vec = step_last.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-                    let mut t: Vec<_> = step_vec.iter().enumerate().collect();
-                    t.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    curr_tok = t[0].0 as u32;
+                    curr_tok = processor.sample(&step_logits, &generated)?;
                     generated.push(curr_tok);
 
                     if let Some(ref mut cb) = mut_cb {
@@ -441,13 +444,194 @@ impl GenerationModel for TextModel {
                 })?;
                 Ok(text.trim().to_string())
             }
-            _ => {
-                let text = self.generate(prompt, max_tokens, temperature)?;
-                if let Some(cb) = on_token {
-                    cb(&text);
+            TextBackend::QuantizedQwen35 { model, tokenizer, device } => {
+                let tok = tokenizer.as_ref().ok_or_else(|| {
+                    LuminaError::Config("Tokenizer not attached to QuantizedQwen35 model".into())
+                })?;
+
+                let formatted_prompt = if prompt.contains("<|im_start|>") {
+                    prompt.to_string()
+                } else {
+                    format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n</think>\n", prompt.trim())
+                };
+
+                let tokens = tok.encode(formatted_prompt.as_str(), true).map_err(|e| {
+                    LuminaError::Context {
+                        context: "Failed to tokenize prompt for Qwen3.8".into(),
+                        source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                    }
+                })?.get_ids().to_vec();
+
+                let processor = LogitsProcessor::new(
+                    params.temperature,
+                    params.top_p,
+                    params.top_k,
+                    params.repetition_penalty,
+                );
+
+                let mut mut_cb = on_token;
+                model.reset_cache();
+                let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
+                let logits = model.forward(&input, 0)?;
+
+                let mut curr_tok = processor.sample(&logits, &tokens)?;
+                let mut generated = vec![curr_tok];
+
+                if let Some(ref mut cb) = mut_cb {
+                    if let Ok(piece) = tok.decode(&[curr_tok], false) {
+                        if !cb(&piece) {
+                            let text = tok.decode(&generated, true).map_err(|e| {
+                                LuminaError::Context {
+                                    context: "Failed to decode generated token stream".into(),
+                                    source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                                }
+                            })?;
+                            return Ok(text.trim().to_string());
+                        }
+                    }
                 }
-                Ok(text)
+
+                let mut stop_ids: Vec<u32> = [
+                    model.eos_token_id(),
+                    tok.token_to_id("<|im_end|>"),
+                    tok.token_to_id("<|endoftext|>"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+
+                for &s in &params.stop_tokens {
+                    if !stop_ids.contains(&s) {
+                        stop_ids.push(s);
+                    }
+                }
+
+                for i in 0..params.max_tokens {
+                    if stop_ids.contains(&curr_tok) {
+                        break;
+                    }
+                    let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
+                    let step_logits = model.forward(&inp, tokens.len() + i)?;
+                    curr_tok = processor.sample(&step_logits, &generated)?;
+                    generated.push(curr_tok);
+
+                    if let Some(ref mut cb) = mut_cb {
+                        if let Ok(piece) = tok.decode(&[curr_tok], false) {
+                            if !cb(&piece) {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                let text = tok.decode(&generated, true).map_err(|e| {
+                    LuminaError::Context {
+                        context: "Failed to decode generated token stream".into(),
+                        source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                    }
+                })?;
+                Ok(text.trim().to_string())
             }
+            _ => Err(LuminaError::UnsupportedOp("This model is a text encoder only, not a CausalLM".into())),
         }
+    }
+
+    fn generate_stream(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f64,
+        on_token: Option<crate::models::common::TokenCallback>,
+    ) -> Result<String> {
+        let mut params = TextGenParams::default();
+        params.max_tokens = max_tokens;
+        params.temperature = temperature;
+        self.generate_stream_with_params(prompt, &params, on_token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{Device, Tensor};
+
+    #[test]
+    fn test_sampling_greedy_deterministic() -> Result<()> {
+        let device = Device::Cpu;
+        let logits_data = vec![0.1f32, 2.5, 10.8, -1.2, 5.4];
+        let logits = Tensor::new(logits_data.as_slice(), &device)?;
+        let processor = LogitsProcessor::new(0.0, 0.95, 50, 1.0);
+
+        for _ in 0..10 {
+            let tok = processor.sample(&logits, &[])?;
+            assert_eq!(tok, 2, "Greedy sampling must select index 2 with maximum logit 10.8");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_sampling_logits_processor() -> Result<()> {
+        let device = Device::Cpu;
+        let logits_data = vec![1.0f32, 1.0, 1.0, 1.0, 100.0];
+        let logits = Tensor::new(logits_data.as_slice(), &device)?;
+        let processor = LogitsProcessor::new(0.7, 0.95, 50, 1.1);
+
+        let tok = processor.sample(&logits, &[])?;
+        assert_eq!(tok, 4, "High confidence logit at index 4 must be sampled");
+        Ok(())
+    }
+
+    #[test]
+    fn test_sampling_repetition_penalty() -> Result<()> {
+        let device = Device::Cpu;
+        // token 0 has logit 10.0, token 1 has logit 9.5
+        let logits_data = vec![10.0f32, 9.5, 1.0];
+        let logits = Tensor::new(logits_data.as_slice(), &device)?;
+
+        // Without penalty, token 0 is sampled (greedy)
+        let proc_no_pen = LogitsProcessor::new(0.0, 0.95, 50, 1.0);
+        let tok1 = proc_no_pen.sample(&logits, &[])?;
+        assert_eq!(tok1, 0);
+
+        // With penalty 1.2 on token 0, its logit drops to 10.0 / 1.2 = 8.33 < 9.5
+        let proc_pen = LogitsProcessor::new(0.0, 0.95, 50, 1.2);
+        let tok2 = proc_pen.sample(&logits, &[0])?;
+        assert_eq!(tok2, 1, "Repetition penalty must penalize token 0 so token 1 is selected");
+        Ok(())
+    }
+
+    #[test]
+    fn test_generation_model_with_params() -> Result<()> {
+        let mut params = TextGenParams::default();
+        params.max_tokens = 64;
+        params.temperature = 0.0;
+        params.top_p = 0.9;
+        params.top_k = 20;
+        params.repetition_penalty = 1.15;
+        params.stop_tokens = vec![99999];
+
+        assert_eq!(params.max_tokens, 64);
+        assert_eq!(params.temperature, 0.0);
+        assert_eq!(params.top_p, 0.9);
+        assert_eq!(params.top_k, 20);
+        assert_eq!(params.repetition_penalty, 1.15);
+        assert_eq!(params.stop_tokens, vec![99999]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_generation_model_stream_early_abort() -> Result<()> {
+        let mut count = 0;
+        let mut callback = |piece: &str| -> bool {
+            count += 1;
+            assert!(!piece.is_empty());
+            count < 2 // Abort after 2 tokens
+        };
+
+        let allow_first = callback("first");
+        assert!(allow_first);
+        let abort_second = callback("second");
+        assert!(!abort_second, "Callback must request early abort when returning false");
+        Ok(())
     }
 }

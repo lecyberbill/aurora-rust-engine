@@ -134,6 +134,29 @@ pub fn downcast_model<M: AnyModel + 'static>(m: &mut dyn AnyModel) -> Option<&mu
 pub trait GenerationModel: AnyModel {
     fn generate(&mut self, prompt: &str, max_tokens: usize, temperature: f64) -> Result<String>;
 
+    /// Primary universal generation method with full sampling parameters.
+    fn generate_with_params(
+        &mut self,
+        prompt: &str,
+        params: &crate::models::text::TextGenParams,
+    ) -> Result<String> {
+        self.generate_stream_with_params(prompt, params, None)
+    }
+
+    /// Universal token generation stream with early-abort callback and full sampling parameters.
+    fn generate_stream_with_params(
+        &mut self,
+        prompt: &str,
+        params: &crate::models::text::TextGenParams,
+        on_token: Option<TokenCallback>,
+    ) -> Result<String> {
+        let full = self.generate(prompt, params.max_tokens, params.temperature)?;
+        if let Some(cb) = on_token {
+            cb(&full);
+        }
+        Ok(full)
+    }
+
     /// Generation with explicit reasoning effort (0.0 = low/none, 0.5 = medium, 1.0 = high).
     /// Returns (thinking_text, response_text, tokens_per_sec).
     fn generate_with_reasoning(
@@ -143,7 +166,10 @@ pub trait GenerationModel: AnyModel {
         temperature: f64,
         _reasoning_effort: f64,
     ) -> Result<(String, String, f64)> {
-        let full = self.generate(prompt, max_tokens, temperature)?;
+        let mut params = crate::models::text::TextGenParams::default();
+        params.max_tokens = max_tokens;
+        params.temperature = temperature;
+        let full = self.generate_with_params(prompt, &params)?;
         Ok((String::new(), full, 0.0))
     }
 
@@ -172,11 +198,10 @@ pub trait GenerationModel: AnyModel {
         temperature: f64,
         on_token: Option<TokenCallback>,
     ) -> Result<String> {
-        let full = self.generate(prompt, max_tokens, temperature)?;
-        if let Some(cb) = on_token {
-            cb(&full);
-        }
-        Ok(full)
+        let mut params = crate::models::text::TextGenParams::default();
+        params.max_tokens = max_tokens;
+        params.temperature = temperature;
+        self.generate_stream_with_params(prompt, &params, on_token)
     }
 
     /// Streaming chat generation with early-abort callback.

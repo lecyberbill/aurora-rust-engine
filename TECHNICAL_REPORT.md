@@ -1,5 +1,5 @@
 # Rapport Technique : Diagnostic ROCm & Support Architectural (Gemma 4, Phi-4, Qwen 3.8)
-<!-- Date: 2026-10-17 | Target: Radeon AI PRO R9700 (gfx1201) ROCm 7.15 | Backend: Candle ROCm fork (xmiksay/feat/rocm-backend) -->
+<!-- Date: 2026-10-20 | Target: Radeon AI PRO R9700 (gfx1201) ROCm 10 (core-10.0) | Backend: Candle ROCm fork (xmiksay/feat/rocm-backend) -->
 
 ## 1. Contexte & Clarification Topologique
 Ce rapport documente l'état d'implémentation et de compatibilité des modèles LLM de dernière génération en **Rust pur** sous accélération matérielle AMD ROCm via `candle-core`.
@@ -66,14 +66,23 @@ Ce rapport documente l'état d'implémentation et de compatibilité des modèles
   - Les v-heads sont stockés *tileés* par le convertisseur llama.cpp (`[num_v_per_k=3, num_k_heads=16, head_dim=128]`). Le loader dé-tile `v`, `z`, `alpha`, `beta`, `ssm_a`, `ssm_dt`, les poids de conv et les colonnes de `ssm_out` (inverse exact de `_reorder_v_heads`), puis re-quantifie au même `GgmlDType`.
   - Tokenizer dédié `assets/tokenizers/qwen35_tokenizer.json` (248 077 entrées ; le vocabulaire d'embedding en compte 248 320, les ids `248077+` étant des PAD inutilisés). Un garde-fou vérifie que `<|im_end|>` du tokenizer égale `tokenizer.ggml.eos_token_id` du GGUF.
 - **Performances empiriques mesurées sur ROCm (`gfx1201`, `Qwen3.8-27B-Q4_K_M.gguf`) :**
-  - Chargement complet des 17,44 Go (déquantification/dé-tiling/re-quantification) : **71,25 s**.
-  - Décodage autorégressif : **~9,44 tokens/sec** (32 tokens, greedy).
+  - Chargement complet des 17,44 Go (déquantification/dé-tiling/re-quantification) : **71,68 s**.
+  - Décodage autorégressif : **11,73 tokens/sec** (401 tokens, temp 0,7, poème français) ; **9,44 tokens/sec** en greedy sur 32 tokens.
   - Zéro dépendance runtime Python / llama.cpp : exécution 100% native Rust (`candle-core`), récurrence GDN en F32 via `QMatMul` portable.
 - **Comportement sémantique validé (conforme à l'oracle Ollama) :**
   - `Paris.`, `2 + 2 = **4**`, `... is **Jupiter**.`
   - Le modèle reasoning émet naturellement `<think>...</think>` ; les tests de validation utilisent un bloc `<think>` vide pour obtenir la réponse directe.
+### Synthèse Comparative Empirique Multi-Modèles (Radeon AI PRO R9700 ROCm 10)
+Mesures du 2026-10-20 avec le CLI corrigé (tokens réels comptés via le callback). Prompts : Qwen = poème français (400 tokens, temp 0,7) ; les autres = courte phrase anglaise (64 tokens, greedy).
 
----
+| Modèle | Architecture | Vitesse (tok/s) | Temps de chargement | Statut Inférence | Comportement sur le prompt |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Gemma 3 12B** | Dense Transformer (`gemma`) | **17,80 tok/s** (65 tok) | 3,85 s | ✅ **Cohérent** | Paragraphe anglais cohérent |
+| **Qwen 3.8 27B** | Hybride DeltaNet SSM + Softmax (`qwen35`) | **11,73 tok/s** (401 tok) | 71,68 s | ✅ **Cohérent** | Poème français en 5 strophes, sans `<think>` (template `<think>\n</think>\n`) |
+| **Gemma 4 31B** | Dense avec Attention Scaling unitaire | **11,25 tok/s** (65 tok) | 7,92 s | ✅ **Cohérent** | Paragraphe cohérent (marqueurs `<unused94>thought`) |
+| **Phi-4 Reasoning Plus** | Dense Transformer (`phi3`) | **5,53 tok/s** (31 tok) | 0,13 s (lazy) | ⚠️ **Partiel** | Pas de crash, mais les rôles ChatML sont recopiés (template Phi non géré) |
+| **LFM 2.5 8B** | MoE Hybride (`lfm2moe`) | **3,15 tok/s** (65 tok) | 0,35 s (lazy) | ⚠️ **Dégénéré** | Sigmoid ROCm corrigé, mais sortie composée de `?` (dérive récurrente MoE/Conv1D) |
+
 
 ## 3. Analyse du Bug de Fond ROCm & Proposition de PR Upstream
 
@@ -108,7 +117,11 @@ Le correctif a été implémenté et validé directement dans le dépôt upstrea
 ---
 
 ## 4. Changelog Récent
-- `TECHNICAL_REPORT.md` : Clarification de l'absence de Gemma 4 & Qwen 3.8 dans Candle, et validation empirique du correctif ROCm upstream.
-- `patches/` : Génération du patch officiel `0001-fix-rocm-handle-non-contiguous-matmul-operands-and-m.patch`.
-- `src/models/text/causal.rs` : Filtrage `sliding_window.filter(|&w| w > 0)` pour Phi-4.
-- `src/models/quantized_gemma3.rs` : Intégration de RoPE proportionnel et `gelu_pytorch_tanh` pour Gemma 4.
+- `src/models/text.rs` : Correction du template ChatML pour `QuantizedQwen35` (bloc de pensée vide `<think>\n</think>\n` en amorce d'assistant, vérifié : poème français direct sans `<think>`).
+- `src/bin/test_text_gen.rs` : API positionnelle restaurée (`<model> <prompt> <max_tokens> <temperature> [n_gpu_layers]`), comptage réel des tokens via le callback et calcul du tok/s sur les tokens effectivement générés. Support des prompts multi-mots non quotés en l'absence d'arguments numériques.
+- **Validation Empirique sur AMD ROCm 10 (`gfx1201`)** : Poème français de 5 strophes généré par **Qwen 3.8 27B** en **34,19 s** à **11,73 tok/s** (401 tokens, temp 0,7), chargement 71,68 s. Gemma 3 12B : 17,80 tok/s ; Gemma 4 31B : 11,25 tok/s.
+- `src/models/text/causal.rs` : Implémentation **expérimentale** du KV-cache quantifié 8-bit (`QuantizedKVCacheEntry`, `QuantizedLayerKVCache`) avec tests unitaires. **Non branchée au pipeline de génération** : aucun gain VRAM runtime n'est revendiqué. Ajout du sigmoid logiciel portable F32 pour les modèles MoE sur ROCm.
+- `src/models/text/causal.rs` : RNG d'échantillonnage remplacé (`subsec_nanos` → xorshift64* thread-local) ; le mode greedy (`temperature <= 0`) reste déterministe.
+- `src/models/common.rs` : `generate` redevient requis ; le défaut de `generate_stream_with_params` appelle désormais le callback (plus de streaming silencieusement perdu).
+- Suite de tests : **92/92** (`cargo test --lib`).
+- `ROADMAP.md`, `ATLAS.md`, `README.md`, `USER_GUIDE.md` : chiffres et statuts alignés sur les mesures du 2026-10-20 ; Phi-4/LFM marqués partiels/dégénérés.
