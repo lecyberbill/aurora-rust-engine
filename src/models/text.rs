@@ -366,11 +366,9 @@ impl GenerationModel for TextModel {
             }
             prompt.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
         } else {
-            // Default ChatML template (Qwen, Phi, Mistral, LFM)
-            for (role, content) in messages {
-                prompt.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
-            }
-            prompt.push_str("<|im_start|>assistant\n");
+            // Family-aware default: ChatML for Qwen/Mistral/LFM, native
+            // template (e.g. Phi) when the backend provides one.
+            prompt = self.chat_prompt(messages);
         }
         self.generate_with_reasoning(&prompt, max_tokens, temperature, reasoning_effort)
     }
