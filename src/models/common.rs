@@ -173,6 +173,17 @@ pub trait GenerationModel: AnyModel {
         Ok((String::new(), full, 0.0))
     }
 
+    /// Build a prompt from role/content messages (default ChatML).
+    /// Models with a different chat format override this.
+    fn chat_prompt(&self, messages: &[(String, String)]) -> String {
+        let mut prompt = String::new();
+        for (role, content) in messages {
+            prompt.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
+        }
+        prompt.push_str("<|im_start|>assistant\n");
+        prompt
+    }
+
     /// Chat generation accepting a sequence of role/content pairs.
     /// Returns (thinking_text, response_text, tokens_per_sec).
     fn generate_chat(
@@ -182,11 +193,7 @@ pub trait GenerationModel: AnyModel {
         temperature: f64,
         reasoning_effort: f64,
     ) -> Result<(String, String, f64)> {
-        let mut prompt = String::new();
-        for (role, content) in messages {
-            prompt.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
-        }
-        prompt.push_str("<|im_start|>assistant\n");
+        let prompt = self.chat_prompt(messages);
         self.generate_with_reasoning(&prompt, max_tokens, temperature, reasoning_effort)
     }
 

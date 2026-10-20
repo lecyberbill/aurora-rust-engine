@@ -677,6 +677,95 @@ impl ChatRole {
 pub type CausalLM = CausalLMPipeline;
 
 /// Standalone CausalLM Engine Pipeline
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhiStyle {
+    /// `<|user|>...<|end|><|assistant|>` (Phi-4 reasoning plus)
+    EndTags,
+    /// `<|im_start|>user<|im_sep|>...<|im_end|>` (classic Phi-3/4)
+    ImSep,
+}
+
+fn phi_style(template: &str) -> PhiStyle {
+    if template.contains("<|user|>") && template.contains("<|end|>") {
+        PhiStyle::EndTags
+    } else {
+        PhiStyle::ImSep
+    }
+}
+
+/// Extract the literal system preamble embedded in a Phi GGUF chat template.
+fn phi_system_preamble(template: &str) -> Option<String> {
+    let marker = "<|im_sep|>";
+    let start = template.find(marker)? + marker.len();
+    let end = template[start..].find("<|im_end|>")? + start;
+    let preamble = template[start..end].trim();
+    if preamble.is_empty() {
+        None
+    } else {
+        Some(preamble.to_string())
+    }
+}
+
+fn build_phi_chat(
+    preamble: &str,
+    system: &str,
+    turns: &[(String, String)],
+    style: PhiStyle,
+) -> String {
+    match style {
+        PhiStyle::EndTags => {
+            let mut out = format!("<|im_start|>system<|im_sep|>{preamble}");
+            if !system.is_empty() {
+                out.push('\n');
+                out.push_str(system);
+            }
+            out.push_str("<|im_end|><|end|>");
+            for (role, content) in turns {
+                out.push_str(&format!("<|{role}|>{}<|end|>", content));
+            }
+            out.push_str("<|assistant|>");
+            out
+        }
+        PhiStyle::ImSep => {
+            let mut out = format!("<|im_start|>system<|im_sep|>{preamble}<|im_end|>");
+            for (role, content) in turns {
+                out.push_str(&format!(
+                    "<|im_start|>{role}<|im_sep|>{}<|im_end|>",
+                    content
+                ));
+            }
+            out.push_str("<|im_start|>assistant<|im_sep|>");
+            out
+        }
+    }
+}
+
+fn build_phi_prompt(preamble: &str, system: &str, user: &str, style: PhiStyle) -> String {
+    build_phi_chat(
+        preamble,
+        system,
+        &[("user".to_string(), user.to_string())],
+        style,
+    )
+}
+
+/// Remove Phi role/end markers and anything after them from a decoded stream.
+fn trim_stop_markers(mut text: String) -> String {
+    for marker in [
+        "<|end|>",
+        "<|im_end|>",
+        "<|endoftext|>",
+        "<|user|>",
+        "<|assistant|>",
+        "<|im_start|>",
+    ] {
+        if let Some(pos) = text.find(marker) {
+            text.truncate(pos);
+        }
+    }
+    text.trim().to_string()
+}
+
 pub struct CausalLMPipeline {
     pub config: CausalLMConfig,
     pub tokenizer: Option<Tokenizer>,
@@ -720,14 +809,84 @@ impl CausalLMPipeline {
         self.n_gpu_layers = n;
     }
 
-    /// Format a multi-turn conversation into standard ChatML prompt format.
+    /// Format a multi-turn conversation using the model family's chat template.
     pub fn format_chat_prompt(&self, messages: &[ChatMessage]) -> String {
+        let pairs: Vec<(String, String)> = messages
+            .iter()
+            .map(|m| (m.role.as_str().to_string(), m.content.clone()))
+            .collect();
+        self.format_chat_messages(&pairs)
+    }
+
+    /// Format a single user prompt for models that need a chat wrapper (Phi-3/4).
+    /// Prompts already containing the Phi separator are passed through unchanged.
+    pub fn format_prompt(&self, prompt: &str) -> String {
+        if prompt.contains("<|im_sep|>") {
+            return prompt.to_string();
+        }
+        let arch = self.arch_name();
+        if arch != "phi3" && arch != "phi4" {
+            return prompt.to_string();
+        }
+        let template = self.weights.metadata("tokenizer.chat_template");
+        let preamble = template
+            .as_deref()
+            .and_then(phi_system_preamble)
+            .unwrap_or_else(|| "You are a helpful assistant.".to_string());
+        let style = template.as_deref().map(phi_style).unwrap_or(PhiStyle::ImSep);
+        build_phi_prompt(&preamble, "", prompt, style)
+    }
+
+    /// Format `(role, content)` messages using the model family's chat template.
+    pub fn format_chat_messages(&self, messages: &[(String, String)]) -> String {
+        let arch = self.arch_name();
+        if arch == "phi3" || arch == "phi4" {
+            let template = self.weights.metadata("tokenizer.chat_template");
+            let preamble = template
+                .as_deref()
+                .and_then(phi_system_preamble)
+                .unwrap_or_else(|| "You are a helpful assistant.".to_string());
+            let style = template.as_deref().map(phi_style).unwrap_or(PhiStyle::ImSep);
+            let system = messages
+                .iter()
+                .filter(|(role, _)| role == "system")
+                .map(|(_, content)| content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let turns: Vec<(String, String)> = messages
+                .iter()
+                .filter(|(role, _)| role != "system")
+                .cloned()
+                .collect();
+            return build_phi_chat(&preamble, &system, &turns, style);
+        }
         let mut prompt = String::new();
-        for msg in messages {
-            prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", msg.role.as_str(), msg.content.trim()));
+        for (role, content) in messages {
+            prompt.push_str(&format!("<|im_start|>{role}\n{}<|im_end|>\n", content.trim()));
         }
         prompt.push_str("<|im_start|>assistant\n");
         prompt
+    }
+
+    fn arch_name(&self) -> String {
+        self.weights
+            .metadata("general.architecture")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    }
+
+    /// Effective stop tokens: user-provided plus model-specific EOS ids.
+    fn stop_tokens_for(&self, params: &TextGenParams) -> Vec<u32> {
+        let mut stop = params.stop_tokens.clone();
+        let arch = self.arch_name();
+        if arch == "phi3" || arch == "phi4" {
+            for id in [100257u32, 100265u32] {
+                if !stop.contains(&id) {
+                    stop.push(id);
+                }
+            }
+        }
+        stop
     }
 
     /// Execute a multi-turn conversation turn and generate the assistant response.
@@ -751,11 +910,13 @@ impl CausalLMPipeline {
         params: &TextGenParams,
         mut on_token: Option<crate::models::common::TokenCallback>,
     ) -> Result<String> {
+        let prompt = self.format_prompt(prompt);
+        let stop_tokens = self.stop_tokens_for(params);
         let prompt_tokens = {
             let tokenizer = self.tokenizer.as_ref().ok_or_else(|| {
                 LuminaError::Config("Tokenizer not attached to CausalLM pipeline".into())
             })?;
-            let encoding = tokenizer.encode(prompt, true).map_err(|e| {
+            let encoding = tokenizer.encode(prompt.as_str(), true).map_err(|e| {
                 LuminaError::Context {
                     context: "Failed to tokenize prompt".into(),
                     source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
@@ -774,11 +935,21 @@ impl CausalLMPipeline {
 
         self.kv_cache.reset();
         let mut generated_tokens = Vec::new();
+        // Reasoning Phi variants can loop under pure greedy decoding; keep a
+        // conservative repetition penalty unless the caller asked for more.
+        let repetition_penalty = {
+            let arch = self.arch_name();
+            if arch == "phi3" || arch == "phi4" {
+                params.repetition_penalty.max(1.1)
+            } else {
+                params.repetition_penalty
+            }
+        };
         let logits_processor = LogitsProcessor::new(
             params.temperature,
             params.top_p,
             params.top_k,
-            params.repetition_penalty,
+            repetition_penalty,
         );
 
         // Prefill prompt tokens
@@ -822,7 +993,7 @@ impl CausalLMPipeline {
 
         // Autoregressive decoding loop
         for _ in 0..params.max_tokens {
-            if params.stop_tokens.contains(&next_token) {
+            if stop_tokens.contains(&next_token) {
                 break;
             }
 
@@ -857,7 +1028,7 @@ impl CausalLMPipeline {
             }
         })?;
 
-        Ok(output_text)
+        Ok(trim_stop_markers(output_text))
     }
 
     /// Speculative Decoding using a smaller Draft model and this instance as Target/Verifier.
@@ -873,11 +1044,12 @@ impl CausalLMPipeline {
         gamma: usize,
     ) -> Result<String> {
         let gamma = gamma.max(1);
+        let prompt = self.format_prompt(prompt);
         let prompt_tokens = {
             let tokenizer = self.tokenizer.as_ref().ok_or_else(|| {
                 LuminaError::Config("Tokenizer not attached to Target CausalLM pipeline".into())
             })?;
-            let encoding = tokenizer.encode(prompt, true).map_err(|e| {
+            let encoding = tokenizer.encode(prompt.as_str(), true).map_err(|e| {
                 LuminaError::Context {
                     context: "Failed to tokenize prompt".into(),
                     source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
@@ -927,8 +1099,9 @@ impl CausalLMPipeline {
             n_gpu_layers: None,
         };
 
+        let stop_tokens = self.stop_tokens_for(params);
         while generated_tokens.len() < params.max_tokens {
-            if params.stop_tokens.contains(&next_token) {
+            if stop_tokens.contains(&next_token) {
                 break;
             }
 
@@ -944,7 +1117,7 @@ impl CausalLMPipeline {
                 draft_tokens.push(tok);
                 curr_draft_tok = tok;
                 draft_pos += 1;
-                if params.stop_tokens.contains(&tok) {
+                if stop_tokens.contains(&tok) {
                     break;
                 }
             }
@@ -965,7 +1138,7 @@ impl CausalLMPipeline {
                 if target_sampled == c_tok {
                     generated_tokens.push(c_tok);
                     next_token = c_tok;
-                    if params.stop_tokens.contains(&c_tok) || generated_tokens.len() >= params.max_tokens {
+                    if stop_tokens.contains(&c_tok) || generated_tokens.len() >= params.max_tokens {
                         accepted_all = false;
                         break;
                     }
@@ -995,7 +1168,7 @@ impl CausalLMPipeline {
             }
         })?;
 
-        Ok(output_text)
+        Ok(trim_stop_markers(output_text))
     }
 
     /// Autoregressive generation restricted to an optional token set (e.g. ACE-Step
@@ -2330,5 +2503,31 @@ mod tests {
             "Quantized KV memory ({total_quant_bytes} bytes) must be <= 30% of F32 footprint ({float_bytes} bytes, ratio {ratio})"
         );
         Ok(())
+    }
+
+    #[test]
+    fn test_phi_prompt_helpers() {
+        let tpl = "{{'<|im_start|>system<|im_sep|>You are Phi.<|im_end|>'}}<|end|><|user|><|assistant|>";
+        assert_eq!(phi_system_preamble(tpl).as_deref(), Some("You are Phi."));
+        assert_eq!(phi_style(tpl), PhiStyle::EndTags);
+
+        let p = build_phi_prompt("You are Phi.", "", "Capital of France?", PhiStyle::EndTags);
+        assert_eq!(
+            p,
+            "<|im_start|>system<|im_sep|>You are Phi.<|im_end|><|end|><|user|>Capital of France?<|end|><|assistant|>"
+        );
+
+        let p2 = build_phi_prompt("Sys", "", "Hi", PhiStyle::ImSep);
+        assert_eq!(
+            p2,
+            "<|im_start|>system<|im_sep|>Sys<|im_end|><|im_start|>user<|im_sep|>Hi<|im_end|><|im_start|>assistant<|im_sep|>"
+        );
+    }
+
+    #[test]
+    fn test_phi_trim_stop_markers() {
+        assert_eq!(trim_stop_markers("Paris.<|end|>junk".into()), "Paris.");
+        assert_eq!(trim_stop_markers("<|user|>ignored".into()), "");
+        assert_eq!(trim_stop_markers("ok".into()), "ok");
     }
 }

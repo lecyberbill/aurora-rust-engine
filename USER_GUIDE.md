@@ -1617,10 +1617,10 @@ Mesures du 2026-10-20 avec le CLI corrigé (tokens réels comptés via le callba
 | **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **3.85 s** | **17.80 tok/s** (65 tok / 3.65 s) | ✅ Paragraphe anglais cohérent (greedy) |
 | **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.68 s** | **11.73 tok/s** (401 tok / 34.19 s) | ✅ Poème français en 5 strophes, temp 0.7, sans `<think>` |
 | **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **7.92 s** | **11.25 tok/s** (65 tok / 5.78 s) | ✅ Paragraphe cohérent (marqueurs `<unused94>thought`) |
-| **Phi-4 Reasoning Plus** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.13 s** (lazy) | **5.53 tok/s** (31 tok / 5.61 s) | ⚠️ Pas de crash, mais les rôles ChatML sont recopiés (template Phi non géré) |
+| **Phi-4 Reasoning Plus** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.13 s** (lazy) | **8.49 tok/s** (49 tok / 5.77 s) | ✅ Template Phi natif ; raisonnement concis → « Paris » (pénalité 1.1) |
 | **LFM 2.5 8B** | `LFM2.5-8B-A1B-Q4_K_M.gguf` | 4.80 GB | **0.35 s** (lazy) | **3.15 tok/s** (65 tok / 20.65 s) | ⚠️ Sortie dégénérée (`?`) : sigmoid ROCm corrigé, dérive récurrente MoE/Conv1D |
 
-> Prompts : Qwen = poème français (400 tokens, temp 0.7) ; les autres = courte phrase anglaise (64 tokens, greedy). Les temps de chargement Phi/LFM sont des temps « lazy » (métadonnées) et ne sont pas comparables au chargement eager de Qwen.
+> Prompts : Qwen = poème français (400 tokens, temp 0.7) ; Gemma = 64 tokens greedy ; Phi = 128 tokens greedy + répétition 1.1 ; LFM = 64 tokens greedy. Les temps de chargement Phi/LFM sont des temps « lazy » (métadonnées) et ne sont pas comparables au chargement eager de Qwen.
 
 ---
 
@@ -1711,7 +1711,8 @@ Aurora Engine features a unified CausalLM inference pipeline for large language 
 - **Microsoft Phi-4 Reasoning Plus (`phi3` architecture, 15B)** :
   - Support GQA avec projections fusionnées QKV et SwiGLU MLP.
   - Résolution de l'anomalie `sliding_window = 0` dans les métadonnées GGUF (évite le tenseur KV nul).
-  - Débit mesuré : **5.53 tok/s** (31 tokens). Le template ChatML de Phi n'est pas encore géré : les rôles sont recopiés dans la sortie, donc le résultat n'est pas exploitable tel quel.
+  - Débit mesuré : **8.49 tok/s** (49 tokens, greedy + répétition 1.1) ; sortie de raisonnement concise aboutissant à « Paris ».
+  - Template natif construit depuis `tokenizer.chat_template` du GGUF (styles `<|user|>…<|end|>` et `<|im_start|>…<|im_sep|>`), arrêt sur `<|im_end|>`/`<|endoftext|>`, nettoyage des marqueurs de rôle ; `generate_chat` multi-tour est pris en charge.
 - **Liquid AI LFM2.5 Hybrid ShortConv-MoE Architecture**:
   - Full native support for Liquid Foundation Models (`LFM2.5-8B-A1B-Q4_K_M.gguf`).
   - Double-gated Linear Input-Varying (LIV) 1D depthwise convolutions with circular rolling state buffer ($K=3$).

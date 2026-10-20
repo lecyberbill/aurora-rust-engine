@@ -14,13 +14,13 @@ Ce rapport documente l'état d'implémentation et de compatibilité des modèles
 ## 2. Invariants & Résultats Empiriques par Architecture
 
 ### Microsoft Phi-4 (`phi3` architecture standard)
-- **Status :** ✅ **100% Opérationnel sur ROCm (Radeon AI PRO R9700)**
-- **Sonde empirique :** `cargo run --release --features rocm --bin test_text_gen -- /models/llm/Phi-4-reasoning-plus-Q4_K_M.gguf "Explain quantum computing in one sentence:"`
-- **Métriques réelles mesurées :**
-  - Temps de chargement : **0.13 s**
-  - Débit de génération : **13.61 tokens/sec**
-  - Logits step 0 : top-1 `Quant` (21.58), top-2 `Certainly` (18.45), top-3 `Sure` (17.53)
-  - Génération textuelle : *"Quantum computing harnesses the principles of quantum mechanics—such as superposition and entanglement—to process and store information in ways that can potentially solve certain complex problems much faster than classical computers."*
+- **Status :** ✅ **Opérationnel sur ROCm (Radeon AI PRO R9700) avec template natif**
+- **Sonde empirique :** `./target/release/test_text_gen /models/llm/Phi-4-reasoning-plus-Q4_K_M.gguf "What is the capital of France?" 128 0.0`
+- **Métriques réelles mesurées (2026-10-20) :**
+  - Temps de chargement : **0.13 s** (lazy)
+  - Débit de génération : **8.49 tokens/sec** (49 tokens, greedy + pénalité de répétition 1.1)
+  - Sortie : raisonnement concis se terminant par `Paris`, sans recopie des rôles ChatML.
+- **Template natif :** extrait de `tokenizer.chat_template` du GGUF (style `<|user|>…<|end|><|assistant|>` ou `<|im_start|>…<|im_sep|>`) ; arrêt sur `<|im_end|>` (100265) / `<|endoftext|>` (100257), nettoyage des marqueurs de rôle. `generate_chat` multi-tour pris en charge.
 - **Anomalie résolue :**
   - Dans le GGUF de Phi-4, la clé `phi3.attention.sliding_window` vaut `0`.
   - Le code interprétait `Some(0)` comme une fenêtre de 0 tokens, tronquant le tenseur KV à une dimension nulle (`[1, 40, 9, 0]`) provoquant un crash `broadcast_add` avec le masque causal.
@@ -73,14 +73,14 @@ Ce rapport documente l'état d'implémentation et de compatibilité des modèles
   - `Paris.`, `2 + 2 = **4**`, `... is **Jupiter**.`
   - Le modèle reasoning émet naturellement `<think>...</think>` ; les tests de validation utilisent un bloc `<think>` vide pour obtenir la réponse directe.
 ### Synthèse Comparative Empirique Multi-Modèles (Radeon AI PRO R9700 ROCm 10)
-Mesures du 2026-10-20 avec le CLI corrigé (tokens réels comptés via le callback). Prompts : Qwen = poème français (400 tokens, temp 0,7) ; les autres = courte phrase anglaise (64 tokens, greedy).
+Mesures du 2026-10-20 avec le CLI corrigé (tokens réels comptés via le callback). Prompts : Qwen = poème français (400 tokens, temp 0,7) ; Gemma = 64 tokens greedy ; Phi = 128 tokens greedy + répétition 1,1 ; LFM = 64 tokens greedy.
 
 | Modèle | Architecture | Vitesse (tok/s) | Temps de chargement | Statut Inférence | Comportement sur le prompt |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Gemma 3 12B** | Dense Transformer (`gemma`) | **17,80 tok/s** (65 tok) | 3,85 s | ✅ **Cohérent** | Paragraphe anglais cohérent |
 | **Qwen 3.8 27B** | Hybride DeltaNet SSM + Softmax (`qwen35`) | **11,73 tok/s** (401 tok) | 71,68 s | ✅ **Cohérent** | Poème français en 5 strophes, sans `<think>` (template `<think>\n</think>\n`) |
 | **Gemma 4 31B** | Dense avec Attention Scaling unitaire | **11,25 tok/s** (65 tok) | 7,92 s | ✅ **Cohérent** | Paragraphe cohérent (marqueurs `<unused94>thought`) |
-| **Phi-4 Reasoning Plus** | Dense Transformer (`phi3`) | **5,53 tok/s** (31 tok) | 0,13 s (lazy) | ⚠️ **Partiel** | Pas de crash, mais les rôles ChatML sont recopiés (template Phi non géré) |
+| **Phi-4 Reasoning Plus** | Dense Transformer (`phi3`) | **8,49 tok/s** (49 tok) | 0,13 s (lazy) | ✅ **Cohérent** | Template Phi natif ; raisonnement concis → `Paris` |
 | **LFM 2.5 8B** | MoE Hybride (`lfm2moe`) | **3,15 tok/s** (65 tok) | 0,35 s (lazy) | ⚠️ **Dégénéré** | Sigmoid ROCm corrigé, mais sortie composée de `?` (dérive récurrente MoE/Conv1D) |
 
 
@@ -123,5 +123,7 @@ Le correctif a été implémenté et validé directement dans le dépôt upstrea
 - `src/models/text/causal.rs` : Implémentation **expérimentale** du KV-cache quantifié 8-bit (`QuantizedKVCacheEntry`, `QuantizedLayerKVCache`) avec tests unitaires. **Non branchée au pipeline de génération** : aucun gain VRAM runtime n'est revendiqué. Ajout du sigmoid logiciel portable F32 pour les modèles MoE sur ROCm.
 - `src/models/text/causal.rs` : RNG d'échantillonnage remplacé (`subsec_nanos` → xorshift64* thread-local) ; le mode greedy (`temperature <= 0`) reste déterministe.
 - `src/models/common.rs` : `generate` redevient requis ; le défaut de `generate_stream_with_params` appelle désormais le callback (plus de streaming silencieusement perdu).
-- Suite de tests : **92/92** (`cargo test --lib`).
-- `ROADMAP.md`, `ATLAS.md`, `README.md`, `USER_GUIDE.md` : chiffres et statuts alignés sur les mesures du 2026-10-20 ; Phi-4/LFM marqués partiels/dégénérés.
+- `src/models/text/causal.rs` : Template Phi natif (`format_prompt` / `format_chat_messages`) extrait du GGUF, arrêt sur `<|im_end|>`/`<|endoftext|>`, nettoyage des marqueurs de rôle et pénalité de répétition 1.1 par défaut pour les variantes reasoning.
+- `src/models/common.rs` : `chat_prompt` générique (ChatML) surchargeable ; `TextModel` l'utilise pour le template Phi multi-tour.
+- Suite de tests : **94/94** (`cargo test --lib`).
+- `ROADMAP.md`, `ATLAS.md`, `README.md`, `USER_GUIDE.md` : chiffres et statuts alignés sur les mesures du 2026-10-20 ; LFM marqué dégénéré, Phi-4 validé avec son template natif.

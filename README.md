@@ -341,12 +341,12 @@ cargo run --release --bin server --features cuda,flash-attn
 | **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.68 s** | **11.73 tok/s** (401 tok / 34.19 s) | French poem, temp 0.7 (GDN path) |
 | **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **3.85 s** | **17.80 tok/s** (65 tok / 3.65 s) | Ocean paragraph, greedy |
 | **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **7.92 s** | **11.25 tok/s** (65 tok / 5.78 s) | Ocean paragraph, greedy |
-| **Phi-4 Reasoning Plus 15B** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.13 s** (lazy) | **5.53 tok/s** (31 tok / 5.61 s) | Partial: ChatML roles echoed, template not handled |
+| **Phi-4 Reasoning Plus 15B** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.13 s** (lazy) | **8.49 tok/s** (49 tok / 5.77 s) | Native Phi template; concise reasoning → "Paris" |
 | **LFM 2.5 8B** | `LFM2.5-8B-A1B-Q4_K_M.gguf` | 4.80 GB | **0.35 s** (lazy) | **3.15 tok/s** (65 tok / 20.65 s) | Degenerate output (`?` tokens); engine does not crash |
 
 > **Qwen 3.5 / 3.8 note:** hybrid checkpoints declare `general.architecture = qwen35`. The engine auto-loads `assets/tokenizers/qwen35_tokenizer.json` (248k vocab) and refuses to start when its `<|im_end|>` id does not match the GGUF EOS. Sampling (temperature/top-p/top-k/repetition) is available for Qwen 3.5/3.8 and Gemma; greedy when `temperature <= 0`. Batch size is 1 and the GDN recurrence runs in F32 through portable `QMatMul` (no experimental WMMA kernel).
 >
-> Benchmarked on 2026-10-20 with the corrected CLI (actual tokens counted by the streaming callback). Phi-4 and LFM load times are metadata-only (lazy loading); their outputs are not usable as-is.
+> Benchmarked on 2026-10-20 with the corrected CLI (actual tokens counted by the streaming callback). Phi-4 and LFM load times are metadata-only (lazy loading); LFM output is still degenerate, while Phi-4 uses its native GGUF chat template and a 1.1 repetition penalty.
 
 ---
 

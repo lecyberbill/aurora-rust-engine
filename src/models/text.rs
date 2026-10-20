@@ -124,6 +124,19 @@ impl EncodeModel for TextModel {
 }
 
 impl GenerationModel for TextModel {
+    fn chat_prompt(&self, messages: &[(String, String)]) -> String {
+        if let TextBackend::CausalLM(pipeline) = &self.inner {
+            pipeline.format_chat_messages(messages)
+        } else {
+            let mut prompt = String::new();
+            for (role, content) in messages {
+                prompt.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
+            }
+            prompt.push_str("<|im_start|>assistant\n");
+            prompt
+        }
+    }
+
     fn generate(&mut self, prompt: &str, max_tokens: usize, temperature: f64) -> Result<String> {
         let (thinking, resp, _) = self.generate_with_reasoning(prompt, max_tokens, temperature, 0.5)?;
         if resp.is_empty() {
