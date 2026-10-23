@@ -1505,6 +1505,9 @@ impl CausalLMPipeline {
             if !hidden.device().same_device(&layer_dev) {
                 hidden = hidden.to_device(&layer_dev).map_err(LuminaError::Candle)?;
             }
+            if pos == 0 {
+                eprintln!("🔍 [Step 0] Entering layer {layer_idx} (hidden shape: {:?})", hidden.shape());
+            }
             hidden = self.forward_layer(layer_idx, &hidden, pos, seq_len)?;
             if pos == 0 && (layer_idx == 0 || layer_idx == 1 || layer_idx == self.config.num_hidden_layers - 1) {
                 let h_flat = hidden.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
