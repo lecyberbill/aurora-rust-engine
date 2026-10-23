@@ -1645,30 +1645,48 @@ impl CausalLMPipeline {
             let in_proj_w = self.get_layer_weight(layer_idx, &["attn_qkv.weight", "ssm_in.weight", "self_attn.qkv_proj.weight", "ssm_proj.weight"])?;
             let projected = Self::matmul_linear(&normed_x, &in_proj_w)?;
             
-            // 2. Conv1D over 10240 features with kernel size 4
+            // 2. Conv1D over features with kernel size 4
             let conv_act = if let Ok(conv_w) = self.get_layer_weight(layer_idx, &["ssm_conv1d.weight", "conv1d.weight"]) {
-                // conv_w is [10240, 4]
+                let conv_dim = conv_w.dim(candle_core::D::Minus1)?;
                 let conv_out = if seq_len == 1 {
                     // Step generation with rolling conv buffer
                     let prev_state = self.kv_cache.layers[layer_idx].ssm_conv_state.clone().unwrap_or_else(|| {
-                        Tensor::zeros((1, 10240, 3), projected.dtype(), projected.device()).unwrap()
+                        Tensor::zeros((1, conv_dim, 3), projected.dtype(), projected.device()).unwrap()
                     });
-                    let x_step = projected.transpose(1, 2)?; // [1, 10240, 1]
-                    let full_window = Tensor::cat(&[&prev_state, &x_step], 2)?; // [1, 10240, 4]
+                    let x_conv_in = if projected.dim(candle_core::D::Minus1)? > conv_dim {
+                        projected.narrow(candle_core::D::Minus1, 0, conv_dim)?
+                    } else {
+                        projected.clone()
+                    };
+                    let x_step = x_conv_in.transpose(1, 2)?; // [1, conv_dim, 1]
+                    let full_window = Tensor::cat(&[&prev_state, &x_step], 2)?; // [1, conv_dim, 4]
                     let next_buf = full_window.narrow(2, 1, 3)?;
                     self.kv_cache.layers[layer_idx].ssm_conv_state = Some(next_buf);
 
-                    let conv_w_b = conv_w.unsqueeze(0)?; // [1, 10240, 4]
-                    (full_window * conv_w_b)?.sum_keepdim(2)?.transpose(1, 2)? // [1, 1, 10240]
+                    let conv_w_b = conv_w.unsqueeze(0)?; // [1, conv_dim, 4]
+                    let mut c_out = (full_window * conv_w_b)?.sum_keepdim(2)?.transpose(1, 2)?; // [1, 1, conv_dim]
+                    if let Ok(conv_b) = self.get_layer_weight(layer_idx, &["ssm_conv1d.bias", "conv1d.bias"]) {
+                        c_out = c_out.broadcast_add(&conv_b.unsqueeze(0)?.unsqueeze(1)?)?;
+                    }
+                    c_out
                 } else {
                     // Prefill phase
-                    let last_steps = if seq_len >= 3 {
-                        projected.narrow(1, seq_len - 3, 3)?.transpose(1, 2)?
+                    let x_conv_in = if projected.dim(candle_core::D::Minus1)? > conv_dim {
+                        projected.narrow(candle_core::D::Minus1, 0, conv_dim)?
                     } else {
-                        Tensor::zeros((1, 10240, 3), projected.dtype(), projected.device())?
+                        projected.clone()
+                    };
+                    let last_steps = if seq_len >= 3 {
+                        x_conv_in.narrow(1, seq_len - 3, 3)?.transpose(1, 2)?
+                    } else {
+                        Tensor::zeros((1, conv_dim, 3), projected.dtype(), projected.device())?
                     };
                     self.kv_cache.layers[layer_idx].ssm_conv_state = Some(last_steps);
-                    projected.clone()
+                    let mut c_out = x_conv_in;
+                    if let Ok(conv_b) = self.get_layer_weight(layer_idx, &["ssm_conv1d.bias", "conv1d.bias"]) {
+                        c_out = c_out.broadcast_add(&conv_b.unsqueeze(0)?.unsqueeze(1)?)?;
+                    }
+                    c_out
                 };
                 candle_nn::ops::silu(&conv_out).map_err(LuminaError::Candle)?
             } else {
@@ -1811,8 +1829,16 @@ impl CausalLMPipeline {
                 self.config.rope_theta
             };
 
-            // Apply RoPE
-            let (q, k) = self.apply_rope(&q, &k, pos, seq_len, theta, sw.is_some())?;
+            // Check if model is Nemotron (which uses no RoPE)
+            let is_nemotron = self.weights.contains(&"blk.0.ssm_a".to_string())
+                && self.weights.contains(&"blk.1.ffn_gate_inp.weight".to_string());
+
+            // Apply RoPE unless Nemotron
+            let (q, k) = if is_nemotron {
+                (q, k)
+            } else {
+                self.apply_rope(&q, &k, pos, seq_len, theta, sw.is_some())?
+            };
 
             // Append to KV Cache with sliding window bounding
             let (k, v) = self.kv_cache.layers[layer_idx]
@@ -1873,10 +1899,23 @@ impl CausalLMPipeline {
         // Pre-feedforward layernorm
         // In Qwen/Llama, post_attention_norm.weight is the FFN pre-norm.
         // In Gemma 2/3, post_attention_norm is applied to attn_out, and ffn_norm.weight / pre_feedforward_layernorm.weight is the FFN pre-norm.
-        let ffn_norm_w = self.get_layer_weight(layer_idx, &["pre_feedforward_layernorm.weight", "ffn_norm.weight", "post_attention_layernorm.weight", "post_attention_norm.weight"])?;
+        // In Nemotron-H, each layer is single-block: SSM layers return x_res directly without FFN, Attention layers return x_res directly,
+        // and MoE layers use attn_norm as the MoE pre-norm with no attention sub-block.
+        let is_nemotron = self.weights.contains(&"blk.0.ssm_a".to_string())
+            && self.weights.contains(&"blk.1.ffn_gate_inp.weight".to_string());
+
+        if is_nemotron && (is_ssm_layer || self.weights.contains(&format!("blk.{layer_idx}.attn_q.weight"))) {
+            return Ok(x);
+        }
+
+        let ffn_norm_w = if is_nemotron {
+            self.get_layer_weight(layer_idx, &["attn_norm.weight", "input_layernorm.weight"])?
+        } else {
+            self.get_layer_weight(layer_idx, &["pre_feedforward_layernorm.weight", "ffn_norm.weight", "post_attention_layernorm.weight", "post_attention_norm.weight"])?
+        };
         let normed_post_x = self.apply_norm(&x, &ffn_norm_w)?;
 
-        // Check if this layer is MoE (DeepSeek / Mixtral)
+        // Check if this layer is MoE (DeepSeek / Mixtral / Nemotron)
         let is_moe_layer = self.weights.contains(&format!("model.layers.{layer_idx}.mlp.gate.weight"))
             || self.weights.contains(&format!("layers.{layer_idx}.mlp.gate.weight"))
             || self.weights.contains(&format!("blk.{layer_idx}.ffn_gate_inp.weight"))
@@ -1888,9 +1927,12 @@ impl CausalLMPipeline {
             let router_logits = Self::matmul_linear(&normed_post_x, &router_w)?;
 
             // Gating function: LFM2.5 explicitly specifies expert_gating_func = 2 (SIGMOID)
+            // Nemotron-H MoE also uses Sigmoid routing with expert_weights_scale = 2.5
             let is_lfm = self.weights.contains(&"blk.0.shortconv.in_proj.weight".to_string())
                 || self.weights_cache.contains_key("blk.0.shortconv.in_proj.weight");
-            let router_probs = if is_lfm {
+            let is_nemotron_moe = self.weights.contains(&"blk.1.ffn_gate_inp.weight".to_string());
+
+            let router_probs = if is_lfm || is_nemotron_moe {
                 // Portable sigmoid in F32: (1 + exp(-x))^-1
                 let orig_dt = router_logits.dtype();
                 let f32_logits = router_logits.to_dtype(DType::F32).map_err(LuminaError::Candle)?;
@@ -1904,9 +1946,13 @@ impl CausalLMPipeline {
             };
 
             let num_experts = router_w.shape().dims2().map_err(LuminaError::Candle)?.0;
-            let top_k = self.config.moe_top_k.min(num_experts).max(1);
+            let top_k = if is_nemotron_moe {
+                6.min(num_experts)
+            } else {
+                self.config.moe_top_k.min(num_experts).max(1)
+            };
 
-            // Optional DeepSeek / LFM aux-loss-free expert selection bias
+            // Optional DeepSeek / LFM / Nemotron aux-loss-free expert selection bias
             let selection_probs = if let Ok(exp_b) = self.get_layer_weight(layer_idx, &["exp_probs_b.bias", "ffn_exp_probs_b.bias"]) {
                 router_probs.broadcast_add(&exp_b).map_err(LuminaError::Candle)?
             } else {
@@ -1953,7 +1999,11 @@ impl CausalLMPipeline {
                         let d_w = fused_d.get(exp_idx)?;
 
                         let u = Self::matmul_linear(&normed_post_x, &u_w)?;
-                        let exp_act = if let Some(ref fg) = fused_g {
+                        let exp_act = if is_nemotron_moe {
+                            // Nemotron-H MoE uses squared ReLU (ReLU²) activation without gate
+                            let relu_u = u.relu().map_err(LuminaError::Candle)?;
+                            relu_u.sqr().map_err(LuminaError::Candle)?
+                        } else if let Some(ref fg) = fused_g {
                             let g_w = fg.get(exp_idx)?;
                             let g = Self::matmul_linear(&normed_post_x, &g_w)?;
                             let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
@@ -2040,7 +2090,10 @@ impl CausalLMPipeline {
                             let d_w = fused_d.get(exp_idx)?;
 
                             let u = Self::matmul_linear(&tok_x, &u_w)?;
-                            let exp_act = if let Some(ref fg) = fused_g {
+                            let exp_act = if is_nemotron_moe {
+                                let relu_u = u.relu().map_err(LuminaError::Candle)?;
+                                relu_u.sqr().map_err(LuminaError::Candle)?
+                            } else if let Some(ref fg) = fused_g {
                                 let g_w = fg.get(exp_idx)?;
                                 let g = Self::matmul_linear(&tok_x, &g_w)?;
                                 let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
@@ -2116,16 +2169,18 @@ impl CausalLMPipeline {
                 accum_out = Some(stacked.reshape((b_sz, seq_len, hidden_dim))?);
             }
 
-            // Shared experts (DeepSeek V3 / R1)
+            // Shared experts (DeepSeek V3 / R1 / Nemotron-H)
             let shared_gate_names = [
                 format!("model.layers.{layer_idx}.mlp.shared_experts.gate_proj.weight"),
                 format!("layers.{layer_idx}.mlp.shared_experts.gate_proj.weight"),
             ];
             let shared_up_names = [
+                format!("blk.{layer_idx}.ffn_up_shexp.weight"),
                 format!("model.layers.{layer_idx}.mlp.shared_experts.up_proj.weight"),
                 format!("layers.{layer_idx}.mlp.shared_experts.up_proj.weight"),
             ];
             let shared_down_names = [
+                format!("blk.{layer_idx}.ffn_down_shexp.weight"),
                 format!("model.layers.{layer_idx}.mlp.shared_experts.down_proj.weight"),
                 format!("layers.{layer_idx}.mlp.shared_experts.down_proj.weight"),
             ];
@@ -2134,15 +2189,21 @@ impl CausalLMPipeline {
             let str_refs_u: Vec<&str> = shared_up_names.iter().map(|s| s.as_str()).collect();
             let str_refs_d: Vec<&str> = shared_down_names.iter().map(|s| s.as_str()).collect();
 
-            if let (Ok(sg_w), Ok(su_w), Ok(sd_w)) = (
-                self.get_weight_or_fallback(&str_refs_g),
+            if let (Ok(su_w), Ok(sd_w)) = (
                 self.get_weight_or_fallback(&str_refs_u),
                 self.get_weight_or_fallback(&str_refs_d),
             ) {
-                let sg = Self::matmul_linear(&normed_post_x, &sg_w)?;
                 let su = Self::matmul_linear(&normed_post_x, &su_w)?;
-                let silu_sg = candle_nn::ops::silu(&sg).map_err(LuminaError::Candle)?;
-                let shared_act = (silu_sg * su).map_err(LuminaError::Candle)?;
+                let shared_act = if is_nemotron_moe {
+                    let relu_su = su.relu().map_err(LuminaError::Candle)?;
+                    relu_su.sqr().map_err(LuminaError::Candle)?
+                } else if let Ok(sg_w) = self.get_weight_or_fallback(&str_refs_g) {
+                    let sg = Self::matmul_linear(&normed_post_x, &sg_w)?;
+                    let silu_sg = candle_nn::ops::silu(&sg).map_err(LuminaError::Candle)?;
+                    (silu_sg * su).map_err(LuminaError::Candle)?
+                } else {
+                    candle_nn::ops::silu(&su).map_err(LuminaError::Candle)?
+                };
                 let shared_out = Self::matmul_linear(&shared_act, &sd_w)?;
 
                 accum_out = match accum_out {
