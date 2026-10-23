@@ -1873,9 +1873,21 @@ impl CausalLMPipeline {
             };
 
             let b_sz = x.dim(0).map_err(LuminaError::Candle)?;
-            let mut q = q.reshape((b_sz, seq_len, self.config.num_attention_heads, self.config.head_dim))?.transpose(1, 2)?;
-            let mut k = k.reshape((b_sz, seq_len, self.config.num_key_value_heads, self.config.head_dim))?.transpose(1, 2)?;
-            let v = v.reshape((b_sz, seq_len, self.config.num_key_value_heads, self.config.head_dim))?.transpose(1, 2)?;
+            let q_last_dim = q.dim(candle_core::D::Minus1)?;
+            let k_last_dim = k.dim(candle_core::D::Minus1)?;
+            let v_last_dim = v.dim(candle_core::D::Minus1)?;
+
+            let cur_head_dim = self.config.head_dim;
+            let cur_num_heads = q_last_dim / cur_head_dim;
+            let cur_num_kv_heads = (k_last_dim / cur_head_dim).max(1);
+
+            if pos == 0 {
+                eprintln!("🔍 [Layer {layer_idx}] Attention dims: q_last_dim={q_last_dim}, head_dim={cur_head_dim}, num_heads={cur_num_heads}, kv_heads={cur_num_kv_heads}");
+            }
+
+            let mut q = q.reshape((b_sz, seq_len, cur_num_heads, cur_head_dim))?.transpose(1, 2)?;
+            let mut k = k.reshape((b_sz, seq_len, cur_num_kv_heads, cur_head_dim))?.transpose(1, 2)?;
+            let v = v.reshape((b_sz, seq_len, cur_num_kv_heads, cur_head_dim))?.transpose(1, 2)?;
 
             // Qwen3 applies per-head RMSNorm (over head_dim) to Q and K before RoPE.
             if self.config.qk_norm {
@@ -1917,11 +1929,18 @@ impl CausalLMPipeline {
                 .map_err(LuminaError::Candle)?;
 
             // GQA repeat KV if needed
-            let k = self.repeat_kv(k)?;
-            let v = self.repeat_kv(v)?;
+            let n_rep = (cur_num_heads / cur_num_kv_heads).max(1);
+            let (k, v) = if n_rep > 1 {
+                let (b, n_kv_heads, s_len, h_dim) = k.shape().dims4().map_err(LuminaError::Candle)?;
+                let rep_k = k.unsqueeze(2)?.expand((b, n_kv_heads, n_rep, s_len, h_dim))?.reshape((b, n_kv_heads * n_rep, s_len, h_dim))?;
+                let rep_v = v.unsqueeze(2)?.expand((b, n_kv_heads, n_rep, s_len, h_dim))?.reshape((b, n_kv_heads * n_rep, s_len, h_dim))?;
+                (rocm_contiguous(&rep_k)?, rocm_contiguous(&rep_v)?)
+            } else {
+                (k, v)
+            };
 
             // Scaled dot product attention: q is [B, H, S_q, D], k is [B, H, S_k, D] -> att is [B, H, S_q, S_k]
-            let scale = 1.0 / (self.config.head_dim as f64).sqrt();
+            let scale = 1.0 / (cur_head_dim as f64).sqrt();
             let q = rocm_contiguous(&q)?;
             let k_t = rocm_contiguous(&k.transpose(2, 3).map_err(LuminaError::Candle)?)?;
             let mut att = (q.matmul(&k_t)? * scale).map_err(LuminaError::Candle)?;
@@ -1947,7 +1966,7 @@ impl CausalLMPipeline {
             let att = rocm_contiguous(&crate::device::softmax_last_dim(&att).map_err(LuminaError::Candle)?)?;
             let v = rocm_contiguous(&v)?;
             let out = att.matmul(&v).map_err(LuminaError::Candle)?;
-            let attn_dim = self.config.num_attention_heads * self.config.head_dim;
+            let attn_dim = cur_num_heads * cur_head_dim;
             let mut out = rocm_contiguous(&out.transpose(1, 2).map_err(LuminaError::Candle)?)?.reshape((b_sz, seq_len, attn_dim))?;
             
             if let Some(gate) = gate_opt {
