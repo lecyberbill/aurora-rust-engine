@@ -306,7 +306,7 @@ impl AutoModel {
                 Arc::new(Mutex::new(diff))
             }
             // ---- Text / CausalLM models -----------------------------------------
-            Architecture::Qwen3 | Architecture::Mistral3 | Architecture::T5
+            Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Nemotron | Architecture::T5
             | Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma | Architecture::Lfm | Architecture::Phi
             | Architecture::ClipL | Architecture::OpenClip => {
                 let text = super::auto::build_text(&arch, &weights, &device, dtype)?;
@@ -466,7 +466,7 @@ fn build_text(
                 Ok(TextModel::causal_lm(id, arch.slug(), pipeline))
             }
         }
-        Architecture::Llama | Architecture::DeepSeek | Architecture::Mistral3 | Architecture::Lfm | Architecture::Phi => {
+        Architecture::Llama | Architecture::DeepSeek | Architecture::Mistral3 | Architecture::Nemotron | Architecture::Lfm | Architecture::Phi => {
             let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
             let tokenizer = resolve_tokenizer(weights, arch);
             let pipeline = crate::models::text::CausalLMPipeline::new(
@@ -499,6 +499,7 @@ fn resolve_tokenizer(weights: &Path, arch: &Architecture) -> Option<tokenizers::
         Architecture::Llama | Architecture::DeepSeek => "llama_tokenizer.json",
         Architecture::Gemma => "gemma_tokenizer.json",
         Architecture::Mistral3 => "mistral_tokenizer.json",
+        Architecture::Nemotron => "nemotron_tokenizer.json",
         Architecture::Lfm => "lfm_tokenizer.json",
         Architecture::Phi => "phi_tokenizer.json",
         _ => "tokenizer.json",
@@ -577,7 +578,8 @@ fn resolve_tokenizer_named(
             "meta-llama/Meta-Llama-3-8B-Instruct",
         ],
         Architecture::Gemma => vec!["google/gemma-2-2b-it", "google/gemma-2-9b"],
-        Architecture::Mistral3 => vec!["mistralai/Mistral-7B-Instruct-v0.3"],
+        Architecture::Mistral3 => vec!["mistralai/Ministral-3-14B-Instruct-2512", "mistralai/Mistral-7B-Instruct-v0.3"],
+        Architecture::Nemotron => vec!["nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF"],
         Architecture::Lfm => vec!["LiquidAI/LFM2.5-8B-A1B", "LiquidAI/LFM2-8B-A1B", "LiquidAI/LFM2.5-24B-A2B"],
         Architecture::Phi => vec!["microsoft/phi-4", "microsoft/Phi-3-mini-4k-instruct"],
         _ => return None,

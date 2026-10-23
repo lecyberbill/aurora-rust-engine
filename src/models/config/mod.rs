@@ -25,6 +25,7 @@ pub enum Architecture {
     DeepSeek,
     Gemma,
     Mistral3,
+    Nemotron,
     Lfm,
     Phi,
     T5,
@@ -39,7 +40,7 @@ impl Architecture {
     pub fn model_kind(&self) -> ModelKind {
         match self {
             Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma => ModelKind::Text,
-            Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Lfm | Architecture::Phi => ModelKind::Text,
+            Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Nemotron | Architecture::Lfm | Architecture::Phi => ModelKind::Text,
             Architecture::T5 | Architecture::ClipL | Architecture::OpenClip => ModelKind::TextEncoder,
             Architecture::ZImageTurbo
             | Architecture::Flux2Dev
@@ -70,6 +71,7 @@ impl Architecture {
             Architecture::DeepSeek => "deepseek".into(),
             Architecture::Gemma => "gemma".into(),
             Architecture::Mistral3 => "mistral3".into(),
+            Architecture::Nemotron => "nemotron".into(),
             Architecture::Lfm => "lfm".into(),
             Architecture::Phi => "phi".into(),
             Architecture::T5 => "t5".into(),
@@ -102,6 +104,8 @@ pub fn detect_architecture(src: &dyn WeightsSource) -> Architecture {
             return Architecture::Phi;
         } else if arch_lower.starts_with("mistral") {
             return Architecture::Mistral3;
+        } else if arch_lower.starts_with("nemotron") {
+            return Architecture::Nemotron;
         } else if arch_lower.starts_with("lfm") {
             return Architecture::Lfm;
         }
