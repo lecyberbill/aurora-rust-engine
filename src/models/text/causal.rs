@@ -1834,8 +1834,17 @@ impl CausalLMPipeline {
                 }
                 let k_l = self.get_layer_linear(layer_idx, &["self_attn.k_proj.weight", "attn_k.weight"])?;
                 let v_l = self.get_layer_linear(layer_idx, &["self_attn.v_proj.weight", "attn_v.weight"])?;
+                if pos == 0 {
+                    eprintln!("🔍 [Layer {layer_idx}] Calling forward on k_l...");
+                }
                 let k = k_l.forward(&normed_x)?;
+                if pos == 0 {
+                    eprintln!("🔍 [Layer {layer_idx}] k forward success, k shape {:?}, calling forward on v_l...", k.shape());
+                }
                 let v = v_l.forward(&normed_x)?;
+                if pos == 0 {
+                    eprintln!("🔍 [Layer {layer_idx}] v forward success, v shape {:?}", v.shape());
+                }
                 (q, k, v)
             } else if let Ok(qkv_l) = self.get_layer_linear(layer_idx, &["self_attn.qkv_proj.weight", "attn_qkv.weight"]) {
                 let qkv = qkv_l.forward(&normed_x)?;
@@ -1945,6 +1954,9 @@ impl CausalLMPipeline {
                 out = (out * gate).map_err(LuminaError::Candle)?;
             }
 
+            if pos == 0 {
+                eprintln!("🔍 [Layer {layer_idx}] Calling o_l.forward on out (shape: {:?})...", out.shape());
+            }
             let mut attn_out = o_l.forward(&out)?;
 
             // Gemma 2 / 3 applies post_attention_norm to attn_out before adding residual
