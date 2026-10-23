@@ -1647,42 +1647,62 @@ impl CausalLMPipeline {
             
             // 2. Conv1D over features with kernel size 4
             let conv_act = if let Ok(conv_w) = self.get_layer_weight(layer_idx, &["ssm_conv1d.weight", "conv1d.weight"]) {
-                let conv_dim = conv_w.dim(candle_core::D::Minus1)?;
+                let (k_sz, c_dim) = conv_w.shape().dims2().map_err(LuminaError::Candle)?;
+                let state_len = k_sz.saturating_sub(1);
                 let conv_out = if seq_len == 1 {
                     // Step generation with rolling conv buffer
                     let prev_state = self.kv_cache.layers[layer_idx].ssm_conv_state.clone().unwrap_or_else(|| {
-                        Tensor::zeros((1, conv_dim, 3), projected.dtype(), projected.device()).unwrap()
+                        Tensor::zeros((1, c_dim, state_len), projected.dtype(), projected.device()).unwrap()
                     });
-                    let x_conv_in = if projected.dim(candle_core::D::Minus1)? > conv_dim {
-                        projected.narrow(candle_core::D::Minus1, 0, conv_dim)?
+                    let x_conv_in = if projected.dim(candle_core::D::Minus1)? > c_dim {
+                        projected.narrow(candle_core::D::Minus1, 0, c_dim)?
                     } else {
                         projected.clone()
                     };
-                    let x_step = x_conv_in.transpose(1, 2)?; // [1, conv_dim, 1]
-                    let full_window = Tensor::cat(&[&prev_state, &x_step], 2)?; // [1, conv_dim, 4]
-                    let next_buf = full_window.narrow(2, 1, 3)?;
+                    let x_step = x_conv_in.transpose(1, 2)?; // [1, c_dim, 1]
+                    let full_window = Tensor::cat(&[&prev_state, &x_step], 2)?; // [1, c_dim, k_sz]
+                    let next_buf = full_window.narrow(2, 1, state_len)?;
                     self.kv_cache.layers[layer_idx].ssm_conv_state = Some(next_buf);
 
-                    let conv_w_b = conv_w.unsqueeze(0)?; // [1, conv_dim, 4]
-                    let mut c_out = (full_window * conv_w_b)?.sum_keepdim(2)?.transpose(1, 2)?; // [1, 1, conv_dim]
+                    let conv_w_b = conv_w.transpose(0, 1)?.unsqueeze(0)?; // [1, c_dim, k_sz]
+                    let mut c_out = (full_window * conv_w_b)?.sum_keepdim(2)?.transpose(1, 2)?; // [1, 1, c_dim]
                     if let Ok(conv_b) = self.get_layer_weight(layer_idx, &["ssm_conv1d.bias", "conv1d.bias"]) {
                         c_out = c_out.broadcast_add(&conv_b.unsqueeze(0)?.unsqueeze(1)?)?;
                     }
                     c_out
                 } else {
-                    // Prefill phase
-                    let x_conv_in = if projected.dim(candle_core::D::Minus1)? > conv_dim {
-                        projected.narrow(candle_core::D::Minus1, 0, conv_dim)?
+                    // Prefill phase: causal depthwise convolution over full sequence
+                    let x_conv_in = if projected.dim(candle_core::D::Minus1)? > c_dim {
+                        projected.narrow(candle_core::D::Minus1, 0, c_dim)?
                     } else {
                         projected.clone()
                     };
-                    let last_steps = if seq_len >= 3 {
-                        x_conv_in.narrow(1, seq_len - 3, 3)?.transpose(1, 2)?
+                    let last_steps = if seq_len >= state_len {
+                        x_conv_in.narrow(1, seq_len - state_len, state_len)?.transpose(1, 2)?
                     } else {
-                        Tensor::zeros((1, conv_dim, 3), projected.dtype(), projected.device())?
+                        let pad = Tensor::zeros((1, c_dim, state_len - seq_len), x_conv_in.dtype(), x_conv_in.device())?;
+                        let cur = x_conv_in.transpose(1, 2)?;
+                        Tensor::cat(&[&pad, &cur], 2)?
                     };
                     self.kv_cache.layers[layer_idx].ssm_conv_state = Some(last_steps);
-                    let mut c_out = x_conv_in;
+
+                    let bx_trans = x_conv_in.transpose(1, 2)?; // [B, c_dim, S]
+                    let padded_bx = if state_len > 0 {
+                        let pad = Tensor::zeros((x_conv_in.dim(0)?, c_dim, state_len), x_conv_in.dtype(), x_conv_in.device())?;
+                        Tensor::cat(&[&pad, &bx_trans], 2)?
+                    } else {
+                        bx_trans
+                    };
+
+                    let conv_w_b = conv_w.transpose(0, 1)?.unsqueeze(0)?; // [1, c_dim, k_sz]
+                    let mut out_cols = Vec::with_capacity(seq_len);
+                    for t in 0..seq_len {
+                        let window = padded_bx.narrow(2, t, k_sz)?; // [B, c_dim, k_sz]
+                        let step = (window * &conv_w_b)?.sum_keepdim(2)?; // [B, c_dim, 1]
+                        out_cols.push(step);
+                    }
+                    let cols_ref: Vec<&Tensor> = out_cols.iter().collect();
+                    let mut c_out = Tensor::cat(&cols_ref, 2)?.transpose(1, 2)?; // [B, S, c_dim]
                     if let Ok(conv_b) = self.get_layer_weight(layer_idx, &["ssm_conv1d.bias", "conv1d.bias"]) {
                         c_out = c_out.broadcast_add(&conv_b.unsqueeze(0)?.unsqueeze(1)?)?;
                     }
