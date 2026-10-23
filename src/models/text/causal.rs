@@ -292,6 +292,10 @@ pub struct CausalLMConfig {
     pub unit_offset_norm: bool,
     pub sliding_window_pattern: Option<usize>,
     pub rope_scaling_factor: f32,
+    pub rope_scaling_type: Option<String>,
+    pub rope_scaling_orig_ctx: usize,
+    pub yarn_beta_slow: f32,
+    pub yarn_beta_fast: f32,
     pub moe_num_experts: usize,
     pub moe_top_k: usize,
     pub moe_shared_experts: usize,
@@ -440,6 +444,16 @@ impl CausalLMConfig {
             .map(|f| f as f32)
             .unwrap_or(1.0f32);
 
+        let rope_scaling_type = src.metadata(&format!("{arch_prefix}rope.scaling.type"));
+        let rope_scaling_orig_ctx = src.metadata_usize(&format!("{arch_prefix}rope.scaling.original_context_length"))
+            .unwrap_or(16384);
+        let yarn_beta_slow = src.metadata_f64(&format!("{arch_prefix}rope.scaling.yarn_beta_slow"))
+            .map(|f| f as f32)
+            .unwrap_or(1.0f32);
+        let yarn_beta_fast = src.metadata_f64(&format!("{arch_prefix}rope.scaling.yarn_beta_fast"))
+            .map(|f| f as f32)
+            .unwrap_or(32.0f32);
+
         let attn_logit_softcapping = src.metadata_f64(&format!("{arch_prefix}attn_logit_softcapping"))
             .or_else(|| {
                 // Gemma 2 hardcoded fallback if not in metadata, but Gemma 3 has no softcapping
@@ -494,6 +508,10 @@ impl CausalLMConfig {
             unit_offset_norm,
             sliding_window_pattern,
             rope_scaling_factor,
+            rope_scaling_type,
+            rope_scaling_orig_ctx,
+            yarn_beta_slow,
+            yarn_beta_fast,
             moe_num_experts,
             moe_top_k,
             moe_shared_experts,
@@ -895,8 +913,36 @@ impl CausalLMPipeline {
         }
         let arch = self.arch_name();
         if arch == "mistral3" || arch == "mistral" {
-            let default_sys = "You are a helpful assistant.";
-            return format!("[SYSTEM_PROMPT]{default_sys}[/SYSTEM_PROMPT][INST] {} [/INST]", prompt.trim());
+            let default_sys = "\
+You are Ministral-3-14B-Instruct-2512, a Large Language Model (LLM) created by Mistral AI, a French startup headquartered in Paris.
+You power an AI assistant called Le Chat.
+Your knowledge base was last updated on 2023-10-01.
+The current date is 2026-10-23.
+
+When you're not sure about some information or when the user's request requires up-to-date or specific data, you must use the available tools to fetch the information. Do not hesitate to use tools whenever they can provide a more accurate or complete response. If no relevant tools are available, then clearly state that you don't have the information and avoid making up anything.
+If the user's question is not clear, ambiguous, or does not provide enough context for you to accurately answer the question, you do not try to answer it right away and you rather ask the user to clarify their request (e.g. \"What are some good restaurants around me?\" => \"Where are you?\" or \"When is the next flight to Tokyo\" => \"Where do you travel from?\").
+You are always very attentive to dates, in particular you try to resolve dates (e.g. \"yesterday\" is 2026-10-22) and when asked about information at specific dates, you discard information that is at another date.
+You follow these instructions in all languages, and always respond to the user in the language they use or request.
+Next sections describe the capabilities that you have.
+
+# WEB BROWSING INSTRUCTIONS
+
+You cannot perform any web search or access internet to open URLs, links etc. If it seems like the user is expecting you to do so, you clarify the situation and ask the user to copy paste the text directly in the chat.
+
+# MULTI-MODAL INSTRUCTIONS
+
+You have the ability to read images, but you cannot generate images. You also cannot read nor transcribe audio files or videos.
+
+# TOOL CALLING INSTRUCTIONS
+
+You may have access to tools that you can use to fetch information or perform actions. You must use these tools in the following situations:
+
+1. When the request requires up-to-date information.
+2. When the request requires specific data that you do not have in your knowledge base.
+3. When the request involves actions that you cannot perform without tools.
+
+Always prioritize using tools to provide the most accurate and helpful response. If tools are not available, inform the user that you cannot perform the requested action at the moment.";
+            return format!("[SYSTEM_PROMPT]{default_sys}[/SYSTEM_PROMPT][INST]{}[/INST]", prompt.trim());
         }
         if arch != "phi3" && arch != "phi4" {
             return prompt.to_string();
@@ -1041,7 +1087,7 @@ impl CausalLMPipeline {
         // conservative repetition penalty unless the caller asked for more.
         let repetition_penalty = {
             let arch = self.arch_name();
-            if arch == "phi3" || arch == "phi4" {
+            if arch == "phi3" || arch == "phi4" || arch == "mistral3" || arch == "mistral" {
                 params.repetition_penalty.max(1.1)
             } else {
                 params.repetition_penalty
@@ -2195,16 +2241,42 @@ impl CausalLMPipeline {
     fn apply_rope(&self, q: &Tensor, k: &Tensor, pos: usize, seq_len: usize, theta: f32, is_sliding_layer: bool) -> Result<(Tensor, Tensor)> {
         let dev = q.device();
         let head_dim = self.config.head_dim;
-        let scale_factor = if !is_sliding_layer && self.config.rope_scaling_factor > 0.0 {
-            self.config.rope_scaling_factor
-        } else {
-            1.0f32
-        };
-        let positions: Vec<f32> = (pos..pos + seq_len).map(|p| (p as f32) / scale_factor).collect();
-        let pos_tensor = Tensor::new(&positions[..], dev)?.unsqueeze(1)?; // [S, 1]
-
         let half_dim = head_dim / 2;
-        let freqs: Vec<f32> = (0..half_dim).map(|i| 1.0f32 / theta.powf((2 * i) as f32 / head_dim as f32)).collect();
+
+        let (positions, freqs) = if !is_sliding_layer && self.config.rope_scaling_type.as_deref() == Some("yarn") {
+            let orig_ctx = self.config.rope_scaling_orig_ctx as f32;
+            let factor = self.config.rope_scaling_factor.max(1.0);
+            let beta_slow = self.config.yarn_beta_slow;
+            let beta_fast = self.config.yarn_beta_fast;
+
+            let freqs: Vec<f32> = (0..half_dim).map(|i| {
+                let base_freq = 1.0f32 / theta.powf((2 * i) as f32 / head_dim as f32);
+                let lambda = 2.0 * std::f32::consts::PI / base_freq;
+                let low = orig_ctx / beta_fast;
+                let high = orig_ctx / beta_slow;
+                if lambda < low {
+                    base_freq
+                } else if lambda > high {
+                    base_freq / factor
+                } else {
+                    let alpha = (lambda - low) / (high - low);
+                    (1.0 - alpha) * base_freq + alpha * (base_freq / factor)
+                }
+            }).collect();
+            let positions: Vec<f32> = (pos..pos + seq_len).map(|p| p as f32).collect();
+            (positions, freqs)
+        } else {
+            let scale_factor = if !is_sliding_layer && self.config.rope_scaling_factor > 0.0 {
+                self.config.rope_scaling_factor
+            } else {
+                1.0f32
+            };
+            let positions: Vec<f32> = (pos..pos + seq_len).map(|p| (p as f32) / scale_factor).collect();
+            let freqs: Vec<f32> = (0..half_dim).map(|i| 1.0f32 / theta.powf((2 * i) as f32 / head_dim as f32)).collect();
+            (positions, freqs)
+        };
+
+        let pos_tensor = Tensor::new(&positions[..], dev)?.unsqueeze(1)?; // [S, 1]
         let freq_tensor = Tensor::new(&freqs[..], dev)?.unsqueeze(0)?; // [1, half_dim]
 
         let angles = pos_tensor.matmul(&freq_tensor).map_err(LuminaError::Candle)?; // [S, half_dim]
@@ -2396,6 +2468,10 @@ mod tests {
             unit_offset_norm: true,
             sliding_window_pattern: None,
             rope_scaling_factor: 1.0,
+            rope_scaling_type: None,
+            rope_scaling_orig_ctx: 512,
+            yarn_beta_slow: 1.0,
+            yarn_beta_fast: 32.0,
             moe_num_experts: 0,
             moe_top_k: 0,
             moe_shared_experts: 0,
@@ -2437,6 +2513,10 @@ mod tests {
             unit_offset_norm: true,
             sliding_window_pattern: None,
             rope_scaling_factor: 1.0,
+            rope_scaling_type: None,
+            rope_scaling_orig_ctx: 512,
+            yarn_beta_slow: 1.0,
+            yarn_beta_fast: 32.0,
             moe_num_experts: 0,
             moe_top_k: 0,
             moe_shared_experts: 0,
