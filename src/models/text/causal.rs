@@ -887,13 +887,17 @@ impl CausalLMPipeline {
         self.format_chat_messages(&pairs)
     }
 
-    /// Format a single user prompt for models that need a chat wrapper (Phi-3/4).
-    /// Prompts already containing the Phi separator are passed through unchanged.
+    /// Format a single user prompt for models that need a chat wrapper (Phi-3/4, Mistral).
+    /// Prompts already containing format markers are passed through unchanged.
     pub fn format_prompt(&self, prompt: &str) -> String {
-        if prompt.contains("<|im_sep|>") {
+        if prompt.contains("<|im_sep|>") || prompt.contains("[INST]") {
             return prompt.to_string();
         }
         let arch = self.arch_name();
+        if arch == "mistral3" || arch == "mistral" {
+            let default_sys = "You are a helpful assistant.";
+            return format!("[SYSTEM_PROMPT]{default_sys}[/SYSTEM_PROMPT][INST] {} [/INST]", prompt.trim());
+        }
         if arch != "phi3" && arch != "phi4" {
             return prompt.to_string();
         }
@@ -909,6 +913,27 @@ impl CausalLMPipeline {
     /// Format `(role, content)` messages using the model family's chat template.
     pub fn format_chat_messages(&self, messages: &[(String, String)]) -> String {
         let arch = self.arch_name();
+        if arch == "mistral3" || arch == "mistral" {
+            let mut prompt = String::new();
+            let mut sys_prompt = String::new();
+            for (role, content) in messages {
+                if role == "system" {
+                    sys_prompt.push_str(content.trim());
+                    sys_prompt.push('\n');
+                }
+            }
+            if !sys_prompt.trim().is_empty() {
+                prompt.push_str(&format!("[SYSTEM_PROMPT]{}[/SYSTEM_PROMPT]", sys_prompt.trim()));
+            }
+            for (role, content) in messages {
+                if role == "user" {
+                    prompt.push_str(&format!("[INST] {} [/INST]", content.trim()));
+                } else if role == "assistant" {
+                    prompt.push_str(&format!("{}</s>", content.trim()));
+                }
+            }
+            return prompt;
+        }
         if arch == "phi3" || arch == "phi4" {
             let template = self.weights.metadata("tokenizer.chat_template");
             let preamble = template
@@ -950,6 +975,13 @@ impl CausalLMPipeline {
         let arch = self.arch_name();
         if arch == "phi3" || arch == "phi4" {
             for id in [100257u32, 100265u32] {
+                if !stop.contains(&id) {
+                    stop.push(id);
+                }
+            }
+        } else if arch == "mistral3" || arch == "mistral" {
+            // Mistral EOS token (</s> = 2) and Tekken/Mistral-3 EOS variants
+            for id in [2u32, 0u32] {
                 if !stop.contains(&id) {
                     stop.push(id);
                 }
