@@ -1862,7 +1862,11 @@ impl CausalLMPipeline {
             }
             let o_l = self.get_layer_linear(layer_idx, &["self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
 
-            let (q, gate_opt) = if q.dim(candle_core::D::Minus1)? == self.config.num_attention_heads * self.config.head_dim * 2 {
+            // Some architectures (e.g. specific gated attention variants) fuse gate into Q projection
+            // If the model does not have gated attention (like Nemotron where num_heads*head_dim == 4096), do not split Q!
+            let has_q_gate = self.weights.contains(&"blk.0.attn_q_gate.weight".to_string())
+                || self.weights.contains(&"model.layers.0.self_attn.q_gate.weight".to_string());
+            let (q, gate_opt) = if has_q_gate && q.dim(candle_core::D::Minus1)? == self.config.num_attention_heads * self.config.head_dim * 2 {
                 let half_dim = self.config.num_attention_heads * self.config.head_dim;
                 let q_proj = q.narrow(candle_core::D::Minus1, 0, half_dim)?;
                 let gate_proj = q.narrow(candle_core::D::Minus1, half_dim, half_dim)?;
