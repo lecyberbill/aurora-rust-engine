@@ -1585,6 +1585,9 @@ impl CausalLMPipeline {
             || self.weights.contains(&format!("layers.{layer_idx}.ssm_a"))
             || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ssm_a"));
 
+        let is_nemotron = self.weights.contains(&"blk.0.ssm_a".to_string())
+            && (self.weights.contains(&"blk.1.ffn_gate_inp.weight".to_string()) || self.weights.contains(&"blk.1.ffn_up.weight".to_string()));
+
         let (_attn_out, x) = if is_shortconv_layer {
             // LFM ShortConv double-gated 1D convolution block:
             // 1. in_proj: [hidden_dim, 3 * hidden_dim] -> BCx is [B, S, 3 * hidden_dim]
@@ -1824,8 +1827,9 @@ impl CausalLMPipeline {
             (out, x_res)
         } else if self.weights.contains(&format!("blk.{layer_idx}.ffn_gate_inp.weight"))
             || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ffn_gate_inp.weight"))
+            || (is_nemotron && (self.weights.contains(&format!("blk.{layer_idx}.ffn_up.weight")) || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ffn_up.weight"))))
         {
-            // Pure MoE layer in hybrid architectures (e.g. Nemotron-H MoE layers have no Attention and no SSM)
+            // Pure MoE or pure dense FFN layer in hybrid architectures (Nemotron-H layers have either SSM, Attention, or FFN, never both)
             (Tensor::zeros_like(x)?, x.clone())
         } else {
             // Standard Full Multi-Head / Grouped-Query Attention
