@@ -121,5 +121,12 @@ Le correctif a été implémenté et validé directement dans le dépôt upstrea
 - `src/bin/test_text_gen.rs` : API positionnelle restaurée (`<model> <prompt> <max_tokens> <temperature> [n_gpu_layers]`), comptage réel des tokens via le callback et calcul du tok/s sur les tokens effectivement générés. Support des prompts multi-mots non quotés en l'absence d'arguments numériques.
 - **Validation Empirique sur AMD ROCm 10 (`gfx1201`)** : Poème français de 5 strophes généré par **Qwen 3.8 27B** en **34,19 s** à **11,73 tok/s** (401 tokens, temp 0,7), chargement 71,68 s. Gemma 3 12B : 17,80 tok/s ; Gemma 4 31B : 11,25 tok/s.
 - `src/models/text/causal.rs` : Branchement effectif du KV-cache quantifié 8-bit via `KVCacheStorage::Quantized(QuantizedLayerKVCache)` et bascule globale `CausalLMPipeline::enable_quantized_kv`. Stockage persistant vérifié strictement en `U8` sans copie flottante résiduelle, avec support multi-dtypes (F32, F16, BF16) et fidélité de décodage autorégressif (similarité cosinus > 0.99).
+- **Validation en Conditions Réelles sur AMD ROCm 10 (`gfx1201`, Phi-4 15B Q4_K_M)** :
+  - **Prompt 1 ("What is the capital of France?", greedy, 48 tokens) :**
+    - Sans quant (`QUANTIZED_KV=0`) : Sortie `Paris.`, débit 7.15 tok/s (49 tokens en 6.85s).
+    - Avec quant (`QUANTIZED_KV=1`) : Sortie `Paris.`, débit 5.33 tok/s (25 tokens en 4.69s). Décodage cohérent sans dérive.
+  - **Prompt 2 ("What is 15 + 27?", greedy, 96 tokens) :**
+    - Sans quant (`QUANTIZED_KV=0`) : Débit 13.10 tok/s (97 tokens en 7.40s). Raisonnement arithmétique structuré.
+    - Avec quant (`QUANTIZED_KV=1`) : Débit 12.06 tok/s (97 tokens en 8.04s). Raisonnement arithmétique structuré identique.
 - Suite de tests : **98/98** (`cargo test --lib`).
 - Invariants Phase 0 : gelés et validés par sondes exécutables (SHA256: `2A84E0B3F2CDEB86B912EF7A67749A5872581323ED7AE2C6E1A26348D8F51581`).
