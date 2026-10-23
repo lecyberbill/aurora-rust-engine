@@ -2004,10 +2004,10 @@ impl CausalLMPipeline {
         // Pre-feedforward layernorm
         // In Qwen/Llama, post_attention_norm.weight is the FFN pre-norm.
         // In Gemma 2/3, post_attention_norm is applied to attn_out, and ffn_norm.weight / pre_feedforward_layernorm.weight is the FFN pre-norm.
-        // In Nemotron-H, each layer is single-block: SSM layers return x_res directly without FFN, Attention layers return x_res directly,
-        // and MoE layers use attn_norm as the MoE pre-norm with no attention sub-block.
+        // In Nemotron-H (both MoE and dense 4B), each layer is single-block: SSM layers return x_res directly without FFN,
+        // Attention layers return x_res directly, and pure FFN/MoE layers use attn_norm as the FFN pre-norm with no attention sub-block.
         let is_nemotron = self.weights.contains(&"blk.0.ssm_a".to_string())
-            && self.weights.contains(&"blk.1.ffn_gate_inp.weight".to_string());
+            && (self.weights.contains(&"blk.1.ffn_gate_inp.weight".to_string()) || self.weights.contains(&"blk.1.ffn_up.weight".to_string()));
 
         if is_nemotron && (is_ssm_layer || self.weights.contains(&format!("blk.{layer_idx}.attn_q.weight"))) {
             return Ok(x);
@@ -2319,8 +2319,15 @@ impl CausalLMPipeline {
 
             accum_out.unwrap_or_else(|| normed_post_x.clone())
         } else {
-            // Standard dense SwiGLU MLP
-            if let Ok(gate_l) = self.get_layer_linear(layer_idx, &["mlp.gate_proj.weight", "ffn_gate.weight"]) {
+            // Standard dense SwiGLU MLP / Nemotron squared ReLU MLP
+            if is_nemotron {
+                let up_l = self.get_layer_linear(layer_idx, &["mlp.up_proj.weight", "ffn_up.weight"])?;
+                let down_l = self.get_layer_linear(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
+                let up = up_l.forward(&normed_post_x)?;
+                let relu_up = up.relu().map_err(LuminaError::Candle)?;
+                let act = relu_up.sqr().map_err(LuminaError::Candle)?;
+                down_l.forward(&act)?
+            } else if let Ok(gate_l) = self.get_layer_linear(layer_idx, &["mlp.gate_proj.weight", "ffn_gate.weight"]) {
                 let up_l = self.get_layer_linear(layer_idx, &["mlp.up_proj.weight", "ffn_up.weight"])?;
                 let down_l = self.get_layer_linear(layer_idx, &["mlp.down_proj.weight", "ffn_down.weight"])?;
                 let llama_mlp = super::llama::LlamaMlp::new(gate_l, up_l, down_l);
