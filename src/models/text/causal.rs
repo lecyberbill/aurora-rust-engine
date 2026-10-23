@@ -384,7 +384,17 @@ impl CausalLMConfig {
         });
 
         let (num_heads, num_kv_heads, head_dim) = if let (Some(nh), Some(nkv)) = (num_heads_meta, num_kv_heads_meta) {
-            (nh, nkv, head_dim)
+            if nkv == 0 {
+                // If metadata explicitly reports 0 kv heads (e.g. Nemotron-H), infer actual KV heads from blk.5.attn_k.weight
+                let k_key = keys.iter().find(|k| k.ends_with("self_attn.k_proj.weight") || k.ends_with("attn_k.weight"));
+                let actual_kv = k_key.and_then(|k| src.raw_info(k)).map(|(_, d)| {
+                    let min_d = d[0].min(d[1]);
+                    min_d / head_dim
+                }).unwrap_or(2).max(1);
+                (nh, actual_kv, head_dim)
+            } else {
+                (nh, nkv, head_dim)
+            }
         } else if let Some(q_key) = keys.iter().find(|k| k.ends_with("self_attn.q_proj.weight") || k.ends_with("attn_q.weight")) {
             let q_out = src.raw_info(q_key).and_then(|(_, d)| d.first().copied()).unwrap_or(hidden_size);
             let k_key = q_key.replace(".q_proj.", ".k_proj.").replace(".attn_q.", ".attn_k.");
