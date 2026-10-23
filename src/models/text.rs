@@ -165,6 +165,9 @@ impl GenerationModel for TextModel {
                         params.n_gpu_layers = Some(n);
                     }
                 }
+                if let Ok(q_str) = std::env::var("QUANTIZED_KV") {
+                    params.quantized_kv = q_str == "1" || q_str.eq_ignore_ascii_case("true");
+                }
 
                 // If prompt doesn't already contain chat markers, wrap it in family chat template
                 let formatted_prompt = if !prompt.contains("<start_of_turn>")

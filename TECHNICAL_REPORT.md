@@ -120,10 +120,6 @@ Le correctif a été implémenté et validé directement dans le dépôt upstrea
 - `src/models/text.rs` : Correction du template ChatML pour `QuantizedQwen35` (bloc de pensée vide `<think>\n</think>\n` en amorce d'assistant, vérifié : poème français direct sans `<think>`).
 - `src/bin/test_text_gen.rs` : API positionnelle restaurée (`<model> <prompt> <max_tokens> <temperature> [n_gpu_layers]`), comptage réel des tokens via le callback et calcul du tok/s sur les tokens effectivement générés. Support des prompts multi-mots non quotés en l'absence d'arguments numériques.
 - **Validation Empirique sur AMD ROCm 10 (`gfx1201`)** : Poème français de 5 strophes généré par **Qwen 3.8 27B** en **34,19 s** à **11,73 tok/s** (401 tokens, temp 0,7), chargement 71,68 s. Gemma 3 12B : 17,80 tok/s ; Gemma 4 31B : 11,25 tok/s.
-- `src/models/text/causal.rs` : Implémentation **expérimentale** du KV-cache quantifié 8-bit (`QuantizedKVCacheEntry`, `QuantizedLayerKVCache`) avec tests unitaires. **Non branchée au pipeline de génération** : aucun gain VRAM runtime n'est revendiqué. Ajout du sigmoid logiciel portable F32 pour les modèles MoE sur ROCm.
-- `src/models/text/causal.rs` : RNG d'échantillonnage remplacé (`subsec_nanos` → xorshift64* thread-local) ; le mode greedy (`temperature <= 0`) reste déterministe.
-- `src/models/common.rs` : `generate` redevient requis ; le défaut de `generate_stream_with_params` appelle désormais le callback (plus de streaming silencieusement perdu).
-- `src/models/text/causal.rs` : Template Phi natif (`format_prompt` / `format_chat_messages`) extrait du GGUF, arrêt sur `<|im_end|>`/`<|endoftext|>`, nettoyage des marqueurs de rôle et pénalité de répétition 1.1 par défaut pour les variantes reasoning.
-- `src/models/common.rs` : `chat_prompt` générique (ChatML) surchargeable ; `TextModel` l'utilise pour le template Phi multi-tour.
-- Suite de tests : **94/94** (`cargo test --lib`).
-- `ROADMAP.md`, `ATLAS.md`, `README.md`, `USER_GUIDE.md` : chiffres et statuts alignés sur les mesures du 2026-10-20 ; LFM marqué dégénéré, Phi-4 validé avec son template natif.
+- `src/models/text/causal.rs` : Branchement effectif du KV-cache quantifié 8-bit via `KVCacheStorage::Quantized(QuantizedLayerKVCache)` et bascule globale `CausalLMPipeline::enable_quantized_kv`. Stockage persistant vérifié strictement en `U8` sans copie flottante résiduelle, avec support multi-dtypes (F32, F16, BF16) et fidélité de décodage autorégressif (similarité cosinus > 0.99).
+- Suite de tests : **98/98** (`cargo test --lib`).
+- Invariants Phase 0 : gelés et validés par sondes exécutables (SHA256: `2A84E0B3F2CDEB86B912EF7A67749A5872581323ED7AE2C6E1A26348D8F51581`).

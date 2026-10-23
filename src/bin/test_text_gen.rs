@@ -79,6 +79,10 @@ fn main() -> anyhow::Result<()> {
     let mut params = TextGenParams::default();
     params.max_tokens = max_tokens;
     params.temperature = temperature;
+    if let Ok(q_str) = std::env::var("QUANTIZED_KV") {
+        params.quantized_kv = q_str == "1" || q_str.eq_ignore_ascii_case("true");
+    }
+    println!("🔑 Quantized 8-bit KV-Cache: {}", if params.quantized_kv { "ENABLED (U8 + F32 scale)" } else { "DISABLED (Standard F16/F32)" });
 
     let mut token_count = 0usize;
     let start_gen = Instant::now();

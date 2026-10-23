@@ -9,10 +9,18 @@ use crate::error::{LuminaError, Result};
 use crate::models::common::LinearLayer;
 use crate::weights::WeightsSource;
 
+/// Storage mechanism for layer KV states: standard unquantized tensors or 8-bit quantized storage.
+pub enum KVCacheStorage {
+    Standard {
+        k: Option<Tensor>,
+        v: Option<Tensor>,
+    },
+    Quantized(QuantizedLayerKVCache),
+}
+
 /// KV Cache for an individual transformer layer.
 pub struct LayerKVCache {
-    pub k: Option<Tensor>,
-    pub v: Option<Tensor>,
+    pub storage: KVCacheStorage,
     pub ssm_conv_state: Option<Tensor>, // [B, hidden_dim, conv_kernel - 1]
     pub ssm_recurrent_state: Option<Tensor>, // [B, num_heads, head_dim, state_dim]
 }
@@ -20,16 +28,44 @@ pub struct LayerKVCache {
 impl LayerKVCache {
     pub fn new() -> Self {
         Self {
-            k: None,
-            v: None,
+            storage: KVCacheStorage::Standard { k: None, v: None },
             ssm_conv_state: None,
             ssm_recurrent_state: None,
         }
     }
 
+    pub fn new_quantized() -> Self {
+        Self {
+            storage: KVCacheStorage::Quantized(QuantizedLayerKVCache::new()),
+            ssm_conv_state: None,
+            ssm_recurrent_state: None,
+        }
+    }
+
+    pub fn set_quantized(&mut self, quantized: bool) {
+        if quantized {
+            if !matches!(self.storage, KVCacheStorage::Quantized(_)) {
+                self.storage = KVCacheStorage::Quantized(QuantizedLayerKVCache::new());
+            }
+        } else if !matches!(self.storage, KVCacheStorage::Standard { .. }) {
+            self.storage = KVCacheStorage::Standard { k: None, v: None };
+        }
+    }
+
+    pub fn is_quantized(&self) -> bool {
+        matches!(self.storage, KVCacheStorage::Quantized(_))
+    }
+
     pub fn reset(&mut self) {
-        self.k = None;
-        self.v = None;
+        match &mut self.storage {
+            KVCacheStorage::Standard { k, v } => {
+                *k = None;
+                *v = None;
+            }
+            KVCacheStorage::Quantized(q) => {
+                q.reset();
+            }
+        }
         self.ssm_conv_state = None;
         self.ssm_recurrent_state = None;
     }
@@ -47,27 +83,32 @@ impl LayerKVCache {
         new_v: &Tensor,
         sliding_window: Option<usize>,
     ) -> CandleResult<(Tensor, Tensor)> {
-        let (mut k, mut v) = match (&self.k, &self.v) {
-            (Some(prev_k), Some(prev_v)) => {
-                let k = Tensor::cat(&[prev_k, new_k], 2)?;
-                let v = Tensor::cat(&[prev_v, new_v], 2)?;
-                (k, v)
-            }
-            _ => (new_k.clone(), new_v.clone()),
-        };
+        match &mut self.storage {
+            KVCacheStorage::Standard { k, v } => {
+                let (mut next_k, mut next_v) = match (k.as_ref(), v.as_ref()) {
+                    (Some(prev_k), Some(prev_v)) => {
+                        let cat_k = Tensor::cat(&[prev_k, new_k], 2)?;
+                        let cat_v = Tensor::cat(&[prev_v, new_v], 2)?;
+                        (cat_k, cat_v)
+                    }
+                    _ => (new_k.clone(), new_v.clone()),
+                };
 
-        if let Some(w) = sliding_window.filter(|&w| w > 0) {
-            let total_seq = k.dim(2)?;
-            if total_seq > w {
-                let start = total_seq - w;
-                k = k.narrow(2, start, w)?;
-                v = v.narrow(2, start, w)?;
+                if let Some(w) = sliding_window.filter(|&w| w > 0) {
+                    let total_seq = next_k.dim(2)?;
+                    if total_seq > w {
+                        let start = total_seq - w;
+                        next_k = next_k.narrow(2, start, w)?;
+                        next_v = next_v.narrow(2, start, w)?;
+                    }
+                }
+
+                *k = Some(next_k.clone());
+                *v = Some(next_v.clone());
+                Ok((next_k, next_v))
             }
+            KVCacheStorage::Quantized(q) => q.append_with_window(new_k, new_v, sliding_window),
         }
-
-        self.k = Some(k.clone());
-        self.v = Some(v.clone());
-        Ok((k, v))
     }
 }
 
@@ -206,6 +247,21 @@ impl KVCache {
     pub fn new(num_layers: usize) -> Self {
         let layers = (0..num_layers).map(|_| LayerKVCache::new()).collect();
         Self { layers }
+    }
+
+    pub fn new_quantized(num_layers: usize) -> Self {
+        let layers = (0..num_layers).map(|_| LayerKVCache::new_quantized()).collect();
+        Self { layers }
+    }
+
+    pub fn set_quantized(&mut self, quantized: bool) {
+        for l in &mut self.layers {
+            l.set_quantized(quantized);
+        }
+    }
+
+    pub fn is_quantized(&self) -> bool {
+        self.layers.first().map(|l| l.is_quantized()).unwrap_or(false)
     }
 
     pub fn reset(&mut self) {
@@ -474,6 +530,8 @@ pub struct TextGenParams {
     /// When None, all layers reside on GPU. When Some(N), layers 0..N are placed on GPU
     /// and the remaining layers run on CPU, allowing large models (15B-27B) to fit on 8GB-12GB VRAM cards.
     pub n_gpu_layers: Option<usize>,
+    /// When true, compresses key and value cache tensors to 8-bit quantized storage.
+    pub quantized_kv: bool,
 }
 
 impl Default for TextGenParams {
@@ -486,6 +544,7 @@ impl Default for TextGenParams {
             repetition_penalty: 1.0,
             stop_tokens: vec![151643, 151645, 128001, 128009, 2, 1, 106], // Common EOS across Qwen, Llama3, Gemma (<end_of_turn> = 106)
             n_gpu_layers: None,
+            quantized_kv: false,
         }
     }
 }
@@ -809,6 +868,16 @@ impl CausalLMPipeline {
         self.n_gpu_layers = n;
     }
 
+    /// Enable or disable 8-bit quantized KV caching across all layers.
+    pub fn enable_quantized_kv(&mut self, enabled: bool) {
+        self.kv_cache.set_quantized(enabled);
+    }
+
+    /// Check whether 8-bit quantized KV caching is currently active.
+    pub fn is_quantized_kv(&self) -> bool {
+        self.kv_cache.is_quantized()
+    }
+
     /// Format a multi-turn conversation using the model family's chat template.
     pub fn format_chat_prompt(&self, messages: &[ChatMessage]) -> String {
         let pairs: Vec<(String, String)> = messages
@@ -933,6 +1002,7 @@ impl CausalLMPipeline {
             self.n_gpu_layers = params.n_gpu_layers;
         }
 
+        self.enable_quantized_kv(params.quantized_kv);
         self.kv_cache.reset();
         let mut generated_tokens = Vec::new();
         // Reasoning Phi variants can loop under pure greedy decoding; keep a
@@ -1097,6 +1167,7 @@ impl CausalLMPipeline {
             repetition_penalty: params.repetition_penalty,
             stop_tokens: params.stop_tokens.clone(),
             n_gpu_layers: None,
+            quantized_kv: params.quantized_kv,
         };
 
         let stop_tokens = self.stop_tokens_for(params);
@@ -2502,6 +2573,105 @@ mod tests {
             ratio <= 0.30,
             "Quantized KV memory ({total_quant_bytes} bytes) must be <= 30% of F32 footprint ({float_bytes} bytes, ratio {ratio})"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_causal_lm_quantized_kv_storage_format() -> Result<()> {
+        let mut layer_cache = LayerKVCache::new_quantized();
+        assert!(layer_cache.is_quantized());
+
+        let device = Device::Cpu;
+        let k = Tensor::ones((1, 4, 2, 32), DType::F32, &device).map_err(LuminaError::Candle)?;
+        let v = Tensor::ones((1, 4, 2, 32), DType::F32, &device).map_err(LuminaError::Candle)?;
+
+        let (deq_k, deq_v) = layer_cache.append(&k, &v).map_err(LuminaError::Candle)?;
+        assert_eq!(deq_k.dims(), &[1, 4, 2, 32]);
+        assert_eq!(deq_v.dims(), &[1, 4, 2, 32]);
+
+        // Verify that the internal persistent storage format is strictly U8 and scale is F32
+        match &layer_cache.storage {
+            KVCacheStorage::Quantized(q) => {
+                let entry_k = q.k.as_ref().expect("k entry must be present");
+                let entry_v = q.v.as_ref().expect("v entry must be present");
+                assert_eq!(entry_k.data.dtype(), DType::U8);
+                assert_eq!(entry_v.data.dtype(), DType::U8);
+                assert_eq!(entry_k.scale.dtype(), DType::F32);
+                assert_eq!(entry_v.scale.dtype(), DType::F32);
+                assert_eq!(entry_k.seq_len, 2);
+            }
+            KVCacheStorage::Standard { .. } => panic!("Layer cache must be in Quantized storage mode"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_causal_lm_quantized_kv_generation_parity() -> Result<()> {
+        let device = Device::Cpu;
+        // Simulate a multi-step autoregressive decoding sequence with both caches
+        let mut std_cache = LayerKVCache::new();
+        let mut quant_cache = LayerKVCache::new_quantized();
+
+        // 8 autoregressive steps
+        for step in 0..8 {
+            let val = (step as f32 + 1.0) * 0.5;
+            let k_step = (Tensor::ones((1, 2, 1, 16), DType::F32, &device).map_err(LuminaError::Candle)? * val as f64).map_err(LuminaError::Candle)?;
+            let v_step = (Tensor::ones((1, 2, 1, 16), DType::F32, &device).map_err(LuminaError::Candle)? * (val * 0.8) as f64).map_err(LuminaError::Candle)?;
+
+            let (std_k, std_v) = std_cache.append(&k_step, &v_step).map_err(LuminaError::Candle)?;
+            let (q_k, q_v) = quant_cache.append(&k_step, &v_step).map_err(LuminaError::Candle)?;
+
+            // Sequence length must match exactly
+            assert_eq!(std_k.dims(), q_k.dims());
+            assert_eq!(std_v.dims(), q_v.dims());
+
+            // Compute cosine similarity on the dequantized tensors at each step
+            let std_vec: Vec<f32> = std_k.flatten_all().map_err(LuminaError::Candle)?.to_vec1().map_err(LuminaError::Candle)?;
+            let q_vec: Vec<f32> = q_k.flatten_all().map_err(LuminaError::Candle)?.to_vec1().map_err(LuminaError::Candle)?;
+
+            let dot: f32 = std_vec.iter().zip(q_vec.iter()).map(|(a, b)| a * b).sum();
+            let norm_a: f32 = std_vec.iter().map(|a| a * a).sum::<f32>().sqrt();
+            let norm_b: f32 = q_vec.iter().map(|b| b * b).sum::<f32>().sqrt();
+            let sim = dot / (norm_a * norm_b);
+
+            assert!(
+                sim > 0.99,
+                "Step {step} cosine similarity ({sim}) must exceed 0.99 for generation parity"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_quantized_kv_dtypes_support() -> Result<()> {
+        let device = Device::Cpu;
+        let dtypes = [DType::F32, DType::F16, DType::BF16];
+
+        for &dt in &dtypes {
+            let x = Tensor::ones((1, 2, 4, 32), dt, &device).map_err(LuminaError::Candle)?;
+            let entry = QuantizedKVCacheEntry::quantize(&x).map_err(LuminaError::Candle)?;
+            assert_eq!(entry.data.dtype(), DType::U8);
+
+            let deq = entry.dequantize(dt).map_err(LuminaError::Candle)?;
+            assert_eq!(deq.dtype(), dt);
+            assert_eq!(deq.dims(), &[1, 2, 4, 32]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_quantized_kv_no_unquantized_leakage() -> Result<()> {
+        let layer_cache = LayerKVCache::new_quantized();
+        // Check that the storage is purely Quantized and has no Standard field allocated
+        match &layer_cache.storage {
+            KVCacheStorage::Quantized(q) => {
+                assert!(q.k.is_none());
+                assert!(q.v.is_none());
+            }
+            KVCacheStorage::Standard { .. } => {
+                panic!("Quantized cache must not hold unquantized standard storage variant");
+            }
+        }
         Ok(())
     }
 
