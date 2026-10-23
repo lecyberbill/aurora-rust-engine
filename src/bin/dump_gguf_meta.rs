@@ -11,7 +11,11 @@ fn main() -> anyhow::Result<()> {
 
     println!("=== GGUF Metadata Fields ===");
     for (k, v) in &content.metadata {
-        println!("  {k} => {:?}", v);
+        if k.contains("tokens") || k.contains("merges") || k.contains("token_type") || k.contains("scores") {
+            println!("  {k} => [array omitted]");
+        } else {
+            println!("  {k} => {:?}", v);
+        }
     }
     println!("=== GGUF Tensor Names ===");
     for (k, info) in &content.tensor_infos {
