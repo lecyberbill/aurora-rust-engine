@@ -1801,6 +1801,11 @@ impl CausalLMPipeline {
             let out = Self::matmul_linear(&modulated, &out_proj_w)?;
             let x_res = (x + &out).map_err(LuminaError::Candle)?;
             (out, x_res)
+        } else if self.weights.contains(&format!("blk.{layer_idx}.ffn_gate_inp.weight"))
+            || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ffn_gate_inp.weight"))
+        {
+            // Pure MoE layer in hybrid architectures (e.g. Nemotron-H MoE layers have no Attention and no SSM)
+            (Tensor::zeros_like(x)?, x.clone())
         } else {
             // Standard Full Multi-Head / Grouped-Query Attention
             let (q, k, v) = if let Ok(q_l) = self.get_layer_linear(layer_idx, &["self_attn.q_proj.weight", "attn_q.weight"]) {
