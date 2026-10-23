@@ -532,6 +532,9 @@ fn resolve_tokenizer_named(
         PathBuf::from("assets/tokenizers"),
         PathBuf::from("/srv/dev/aurora-rust-engine"),
         PathBuf::from("/srv/dev/aurora-rust-engine/assets/tokenizers"),
+        PathBuf::from("/models/llm/mistral_tokenizer"),
+        PathBuf::from("/models/mistral_tokenizer"),
+        PathBuf::from("/models/llm"),
     ];
 
     if let Ok(exe) = std::env::current_exe() {
