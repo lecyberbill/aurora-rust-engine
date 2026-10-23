@@ -1647,8 +1647,20 @@ impl CausalLMPipeline {
             
             // 2. Conv1D over features with kernel size 4
             let conv_act = if let Ok(conv_w) = self.get_layer_weight(layer_idx, &["ssm_conv1d.weight", "conv1d.weight"]) {
-                let (k_sz, c_dim) = conv_w.shape().dims2().map_err(LuminaError::Candle)?;
+                let (d0, d1) = conv_w.shape().dims2().map_err(LuminaError::Candle)?;
+                let (k_sz, c_dim) = if d0 <= 16 && d1 > d0 {
+                    (d0, d1)
+                } else if d1 <= 16 && d0 > d1 {
+                    (d1, d0)
+                } else {
+                    (d0, d1)
+                };
                 let state_len = k_sz.saturating_sub(1);
+                let conv_w_adapted = if conv_w.dim(0)? == k_sz {
+                    conv_w.transpose(0, 1)? // [c_dim, k_sz]
+                } else {
+                    conv_w.clone() // already [c_dim, k_sz]
+                };
                 let conv_out = if seq_len == 1 {
                     // Step generation with rolling conv buffer
                     let prev_state = self.kv_cache.layers[layer_idx].ssm_conv_state.clone().unwrap_or_else(|| {
@@ -1664,7 +1676,7 @@ impl CausalLMPipeline {
                     let next_buf = full_window.narrow(2, 1, state_len)?;
                     self.kv_cache.layers[layer_idx].ssm_conv_state = Some(next_buf);
 
-                    let conv_w_b = conv_w.transpose(0, 1)?.unsqueeze(0)?; // [1, c_dim, k_sz]
+                    let conv_w_b = conv_w_adapted.unsqueeze(0)?; // [1, c_dim, k_sz]
                     let mut c_out = (full_window * conv_w_b)?.sum_keepdim(2)?.transpose(1, 2)?; // [1, 1, c_dim]
                     if let Ok(conv_b) = self.get_layer_weight(layer_idx, &["ssm_conv1d.bias", "conv1d.bias"]) {
                         c_out = c_out.broadcast_add(&conv_b.unsqueeze(0)?.unsqueeze(1)?)?;
@@ -1694,7 +1706,7 @@ impl CausalLMPipeline {
                         bx_trans
                     };
 
-                    let conv_w_b = conv_w.transpose(0, 1)?.unsqueeze(0)?; // [1, c_dim, k_sz]
+                    let conv_w_b = conv_w_adapted.unsqueeze(0)?; // [1, c_dim, k_sz]
                     let mut out_cols = Vec::with_capacity(seq_len);
                     for t in 0..seq_len {
                         let window = padded_bx.narrow(2, t, k_sz)?; // [B, c_dim, k_sz]
