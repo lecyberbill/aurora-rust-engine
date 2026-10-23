@@ -40,11 +40,26 @@ impl LinearLayer {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match self {
             Self::Quantized(q) => {
-                let out = q.forward(x).map_err(LuminaError::Candle)?;
-                if out.dtype() != x.dtype() {
-                    out.to_dtype(x.dtype()).map_err(LuminaError::Candle)
-                } else {
-                    Ok(out)
+                match q.forward(x) {
+                    Ok(out) => {
+                        if out.dtype() != x.dtype() {
+                            out.to_dtype(x.dtype()).map_err(LuminaError::Candle)
+                        } else {
+                            Ok(out)
+                        }
+                    }
+                    Err(e) => {
+                        // In some GGUF architectures (such as Nemotron-H blk.5.attn_q.weight [2688, 4096]),
+                        // the tensor is stored with reversed dimensions [in_dim, out_dim] instead of [out_dim, in_dim].
+                        // Dequantize the QMatMul tensor and use the robust transposed dense matmul path.
+                        let dev = x.device();
+                        let w = q.dequantize_f16().or_else(|_| match q.as_ref() {
+                            candle_core::quantized::QMatMul::QTensor(t) => t.dequantize(dev),
+                            candle_core::quantized::QMatMul::Tensor(t) => Ok(t.clone()),
+                            candle_core::quantized::QMatMul::TensorF16(t) => Ok(t.clone()),
+                        }).map_err(|_| LuminaError::Candle(e))?;
+                        Self::from_tensor(w).forward(x)
+                    }
                 }
             }
             Self::Tensor(w) => {
