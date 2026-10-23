@@ -977,6 +977,27 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+#### 🔑 8-Bit Quantized KV-Cache (`QUANTIZED_KV`)
+
+For long-context or memory-constrained generation on 8 GB–16 GB GPUs, Aurora provides native **8-bit symmetric quantization of the Key/Value cache** (`QuantizedLayerKVCache`):
+- **Compression**: Compresses `[B, H, S, D]` key and value states into `u8` tensors with per-channel F32 scales (`[B, H, S, 1]`), reducing KV resident memory by **~70%** vs F32 and **50%** vs F16.
+- **Zero persistent float leakage**: Verified via `KVCacheStorage::Quantized` enum state; no unquantized historical copy is retained between tokens.
+- **Usage via Environment Variable**:
+  ```bash
+  QUANTIZED_KV=1 ./target/release/test_text_gen /models/llm/Phi-4-reasoning-plus-Q4_K_M.gguf "What is the capital of France?" 48 0.0
+  ```
+- **Programmatic SDK Usage**:
+  ```rust
+  use aurora_rust_engine::models::text::TextGenParams;
+
+  let mut params = TextGenParams::default();
+  params.max_tokens = 128;
+  params.temperature = 0.0;
+  params.quantized_kv = true; // Enables 8-bit U8 KV storage
+
+  let result = text_model.generate_stream_with_params("Compute 15 + 27", &params, None)?;
+  ```
+
 ---
 
 ### Audio-to-Text & Speech Transcription (Whisper)
@@ -1618,9 +1639,10 @@ Mesures du 2026-10-20 avec le CLI corrigé (tokens réels comptés via le callba
 | **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.68 s** | **11.73 tok/s** (401 tok / 34.19 s) | ✅ Poème français en 5 strophes, temp 0.7, sans `<think>` |
 | **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **7.92 s** | **11.25 tok/s** (65 tok / 5.78 s) | ✅ Paragraphe cohérent (marqueurs `<unused94>thought`) |
 | **Phi-4 Reasoning Plus** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.13 s** (lazy) | **8.49 tok/s** (49 tok / 5.77 s) | ✅ Template Phi natif ; raisonnement concis → « Paris » (pénalité 1.1) |
+| **Phi-4 (KV 8-bit U8)** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.15 s** (lazy) | **12.06 tok/s** (97 tok / 8.04 s) | ✅ 8-bit Quantized KV (`QUANTIZED_KV=1`), calcul arithmétique structuré (42) |
 | **LFM 2.5 8B** | `LFM2.5-8B-A1B-Q4_K_M.gguf` | 4.80 GB | **0.35 s** (lazy) | **3.15 tok/s** (65 tok / 20.65 s) | ⚠️ Sortie dégénérée (`?`) : sigmoid ROCm corrigé, dérive récurrente MoE/Conv1D |
 
-> Prompts : Qwen = poème français (400 tokens, temp 0.7) ; Gemma = 64 tokens greedy ; Phi = 128 tokens greedy + répétition 1.1 ; LFM = 64 tokens greedy. Les temps de chargement Phi/LFM sont des temps « lazy » (métadonnées) et ne sont pas comparables au chargement eager de Qwen.
+> Prompts : Qwen = poème français (400 tokens, temp 0.7) ; Gemma = 64 tokens greedy ; Phi = 128 tokens greedy + répétition 1.1 ; LFM = 64 tokens greedy. Les temps de chargement Phi/LFM sont des temps « lazy » (métadonnées) et ne sont pas comparables au chargement eager de Qwen. Le mode KV 8-bit compresse les états clés/valeurs en `U8` sans dérive sémantique.
 
 ---
 
