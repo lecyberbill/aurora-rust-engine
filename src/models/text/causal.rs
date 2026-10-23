@@ -1821,10 +1821,19 @@ impl CausalLMPipeline {
             (Tensor::zeros_like(x)?, x.clone())
         } else {
             // Standard Full Multi-Head / Grouped-Query Attention
+            if pos == 0 {
+                eprintln!("🔍 [Layer {layer_idx}] Attention entering: normed_x shape {:?}", normed_x.shape());
+            }
             let (q, k, v) = if let Ok(q_l) = self.get_layer_linear(layer_idx, &["self_attn.q_proj.weight", "attn_q.weight"]) {
+                if pos == 0 {
+                    eprintln!("🔍 [Layer {layer_idx}] Found q_l, calling forward on normed_x...");
+                }
+                let q = q_l.forward(&normed_x)?;
+                if pos == 0 {
+                    eprintln!("🔍 [Layer {layer_idx}] q forward success, q shape {:?}", q.shape());
+                }
                 let k_l = self.get_layer_linear(layer_idx, &["self_attn.k_proj.weight", "attn_k.weight"])?;
                 let v_l = self.get_layer_linear(layer_idx, &["self_attn.v_proj.weight", "attn_v.weight"])?;
-                let q = q_l.forward(&normed_x)?;
                 let k = k_l.forward(&normed_x)?;
                 let v = v_l.forward(&normed_x)?;
                 (q, k, v)
@@ -1839,6 +1848,9 @@ impl CausalLMPipeline {
             } else {
                 return Err(LuminaError::MissingWeight(format!("Attention weights for layer {layer_idx} not found")));
             };
+            if pos == 0 {
+                eprintln!("🔍 [Layer {layer_idx}] Getting o_l...");
+            }
             let o_l = self.get_layer_linear(layer_idx, &["self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
 
             let (q, gate_opt) = if q.dim(candle_core::D::Minus1)? == self.config.num_attention_heads * self.config.head_dim * 2 {
