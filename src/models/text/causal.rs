@@ -1725,7 +1725,11 @@ impl CausalLMPipeline {
                     feat_slice
                 }
             } else {
-                let ssm_dim = 6144;
+                let out_proj_w = self.get_layer_weight(layer_idx, &["ssm_out.weight", "self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
+                let ssm_dim = match out_proj_w.shape().dims2() {
+                    Ok((_out_d, in_d)) => in_d,
+                    _ => 4096,
+                };
                 if conv_act.dim(candle_core::D::Minus1)? >= ssm_dim {
                     conv_act.narrow(candle_core::D::Minus1, 0, ssm_dim)?
                 } else {
@@ -1742,7 +1746,7 @@ impl CausalLMPipeline {
                 gated_act
             };
 
-            // 5. Output projection: [5120, 6144] -> [B, S, 5120]
+            // 5. Output projection: project back to model hidden dimension
             let out_proj_w = self.get_layer_weight(layer_idx, &["ssm_out.weight", "self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
             let out = Self::matmul_linear(&modulated, &out_proj_w)?;
             let x_res = (x + &out).map_err(LuminaError::Candle)?;
@@ -1916,7 +1920,9 @@ impl CausalLMPipeline {
             let mut accum_out: Option<Tensor> = None;
 
             let has_fused_exps = self.weights.contains(&format!("blk.{layer_idx}.ffn_gate_exps.weight"))
-                || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ffn_gate_exps.weight"));
+                || self.weights.contains(&format!("blk.{layer_idx}.ffn_up_exps.weight"))
+                || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ffn_gate_exps.weight"))
+                || self.weights_cache.contains_key(&format!("blk.{layer_idx}.ffn_up_exps.weight"));
 
             if total_tokens == 1 {
                 // Single-token autoregressive decoding step (fast scalar path)
@@ -1937,20 +1943,24 @@ impl CausalLMPipeline {
                 let norm_factor = if weight_sum > 0.0 { 1.0 / weight_sum } else { 1.0 };
 
                 if has_fused_exps {
-                    let fused_g = self.get_layer_weight(layer_idx, &["ffn_gate_exps.weight", "mlp.experts.gate_exps.weight"])?;
+                    let fused_g = self.get_layer_weight(layer_idx, &["ffn_gate_exps.weight", "mlp.experts.gate_exps.weight"]).ok();
                     let fused_u = self.get_layer_weight(layer_idx, &["ffn_up_exps.weight", "mlp.experts.up_exps.weight"])?;
                     let fused_d = self.get_layer_weight(layer_idx, &["ffn_down_exps.weight", "mlp.experts.down_exps.weight"])?;
 
                     for (exp_idx, raw_weight) in expert_weights {
                         let norm_w = raw_weight * norm_factor;
-                        let g_w = fused_g.get(exp_idx)?; // [inter_dim, hidden_dim]
                         let u_w = fused_u.get(exp_idx)?;
                         let d_w = fused_d.get(exp_idx)?;
 
-                        let g = Self::matmul_linear(&normed_post_x, &g_w)?;
                         let u = Self::matmul_linear(&normed_post_x, &u_w)?;
-                        let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
-                        let exp_act = (silu_g * u).map_err(LuminaError::Candle)?;
+                        let exp_act = if let Some(ref fg) = fused_g {
+                            let g_w = fg.get(exp_idx)?;
+                            let g = Self::matmul_linear(&normed_post_x, &g_w)?;
+                            let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
+                            (silu_g * u).map_err(LuminaError::Candle)?
+                        } else {
+                            candle_nn::ops::silu(&u).map_err(LuminaError::Candle)?
+                        };
                         let exp_out = Self::matmul_linear(&exp_act, &d_w)?;
 
                         let weighted = (exp_out * (norm_w as f64)).map_err(LuminaError::Candle)?;
@@ -2004,7 +2014,7 @@ impl CausalLMPipeline {
                 let normed_flat = normed_post_x.reshape((total_tokens, hidden_dim))?;
 
                 if has_fused_exps {
-                    let fused_g = self.get_layer_weight(layer_idx, &["ffn_gate_exps.weight", "mlp.experts.gate_exps.weight"])?;
+                    let fused_g = self.get_layer_weight(layer_idx, &["ffn_gate_exps.weight", "mlp.experts.gate_exps.weight"]).ok();
                     let fused_u = self.get_layer_weight(layer_idx, &["ffn_up_exps.weight", "mlp.experts.up_exps.weight"])?;
                     let fused_d = self.get_layer_weight(layer_idx, &["ffn_down_exps.weight", "mlp.experts.down_exps.weight"])?;
 
@@ -2026,14 +2036,18 @@ impl CausalLMPipeline {
                         let mut tok_accum: Option<Tensor> = None;
                         for (exp_idx, raw_weight) in expert_weights {
                             let norm_w = raw_weight * norm_factor;
-                            let g_w = fused_g.get(exp_idx)?;
                             let u_w = fused_u.get(exp_idx)?;
                             let d_w = fused_d.get(exp_idx)?;
 
-                            let g = Self::matmul_linear(&tok_x, &g_w)?;
                             let u = Self::matmul_linear(&tok_x, &u_w)?;
-                            let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
-                            let exp_act = (silu_g * u).map_err(LuminaError::Candle)?;
+                            let exp_act = if let Some(ref fg) = fused_g {
+                                let g_w = fg.get(exp_idx)?;
+                                let g = Self::matmul_linear(&tok_x, &g_w)?;
+                                let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
+                                (silu_g * u).map_err(LuminaError::Candle)?
+                            } else {
+                                candle_nn::ops::silu(&u).map_err(LuminaError::Candle)?
+                            };
                             let exp_out = Self::matmul_linear(&exp_act, &d_w)?;
 
                             let weighted = (exp_out * (norm_w as f64)).map_err(LuminaError::Candle)?;
