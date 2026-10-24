@@ -942,7 +942,7 @@ let output = pipeline.generate_with_controlnet(params, &multi_controlnet, &input
 
 ---
 
-### Text-to-Text & CausalLM Generation (Llama, DeepSeek, Qwen, Gemma, Mistral)
+### Text-to-Text & CausalLM Generation (Llama, DeepSeek, Qwen, Gemma, Mistral, IBM Granite)
 
 Aurora provides a unified `AutoModel` facade supporting autoregressive text generation for both **GGUF** (`.gguf`) and **SafeTensors** (`.safetensors`) models with GPU KV-Cache:
 
@@ -954,7 +954,7 @@ use candle_core::{Device, DType};
 fn main() -> anyhow::Result<()> {
     let device = Device::new_cuda(0)?;
 
-    // Automatically detects Llama 3, DeepSeek, Qwen 2.5/3.5, Gemma 2/3, Mistral
+    // Automatically detects Llama 3, DeepSeek, Qwen 2.5/3.5, Gemma 2/3, Mistral, IBM Granite 4.2
     let model = AutoModel::from_local(
         "E:/LMSTUDIO_MODELES/lmstudio-community/DeepSeek-R1-Distill-Llama-8B-GGUF/DeepSeek-R1-Distill-Llama-8B-Q8_0.gguf",
         device,
@@ -996,6 +996,17 @@ For long-context or memory-constrained generation on 8 GB–16 GB GPUs, Aurora p
   params.quantized_kv = true; // Enables 8-bit U8 KV storage
 
   let result = text_model.generate_stream_with_params("Compute 15 + 27", &params, None)?;
+  ```
+
+#### 🧠 IBM Granite 4.2 Reasoning Mode (Chain-of-Thought)
+
+Aurora natively supports IBM Granite 4.2 dense models (`granite-4.2-30b-Q6_K.gguf`):
+- **Official Thinking Template**: Automatically generates `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n`, letting the model output its chain of reasoning before closing with `</think>` and emitting the final answer.
+- **Recommended Hyperparameters**: `temperature = 1.0`, `top_p = 0.95`.
+- **Stop Tokens**: `<|im_end|>` (token `100257`).
+- **CLI Inférence (Linux ROCm gfx1201 / CUDA)**:
+  ```bash
+  TOP_P=0.95 ./target/release/test_text_gen /models/llm/granite-4.2-30b-Q6_K.gguf "Explain what makes Rust a modern language in 3 bullet points:" 128 1.0
   ```
 
 ---
