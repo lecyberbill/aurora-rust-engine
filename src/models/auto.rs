@@ -535,6 +535,8 @@ fn resolve_tokenizer_named(
         PathBuf::from("/models/granite_tokenizer"),
         PathBuf::from("/models/llm/mistral_tokenizer"),
         PathBuf::from("/models/mistral_tokenizer"),
+        PathBuf::from("/models/llm/Qwen3.8_tokenizer"),
+        PathBuf::from("/models/Qwen3.8_tokenizer"),
         PathBuf::from("/models/llm"),
     ];
 
