@@ -1,7 +1,14 @@
 // [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Pure Rust Vision-Language Model (VLM) Architecture supporting Qwen-VL, PaliGemma, Gemma 3 Vision, and SmolVLM
 
-use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::{conv2d, embedding, layer_norm, linear, linear_no_bias, rms_norm, Conv2d, Conv2dConfig, Embedding, LayerNorm, LayerNormConfig, Linear, RmsNorm, VarBuilder};
+use candle_core::{DType, Device, IndexOp, Module, Result, Tensor};
+use candle_nn::{conv2d, embedding, layer_norm, linear, linear_no_bias, Conv2d, Conv2dConfig, Embedding, LayerNorm, LayerNormConfig, Linear, VarBuilder};
+use crate::models::ops::RmsNorm;
+
+fn rms_norm(size: usize, eps: f64, vb: VarBuilder) -> Result<RmsNorm> {
+    let weight = vb.get(size, "weight")
+        .or_else(|_| vb.get(size, "gamma"))?;
+    RmsNorm::from_tensor(weight, eps)
+}
 
 /// Vision Encoder Activation Type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +96,21 @@ impl VisionTransformerConfig {
             intermediate_size: 4304,
             spatial_merge_size: 1,
             act_type: VisionActivation::QuickGelu,
+            layer_norm_eps: 1e-6,
+        }
+    }
+
+    pub fn gemma4() -> Self {
+        Self {
+            image_size: 224,
+            patch_size: 16,
+            num_channels: 3,
+            embed_dim: 1152,
+            num_layers: 27,
+            num_heads: 16,
+            intermediate_size: 4304,
+            spatial_merge_size: 1,
+            act_type: VisionActivation::Gelu,
             layer_norm_eps: 1e-6,
         }
     }
@@ -563,6 +585,8 @@ impl MultiModalProjector {
         };
 
         load_lin(in_features, out_features, vb.pp("proj"))
+            .or_else(|_| load_lin(in_features, out_features, vb.pp("input_projection")))
+            .or_else(|_| load_lin(in_features, out_features, vb.pp("mm.input_projection")))
             .or_else(|_| load_lin(in_features, out_features, vb.pp("linear")))
             .or_else(|_| load_lin(in_features, out_features, vb.clone()))
             .map(|lin| Self { kind: ProjectorKind::Single(lin) })
@@ -586,6 +610,417 @@ impl MultiModalProjector {
                 linear2.forward(&h)
             }
         }
+    }
+}
+
+/// Gemma 4 Vision SwiGLU MLP
+#[derive(Debug, Clone)]
+pub struct Gemma4VisionMLP {
+    gate_proj: Linear,
+    up_proj: Linear,
+    down_proj: Linear,
+}
+
+impl Gemma4VisionMLP {
+    pub fn new(embed_dim: usize, intermediate_size: usize, vb: VarBuilder) -> Result<Self> {
+        let gate_proj = linear_no_bias(embed_dim, intermediate_size, vb.pp("ffn_gate"))
+            .or_else(|_| linear_no_bias(embed_dim, intermediate_size, vb.pp("gate_proj")))?;
+        let up_proj = linear_no_bias(embed_dim, intermediate_size, vb.pp("ffn_up"))
+            .or_else(|_| linear_no_bias(embed_dim, intermediate_size, vb.pp("up_proj")))?;
+        let down_proj = linear_no_bias(intermediate_size, embed_dim, vb.pp("ffn_down"))
+            .or_else(|_| linear_no_bias(intermediate_size, embed_dim, vb.pp("down_proj")))?;
+        Ok(Self {
+            gate_proj,
+            up_proj,
+            down_proj,
+        })
+    }
+
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let gate = self.gate_proj.forward(x)?;
+        let up = self.up_proj.forward(x)?;
+        // Gemma 4 uses gelu_pytorch_tanh (GELU tanh approximation)
+        let gelu = gate.gelu()?;
+        let intermediate = (gelu * up)?;
+        self.down_proj.forward(&intermediate)
+    }
+}
+
+/// Gemma 4 Vision Attention with per-head Q/K RMSNorm, unscaled V RMSNorm, and 2D axial RoPE
+#[derive(Debug, Clone)]
+pub struct Gemma4VisionAttention {
+    q_proj: Linear,
+    k_proj: Linear,
+    v_proj: Linear,
+    out_proj: Linear,
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
+    num_heads: usize,
+    head_dim: usize,
+}
+
+impl Gemma4VisionAttention {
+    pub fn new(embed_dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
+        let head_dim = embed_dim / num_heads;
+        let q_proj = linear_no_bias(embed_dim, embed_dim, vb.pp("attn_q"))
+            .or_else(|_| linear_no_bias(embed_dim, embed_dim, vb.pp("q_proj")))?;
+        let k_proj = linear_no_bias(embed_dim, embed_dim, vb.pp("attn_k"))
+            .or_else(|_| linear_no_bias(embed_dim, embed_dim, vb.pp("k_proj")))?;
+        let v_proj = linear_no_bias(embed_dim, embed_dim, vb.pp("attn_v"))
+            .or_else(|_| linear_no_bias(embed_dim, embed_dim, vb.pp("v_proj")))?;
+        let out_proj = linear_no_bias(embed_dim, embed_dim, vb.pp("attn_out"))
+            .or_else(|_| linear_no_bias(embed_dim, embed_dim, vb.pp("o_proj")))?;
+
+        let q_norm_w = vb.get(head_dim, "attn_q_norm.weight")
+            .or_else(|_| vb.get(head_dim, "q_norm.weight"))?;
+        let k_norm_w = vb.get(head_dim, "attn_k_norm.weight")
+            .or_else(|_| vb.get(head_dim, "k_norm.weight"))?;
+
+        let q_norm = RmsNorm::from_tensor(q_norm_w, 1e-6)?;
+        let k_norm = RmsNorm::from_tensor(k_norm_w, 1e-6)?;
+
+        Ok(Self {
+            q_proj,
+            k_proj,
+            v_proj,
+            out_proj,
+            q_norm,
+            k_norm,
+            num_heads,
+            head_dim,
+        })
+    }
+
+    pub fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        let (b, s, d) = x.dims3()?;
+        let q = self.q_proj.forward(x)?;
+        let k = self.k_proj.forward(x)?;
+        let v = self.v_proj.forward(x)?;
+
+        // Reshape to [B, S, num_heads, head_dim] for per-head normalization
+        let q = q.reshape((b, s, self.num_heads, self.head_dim))?;
+        let k = k.reshape((b, s, self.num_heads, self.head_dim))?;
+        let v = v.reshape((b, s, self.num_heads, self.head_dim))?;
+
+        let q = self.q_norm.forward(&q)?;
+        let k = self.k_norm.forward(&k)?;
+
+        // Gemma 4: V has unscaled RMSNorm (with_scale=false) per head
+        let v_f32 = v.to_dtype(DType::F32)?;
+        let v_variance = v_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+        let v_normed = v_f32.broadcast_mul(&(v_variance + 1e-6)?.sqrt()?.recip()?)?.to_dtype(v.dtype())?;
+
+        // Apply 2D axial RoPE: cos and sin have shape [1, S, 1, head_dim]
+        // apply_multidimensional_rope on X (dims 0..36) and Y (dims 36..72) separately
+        let q = apply_axial_rope_multidim(&q, cos, sin)?;
+        let k = apply_axial_rope_multidim(&k, cos, sin)?;
+
+        // Transpose to [B, num_heads, S, head_dim] for multi-head attention
+        let q = q.transpose(1, 2)?.contiguous()?;
+        let k = k.transpose(1, 2)?.contiguous()?;
+        let v = v_normed.transpose(1, 2)?.contiguous()?;
+
+        // Gemma 4 ViT attention scaling is 1.0 (kq_scale = 1.0)
+        let attn_weights = q.matmul(&k.transpose(2, 3)?.contiguous()?)?;
+        let attn_probs = candle_nn::ops::softmax(&attn_weights, candle_core::D::Minus1)?;
+        let context = attn_probs.matmul(&v)?;
+
+        let context = context.transpose(1, 2)?.contiguous()?.reshape((b, s, d))?;
+        self.out_proj.forward(&context)
+    }
+}
+
+/// Gemma 4 2D Multidimensional RoPE:
+/// Evaluates separate rotations for X (dims 0..36) and Y (dims 36..72)
+fn apply_axial_rope_multidim(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+    let dim = x.dim(candle_core::D::Minus1)?;
+    let half_spatial = dim / 2; // 36
+    let half_sub = half_spatial / 2; // 18
+
+    // Part 0: X rotation (dims 0..36)
+    let x_0 = x.narrow(candle_core::D::Minus1, 0, half_spatial)?;
+    let cos_0 = cos.narrow(candle_core::D::Minus1, 0, half_spatial)?;
+    let sin_0 = sin.narrow(candle_core::D::Minus1, 0, half_spatial)?;
+
+    let x0_first = x_0.narrow(candle_core::D::Minus1, 0, half_sub)?;
+    let x0_second = x_0.narrow(candle_core::D::Minus1, half_sub, half_sub)?;
+    let rot_0 = Tensor::cat(&[&x0_second.neg()?, &x0_first], candle_core::D::Minus1)?;
+    let out_0 = (x_0.broadcast_mul(&cos_0)? + rot_0.broadcast_mul(&sin_0)?)?;
+
+    // Part 1: Y rotation (dims 36..72)
+    let x_1 = x.narrow(candle_core::D::Minus1, half_spatial, half_spatial)?;
+    let cos_1 = cos.narrow(candle_core::D::Minus1, half_spatial, half_spatial)?;
+    let sin_1 = sin.narrow(candle_core::D::Minus1, half_spatial, half_spatial)?;
+
+    let x1_first = x_1.narrow(candle_core::D::Minus1, 0, half_sub)?;
+    let x1_second = x_1.narrow(candle_core::D::Minus1, half_sub, half_sub)?;
+    let rot_1 = Tensor::cat(&[&x1_second.neg()?, &x1_first], candle_core::D::Minus1)?;
+    let out_1 = (x_1.broadcast_mul(&cos_1)? + rot_1.broadcast_mul(&sin_1)?)?;
+
+    Tensor::cat(&[&out_0, &out_1], candle_core::D::Minus1)
+}
+
+/// Gemma 4 Vision Transformer Block with RMSNorms
+#[derive(Debug, Clone)]
+pub struct Gemma4VisionBlock {
+    ln1: RmsNorm,
+    attn: Gemma4VisionAttention,
+    attn_post_norm: RmsNorm,
+    ln2: RmsNorm,
+    mlp: Gemma4VisionMLP,
+    ffn_post_norm: RmsNorm,
+}
+
+impl Gemma4VisionBlock {
+    pub fn new(embed_dim: usize, intermediate_size: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
+        let ln1_w = vb.get(embed_dim, "ln1.weight")
+            .or_else(|_| vb.get(embed_dim, "input_layernorm.weight"))?;
+        let ln1 = RmsNorm::from_tensor(ln1_w, 1e-6)?;
+
+        let attn = Gemma4VisionAttention::new(embed_dim, num_heads, vb.clone())?;
+
+        let attn_post_norm_w = vb.get(embed_dim, "attn_post_norm.weight")
+            .or_else(|_| vb.get(embed_dim, "post_attention_layernorm.weight"))?;
+        let attn_post_norm = RmsNorm::from_tensor(attn_post_norm_w, 1e-6)?;
+
+        let ln2_w = vb.get(embed_dim, "ln2.weight")
+            .or_else(|_| vb.get(embed_dim, "pre_feedforward_layernorm.weight"))?;
+        let ln2 = RmsNorm::from_tensor(ln2_w, 1e-6)?;
+
+        let mlp = Gemma4VisionMLP::new(embed_dim, intermediate_size, vb.clone())?;
+
+        let ffn_post_norm_w = vb.get(embed_dim, "ffn_post_norm.weight")
+            .or_else(|_| vb.get(embed_dim, "post_feedforward_layernorm.weight"))?;
+        let ffn_post_norm = RmsNorm::from_tensor(ffn_post_norm_w, 1e-6)?;
+
+        Ok(Self {
+            ln1,
+            attn,
+            attn_post_norm,
+            ln2,
+            mlp,
+            ffn_post_norm,
+        })
+    }
+
+    pub fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        let residual = x;
+        let h = self.ln1.forward(x)?;
+        let h = self.attn.forward(&h, cos, sin)?;
+        let h = self.attn_post_norm.forward(&h)?;
+        let x = (residual + h)?;
+
+        let residual = &x;
+        let h = self.ln2.forward(&x)?;
+        let h = self.mlp.forward(&h)?;
+        let h = self.ffn_post_norm.forward(&h)?;
+        residual + h
+    }
+}
+
+/// Full Gemma 4 Vision Tower (SigLIP2 Backbone + Spatial Pooling + Projector)
+#[derive(Debug, Clone)]
+pub struct Gemma4VisionTower {
+    patch_embed: Conv2d,
+    pos_table: Tensor,
+    blocks: Vec<Gemma4VisionBlock>,
+    std_bias: Tensor,
+    std_scale: Tensor,
+    projector: MultiModalProjector,
+    embed_dim: usize,
+    patch_size: usize,
+    pooling_kernel_size: usize,
+}
+
+impl Gemma4VisionTower {
+    pub fn new(vb: VarBuilder) -> Result<Self> {
+        let embed_dim = 1152;
+        let intermediate_size = 4304;
+        let num_heads = 16;
+        let num_layers = 27;
+        let patch_size = 16;
+        let pooling_kernel_size = 3;
+
+        let conv_cfg = Conv2dConfig {
+            stride: patch_size,
+            padding: 0,
+            ..Default::default()
+        };
+        let patch_weight = vb.get((embed_dim, 3, patch_size, patch_size), "v.patch_embd.weight")
+            .or_else(|_| vb.get((embed_dim, 3, patch_size, patch_size), "patch_embed.weight"))
+            .or_else(|_| vb.get((embed_dim, 3, patch_size, patch_size), "v.patch_embd"))?;
+        let patch_embed = Conv2d::new(patch_weight, None, conv_cfg);
+
+        let pos_table = vb.get((2, 10240, embed_dim), "v.position_embd.weight")
+            .or_else(|_| vb.get((2, 10240, embed_dim), "position_embedding_table"))?;
+
+        let std_bias = vb.get(embed_dim, "v.std_bias")
+            .or_else(|_| vb.get(embed_dim, "std_bias"))?;
+        let std_scale = vb.get(embed_dim, "v.std_scale")
+            .or_else(|_| vb.get(embed_dim, "std_scale"))?;
+
+        let mut blocks = Vec::with_capacity(num_layers);
+        for i in 0..num_layers {
+            blocks.push(Gemma4VisionBlock::new(
+                embed_dim,
+                intermediate_size,
+                num_heads,
+                vb.pp(format!("v.blk.{i}")),
+            )?);
+        }
+
+        let projector = MultiModalProjector::new(embed_dim, 5376, vb.clone())?;
+
+        Ok(Self {
+            patch_embed,
+            pos_table,
+            blocks,
+            std_bias,
+            std_scale,
+            projector,
+            embed_dim,
+            patch_size,
+            pooling_kernel_size,
+        })
+    }
+
+    /// Precompute 2D axial RoPE for a grid of patches (grid_h, grid_w)
+    pub fn precompute_axial_rope(&self, grid_h: usize, grid_w: usize, dev: &Device) -> Result<(Tensor, Tensor)> {
+        let head_dim = self.embed_dim / 16; // 72
+        let spatial_dim = head_dim / 2; // 36
+        let base = 100.0f64;
+
+        let mut inv_freq = Vec::with_capacity(spatial_dim / 2);
+        for i in (0..spatial_dim).step_by(2) {
+            inv_freq.push(1.0f32 / (base.powf(i as f64 / spatial_dim as f64) as f32));
+        }
+
+        let num_patches = grid_h * grid_w;
+        let mut cos_all = Vec::with_capacity(num_patches * head_dim);
+        let mut sin_all = Vec::with_capacity(num_patches * head_dim);
+
+        for y in 0..grid_h {
+            for x in 0..grid_w {
+                // W angles (X axis, pos_x)
+                let mut angles_w = Vec::with_capacity(spatial_dim / 2);
+                for &f in &inv_freq {
+                    angles_w.push(x as f32 * f);
+                }
+                // H angles (Y axis, pos_y)
+                let mut angles_h = Vec::with_capacity(spatial_dim / 2);
+                for &f in &inv_freq {
+                    angles_h.push(y as f32 * f);
+                }
+
+                // Layout: [W, W, H, H] (pos_x, pos_x, pos_y, pos_y)
+                // Dims 0..36 correspond to pos_x, dims 36..72 correspond to pos_y
+                for &a in &angles_w {
+                    cos_all.push(a.cos());
+                    sin_all.push(a.sin());
+                }
+                for &a in &angles_w {
+                    cos_all.push(a.cos());
+                    sin_all.push(a.sin());
+                }
+                for &a in &angles_h {
+                    cos_all.push(a.cos());
+                    sin_all.push(a.sin());
+                }
+                for &a in &angles_h {
+                    cos_all.push(a.cos());
+                    sin_all.push(a.sin());
+                }
+            }
+        }
+
+        let cos = Tensor::from_vec(cos_all, (1, num_patches, 1, head_dim), dev)?;
+        let sin = Tensor::from_vec(sin_all, (1, num_patches, 1, head_dim), dev)?;
+        Ok((cos, sin))
+    }
+
+    /// Forward pass through the entire Gemma 4 Vision Pipeline
+    /// Input: `pixel_values` in range [0, 1] of shape `[1, 3, H, W]`
+    /// Returns: projected soft tokens of shape `[1, num_soft_tokens, 5376]`
+    pub fn forward(&self, pixel_values: &Tensor) -> Result<Tensor> {
+        let (b, _c, _h, _w) = pixel_values.dims4()?;
+        let dev = pixel_values.device();
+
+        // 1. Pixel normalization: 2.0 * (pixel_values - 0.5)
+        let scaled_pixels = ((pixel_values - 0.5)? * 2.0)?;
+
+        // 2. Patch embedding: Conv2d with kernel=16, stride=16
+        let patches = self.patch_embed.forward(&scaled_pixels)?;
+        let (_, embed_dim, grid_h, grid_w) = patches.dims4()?;
+        let num_patches = grid_h * grid_w;
+
+        // Flatten to [B, num_patches, embed_dim]
+        let mut x = patches
+            .permute((0, 2, 3, 1))?
+            .contiguous()?
+            .reshape((b, num_patches, embed_dim))?;
+
+        // 3. 2D Axial Position Embeddings lookup from pos_table: [2, 10240, 1152]
+        let table_x = self.pos_table.i(0)?;
+        let table_y = self.pos_table.i(1)?;
+
+        let mut x_pos_vec = Vec::with_capacity(num_patches);
+        let mut y_pos_vec = Vec::with_capacity(num_patches);
+        for y in 0..grid_h {
+            for x_idx in 0..grid_w {
+                x_pos_vec.push(x_idx as u32);
+                y_pos_vec.push(y as u32);
+            }
+        }
+        let x_idx_tensor = Tensor::from_vec(x_pos_vec, (1, num_patches), dev)?;
+        let y_idx_tensor = Tensor::from_vec(y_pos_vec, (1, num_patches), dev)?;
+
+        let x_emb = candle_nn::Embedding::new(table_x, self.embed_dim).forward(&x_idx_tensor)?;
+        let y_emb = candle_nn::Embedding::new(table_y, self.embed_dim).forward(&y_idx_tensor)?;
+        let pos_emb = (x_emb + y_emb)?;
+        x = (x + pos_emb)?;
+
+        // 4. Precompute 2D axial RoPE for attention blocks
+        let (cos, sin) = self.precompute_axial_rope(grid_h, grid_w, dev)?;
+        let cos = cos.to_dtype(x.dtype())?;
+        let sin = sin.to_dtype(x.dtype())?;
+
+        // 5. 27 Transformer Encoder Blocks
+        for block in &self.blocks {
+            x = block.forward(&x, &cos, &sin)?;
+        }
+
+        // 6. Spatial 2D Average Pooling (kernel 3x3)
+        // Reshape spatial grid: [B, grid_h, grid_w, embed_dim]
+        let k = self.pooling_kernel_size;
+        let out_h = grid_h / k;
+        let out_w = grid_w / k;
+        let num_soft_tokens = out_h * out_w;
+
+        let x_spatial = x.reshape((b, out_h, k, out_w, k, embed_dim))?;
+        // Average across the (k, k) patch grid cells
+        let x_pooled = x_spatial
+            .mean_keepdim(2)?
+            .mean_keepdim(4)?
+            .squeeze(4)?
+            .squeeze(2)?
+            .contiguous()?
+            .reshape((b, num_soft_tokens, embed_dim))?;
+
+        // 7. Scale by sqrt(embed_dim) in F32
+        let root_dim = (embed_dim as f64).sqrt();
+        let x_scaled = (x_pooled.to_dtype(DType::F32)? * root_dim)?;
+
+        // 8. Standardization: (x - std_bias) * std_scale
+        let bias = self.std_bias.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(0)?;
+        let scale = self.std_scale.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(0)?;
+        let x_std = x_scaled.broadcast_sub(&bias)?.broadcast_mul(&scale)?;
+
+        // 9. embedding_pre_projection_norm: Gemma 4 applies unscaled RMSNorm (with_scale=false) before linear projection
+        let x_variance = x_std.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+        let x_normed = x_std.broadcast_mul(&(x_variance + 1e-6)?.sqrt()?.recip()?)?.to_dtype(pixel_values.dtype())?;
+
+        // 10. Multimodal Projection to 5376 dimensions
+        self.projector.forward(&x_normed)
     }
 }
 
@@ -1203,6 +1638,18 @@ mod tests {
 
         let logits = vlm.forward_dynamic(&input_ids, Some(&pixels), 0)?;
         assert_eq!(logits.dims3()?, (1, 4, 100));
+        Ok(())
+    }
+
+    #[test]
+    fn test_multimodal_projector_dims() -> Result<()> {
+        let dev = Device::Cpu;
+        let vb = VarBuilder::zeros(DType::F32, &dev);
+        // Gemma 4: 1152 vision dim -> 5376 text hidden dim
+        let projector = MultiModalProjector::new(1152, 5376, vb)?;
+        let x = Tensor::zeros((1, 280, 1152), DType::F32, &dev)?;
+        let projected = projector.forward(&x)?;
+        assert_eq!(projected.dims3()?, (1, 280, 5376));
         Ok(())
     }
 }

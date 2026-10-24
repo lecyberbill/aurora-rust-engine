@@ -1456,29 +1456,83 @@ cargo run --bin test_upscale -- <model.safetensors> <input.png> <output.png>
 
 ## 8. Vision-Language Models (VLM) & Multimodal Understanding
 
-Aurora Engine embeds pure Rust Multimodal Vision-Language capabilities supporting **Qwen2-VL**, **Qwen2.5-VL**, **Qwen3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, and **SmolVLM**.
+Aurora Engine embeds pure Rust Multimodal Vision-Language capabilities supporting **Gemma 4 31B Multimodal**, **Qwen2-VL**, **Qwen2.5-VL**, **Qwen3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, and **SmolVLM**.
 
-### Architecture
-- **Vision Transformer Backbone**: SigLIP / ViT patch encoder with $2\times 2$ spatial token merging.
-- **Multimodal MLP Projector**: Seamless alignment of visual embeddings with LLM token embedding dimensions.
-- **Causal Decoder with KV-Cache**: Streaming autoregressive generation with nucleus top-p/top-k sampling.
+### 8.1 Gemma 4 31B Multimodal Image Understanding (Pure Rust & ROCm/CUDA)
 
-### Rust Usage Example
+Gemma 4 introduces a unified multimodal vision architecture (`gemma4v`) combining a 27-layer SigLIP vision tower with an aspect-ratio-preserving 2D patch encoder and a linear projection directly into Gemma 4 31B's 5376-dimensional token space.
+
+#### 📌 Prérequis indispensables pour Gemma 4 Vision
+
+Avant de lancer l'analyse d'image avec Gemma 4, assurez-vous d'avoir téléchargé et positionné les fichiers suivants :
+
+1. **Poids du LLM (Gemma 4 31B GGUF)** :
+   - Fichier : `gemma-4-31B-it-UD-Q4_K_XL.gguf` (ou équivalent quantifié Q4_K_M / Q8_0).
+   - Emplacement recommandé : `/models/llm/` ou votre répertoire de modèles local.
+2. **Projecteur et Encodeur de Vision (`mmproj` GGUF)** :
+   - Fichier : `mmproj-gemma-4-31b-BF16.gguf` (~1.2 Go, 356 tenseurs).
+   - Contient la tour de vision SigLIP (`v.patch_embd`, `v.position_embd`, `v.blk.0..26`, `v.std_bias`, `v.std_scale`) et la projection `mm.input_projection`.
+3. **Tokenizer officiel Gemma 4 (`gemma4_tokenizer.json`)** :
+   - Fichier de vocabulaire : `gemma4_tokenizer.json` (vocabulaire de 262 144 tokens).
+   - **Attention** : Les jetons spéciaux Gemma 4 doivent être configurés exactement selon les identifiants officiels :
+     - `<|image>` (`255999`) : Délimiteur d'ouverture de séquence visuelle (`boi_token`).
+     - `<|image|>` (`258880`) : Jeton de remplacement (*soft visual token slot*).
+     - `<image|>` (`258882`) : Délimiteur de fermeture de séquence visuelle (`eoi_token`).
+4. **Image d'entrée** :
+   - Formats acceptés : JPEG, PNG, WEBP.
+   - Exemple de test : `/models/llm/Le-Complexe.jpg`.
+
+#### 📐 Spécifications Architecturales de la Vision Tower (`gemma4v`)
+
+- **Prétraitement & Redimensionnement adaptatif** :
+  L'image est redimensionnée en préservant son ratio d'aspect (*aspect-ratio preserving size*) vers les multiples exacts de $48\text{ px}$ ($16\text{ px patch} \times 3\text{ pooling}$).
+  Pour une image de $500 \times 679$, la résolution optimale est $672 \times 912$, produisant $42 \times 57 = 2394$ patchs, réduits après pooling $3 \times 3$ à **266 tokens visuels**.
+- **Normalisation des pixels** : $2.0 \times (\text{pixels} - 0.5)$ sans soustraction de moyenne CLIP standard.
+- **Table de positions 2D axiales** : Matrice $[2, 10240, 1152]$ où la ligne 0 correspond aux coordonnées X et la ligne 1 aux coordonnées Y.
+- **RoPE 2D multidimensionnelle axiale** : Fréquence de base $\theta = 100.0$. La rotation est divisée en 2 blocs de 36 dimensions : les dimensions $0..36$ tournent sur l'axe X (`pos_x`), et les dimensions $36..72$ tournent sur l'axe Y (`pos_y`).
+- **Normalisation per-head & unscaled V RMSNorm** : Q et K sont normalisés avec RMSNorm per-head. V est normalisé avec un RMSNorm unitaire sans échelle (`with_scale=false`).
+- **Facteur d'échelle d'attention** : $kq\_scale = 1.0$ (pas de division par $\sqrt{d}$).
+- **Activation FFN** : `GELU` (approximation tanh `gelu_pytorch_tanh`).
+- **Spatial 2D Average Pooling** : Noyau $3 \times 3$, mise à l'échelle $\sqrt{1152}$, standardisation $(x - \text{std\_bias}) \times \text{std\_scale}$, et normalisation RMSNorm non pondérée avant projection linéaire vers 5376 dimensions.
+
+#### 🚀 Exécution en ligne de commande (Pure Rust & ROCm)
+
+Pour exécuter le pipeline multimodal natif sur GPU AMD (ROCm / HIP) ou NVIDIA (CUDA) :
+
+```bash
+# Compiler le binaire de test en mode release avec support ROCm
+cargo build --release --bin test_gemma4_vlm --features rocm
+
+# Lancer l'inférence multimodale sur l'image
+./target/release/test_gemma4_vlm
+```
+
+> **Performance mesurée (AMD Radeon AI PRO R9700 gfx1201)** :
+> - Temps d'extraction visuelle (266 tokens) : **1.17 s**
+> - Débit de génération de texte : **11.47 tok/s** (pur Rust, 0 Python).
+
+---
+
+### 8.2 Autres Architectures VLM (Qwen2/2.5-VL, PaliGemma 2, SmolVLM)
+
+- **Vision Transformer Backbone**: SigLIP / ViT patch encoder avec fusion spatiale $2\times 2$.
+- **Multimodal MLP Projector**: Alignement des embeddings visuels avec les dimensions du décodeur de langage.
+- **Causal Decoder avec KV-Cache**: Streaming autoregressif avec échantillonnage top-p / top-k.
 
 ```rust
 use aurora_rust_engine::{select_device, VlmParams, VlmPipeline};
 use image::ImageReader;
 
-// 1. Select device (CUDA or CPU)
+// 1. Sélectionner le périphérique (ROCm, CUDA ou CPU)
 let device = select_device(true)?;
 
-// 2. Load model from directory (containing model.safetensors + tokenizer.json)
-let mut pipeline = VlmPipeline::from_pretrained("D:/models/vlm/Qwen2.5-VL-3B", &device)?;
+// 2. Charger le pipeline VLM depuis le dossier du modèle
+let mut pipeline = VlmPipeline::from_pretrained("/models/vlm/Qwen2.5-VL-3B", &device)?;
 
-// 3. Load image
+// 3. Charger l'image
 let img = ImageReader::open("photo.jpg")?.decode()?;
 
-// 4. Configure sampling parameters
+// 4. Configurer les paramètres
 let params = VlmParams {
     max_tokens: 256,
     temperature: 0.7,
@@ -1487,16 +1541,10 @@ let params = VlmParams {
     ..Default::default()
 };
 
-// 5. Generate visual description / VQA
-let prompt = "Describe the objects, colors, and layout in this image.";
+// 5. Générer la description
+let prompt = "Décris cette image en détail.";
 let response = pipeline.generate(Some(&img), prompt, &params)?;
 println!("VLM: {}", response);
-```
-
-### Running from CLI
-
-```bash
-cargo run --bin test_vlm -- <model_dir> [image.png] [prompt]
 ```
 
 ---

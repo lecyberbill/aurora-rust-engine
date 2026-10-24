@@ -26,7 +26,7 @@ It provides a robust, zero-Python alternative for running state-of-the-art gener
 | **Image (Diffusion)** | SDXL / Pony XL (all single-file checkpoints), FLUX.1 `[dev/schnell]`, FLUX.2-Klein-4B / Klein-9B / Dev, Z-Image Turbo (S3-DiT 6B) |
 | **Video (DiT 3D)** | **CogVideoX-2B** (3D Spatio-Temporal DiT + Causal RoPE + Flow Matching ODE) |
 | **Super-Resolution / Upscaling** | **Real-ESRGAN** (x2/x4/x8), **4x-UltraSharp**, **NMKD**, **SRVGGNetCompact** (Anime-6B) with Bounded Tiling & Seam Blending |
-| **Vision-Language (VLM)** | **Qwen2-VL**, **Qwen2.5-VL**, **Qwen3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, **SmolVLM** |
+| **Vision-Language (VLM)** | **Gemma 4 31B Multimodal**, **Qwen2-VL**, **Qwen2.5-VL**, **Qwen3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, **SmolVLM** |
 | **Text (CausalLM)** | Qwen 2.5/3, **Qwen 3.5/3.8 hybrid (Gated DeltaNet)**, **Gemma 3 & Gemma 4 (31B)**, **Microsoft Phi-4 (15B)**, **Liquid AI LFM 2.5 (ShortConv-MoE)**, Llama 3, Mistral, DeepSeek — GGUF (Q4_K_M/Q8_0) & SafeTensors |
 | **Speech-to-Text** | Whisper Large-v3 / Turbo, **Moonshine** (native Mel + encoder/decoder) |
 | **Text-to-Speech** | Parler-TTS, Kokoro-82M, **ChatTTS** (Conversational Prosody & Vocos) |
@@ -343,7 +343,8 @@ cargo run --release --bin server --features cuda,flash-attn
 |---|---|---|---|---|---|
 | **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.68 s** | **11.73 tok/s** (401 tok / 34.19 s) | French poem, temp 0.7 (GDN path) |
 | **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **3.85 s** | **17.80 tok/s** (65 tok / 3.65 s) | Ocean paragraph, greedy |
-| **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **7.92 s** | **11.25 tok/s** (65 tok / 5.78 s) | Ocean paragraph, greedy |
+| **Gemma 4 31B (Text)** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **7.92 s** | **11.25 tok/s** (65 tok / 5.78 s) | Ocean paragraph, greedy |
+| **Gemma 4 31B (Multimodal VLM)** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` + `mmproj-gemma-4-31b-BF16.gguf` | 18.82 GB + 1.2 GB | **6.33 s** (LLM) + **0.90 s** (Vision) | **11.47 tok/s** (257 tok / 22.41 s) | Dense comic strip OCR & VQA (`Le-Complexe.jpg`, 266 visual tokens in 1.17s) |
 | **Phi-4 Reasoning Plus 15B** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.13 s** (lazy) | **8.49 tok/s** (49 tok / 5.77 s) | Native Phi template; concise reasoning → "Paris" |
 | **LFM 2.5 8B** | `LFM2.5-8B-A1B-Q4_K_M.gguf` | 4.80 GB | **0.35 s** (lazy) | **3.15 tok/s** (65 tok / 20.65 s) | Degenerate output (`?` tokens); engine does not crash |
 

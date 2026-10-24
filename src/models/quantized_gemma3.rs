@@ -569,4 +569,56 @@ impl ModelWeights {
             Ok(logits)
         }
     }
+
+    /// Embed token IDs and apply Gemma sqrt(embedding_length) scaling
+    pub fn embed_tokens(&self, x: &Tensor) -> Result<Tensor> {
+        let embeds = self.tok_embeddings.forward(x)?;
+        embeds * (self.embedding_length as f64).sqrt()
+    }
+
+    /// Forward pass starting from pre-computed multimodal embeddings [B, SeqLen, HiddenDim]
+    pub fn forward_embeds(&mut self, mut layer_in: Tensor, index_pos: usize) -> Result<Tensor> {
+        let (b_sz, seq_len, _) = layer_in.dims3()?;
+
+        for layer in self.layers.iter_mut() {
+            let attention_mask = if seq_len == 1 {
+                None
+            } else {
+                Some(layer.mask(b_sz, seq_len, index_pos, layer_in.dtype(), layer_in.device())?)
+            };
+
+            // Attention block
+            let residual = &layer_in;
+            let x = layer.attention_norm.forward(&layer_in)?;
+            let x = layer.forward_attn(&x, attention_mask.as_ref(), index_pos)?;
+            let x = layer.post_attention_norm.forward(&x)?;
+            let x = (x + residual)?;
+
+            // Feed-forward block
+            let residual = &x;
+            let x = layer.ffn_norm.forward(&x)?;
+            let x = layer.mlp.forward(&x)?;
+            let x = layer.post_ffn_norm.forward(&x)?;
+            let mut x = (x + residual)?;
+
+            if let Some(scale) = &layer.layer_output_scale {
+                let scale_broad = scale.broadcast_as(x.shape())?;
+                x = (x * scale_broad)?;
+            }
+
+            layer_in = x;
+        }
+
+        let x = layer_in.i((.., seq_len - 1, ..))?;
+        let x = self.norm.forward(&x)?;
+        let logits = self.output.forward(&x)?;
+
+        if let Some(sc) = self.final_logit_softcapping {
+            let scaled = (logits / sc)?;
+            let tanh = scaled.tanh()?;
+            tanh * sc
+        } else {
+            Ok(logits)
+        }
+    }
 }

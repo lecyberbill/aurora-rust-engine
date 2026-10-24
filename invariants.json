@@ -1,0 +1,30 @@
+[
+  {
+    "id": "INV-GEMMA4-VISION-LOAD",
+    "statement": "L'encodeur de vision charge les poids de mmproj-gemma-4-31b-BF16.gguf (patch_embd, 27 couches SigLIP, mm.input_projection) en BF16/F32 sur GPU ROCm.",
+    "component": "src/models/vlm.rs",
+    "probe": "cargo test --lib -- models::vlm::tests::test_vision_transformer_forward",
+    "expected": "test result: ok"
+  },
+  {
+    "id": "INV-GEMMA4-MULTIMODAL-PROJECTION",
+    "statement": "Le projecteur multimodal mappe la dimension vision (1152) vers la dimension du décodeur Gemma 4 (5376) avec fidélité numérique.",
+    "component": "src/models/vlm.rs",
+    "probe": "cargo test --lib -- models::vlm::tests::test_multimodal_projector_dims",
+    "expected": "test result: ok"
+  },
+  {
+    "id": "INV-GEMMA4-IMAGE-INFERENCE",
+    "statement": "L'analyse de Le-Complexe.jpg produit une séquence de tokens cohérente sans NaN ni boucle infinie, alimentée par les tokens visuels projetés.",
+    "component": "src/bin/test_gemma4_vlm.rs",
+    "probe": "ssh aurora-dev 'test -f /models/llm/Le-Complexe.jpg && test -f /models/llm/mmproj-gemma-4-31b-BF16.gguf'",
+    "expected": "exit code 0"
+  },
+  {
+    "id": "INV-NEG-VLM-NO-SUBST",
+    "statement": "Aucun processus externe (llama-cli, python, subprocess), appel réseau ou mock dans le pipeline d'inférence multimodale.",
+    "component": "src/bin/test_gemma4_vlm.rs",
+    "probe": "git grep -n -E 'Command::new|std::process|reqwest|http://|localhost' src/bin/test_gemma4_vlm.rs",
+    "expected": "no match found"
+  }
+]

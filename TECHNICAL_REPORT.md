@@ -26,21 +26,27 @@ Ce rapport documente l'état d'implémentation et de compatibilité des modèles
   - Le code interprétait `Some(0)` comme une fenêtre de 0 tokens, tronquant le tenseur KV à une dimension nulle (`[1, 40, 9, 0]`) provoquant un crash `broadcast_add` avec le masque causal.
   - Résolution : Filtrage strict `sliding_window.filter(|&w| w > 0)` dans `CausalLMConfig` et `LayerKVCache::append_with_window`.
 
-### Google Gemma 4 (31B GGUF `gemma4` architecture)
-- **Status :** ✅ **100% Opérationnel sur ROCm (Radeon AI PRO R9700)**
-- **Sonde empirique :** `cargo run --release --features rocm --bin probe_gemma4_chat`
-- **Résultat réel mesuré :**
-  - **Prompt :** `<|turn>user\nWhat is the capital of France and why is it known as the City of Light?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>`
-  - **Réponse modèle :**
-    > *"The capital of France is **Paris**.*
-    > *It is known as the **"City of Light"** (La Ville Lumière) for two primary reasons:*
-    > ***1. Intellectual Enlightenment** During the 18th century (the Age of Enlightenment), Paris was the center of education, philosophy, and science..."*
-  - **Débit :** ~2.83 à 3.92 tokens/sec natif en inférence complète 60 couches sur GPU gfx1201.
-- **Clés de l'alignement architectural :**
-  1. **Attention Scaling unitaire ($1.0$) :** Dans Gemma 4, la mise à l'échelle d'attention n'utilise pas $1/\sqrt{d_k}$ car les projections Query/Key sont normalisées par des RMSNorm entraînables dédiées (`attention_q_norm`, `attention_k_norm`). L'échelle est fixée à $1.0$.
-  2. **Tenseurs `layer_output_scale` :** Présents sur les 60 couches du modèle, multipliant directement la sortie du bloc après addition du résidu (`x = (x + residual) * layer_output_scale`).
-  3. **RMSNorm sans décalage $+1$ :** Le convertisseur GGUF (`convert_hf_to_gguf.py`) intègre déjà le décalage $+1.0$ dans les poids sérialisés. Le calcul standard `norm(x) * weight` est donc strictement exact.
-  4. **Chat Template officiel :** Utilisation des balises de tour et de canal (`<|turn>user`, `<turn|>`, `<|turn>model`, `<|channel>thought`, `<channel|>`).
+### Google Gemma 4 (31B GGUF `gemma4` architecture & Vision Multimodal `gemma4v`)
+- **Status :** ✅ **100% Opérationnel sur ROCm (Radeon AI PRO R9700) en Text et Vision Multimodale**
+- **Sonde empirique Vision :** `ssh aurora-dev "cd /srv/dev/aurora-rust-engine && ./target/release/test_gemma4_vlm"`
+- **Résultat réel mesuré (analyse de `Le-Complexe.jpg`, 2026-10-24) :**
+  - **Temps de chargement LLM GGUF (31B Q4_K_XL) :** 6.33 s
+  - **Temps de chargement Vision Tower & Projecteur (`mmproj` 1.2 Go, 356 tenseurs) :** 0.90 s
+  - **Extraction des tokens visuels (266 soft tokens) :** **1175.13 ms** (1.17 s)
+  - **Génération autorégressive (ROCm `gfx1201`) :** **257 tokens en 22.41 s (11.47 tok/s)**
+  - **Description produite par le modèle :**
+    > *"Cette image est une page de bande dessinée composée de quatre cases, illustrant l'utilisation d'un patch pour éliminer les points noirs sur le nez... Case supérieure gauche : gros plan du visage d'une femme... appliquant un patch blanc... ongles peints en orange vif. Case supérieure droite : boîte de produit avec les textes visibles : « ZERO COMPLEXE », « 5 min » avec le mot « seulement »..."*
+  - **Élimination de l'hallucination :** Zéro hallucination, retranscription exacte du texte et du sujet visuel réel.
+- **Clés de l'alignement architectural Vision Gemma 4 (`gemma4v`) :**
+  1. **Redimensionnement dynamique préservant le ratio :** Redimensionnement adaptatif vers des multiples de 48px ($500 \times 679 \to 672 \times 912$), découpé en $42 \times 57 = 2394$ patchs de $16\text{ px}$.
+  2. **Normalisation des pixels :** $2.0 \times (\text{pixels} - 0.5)$ sans soustraction de moyenne standard CLIP.
+  3. **Table de positions 2D axiales :** Tenseur `v.position_embd.weight` $[2, 10240, 1152]$ indexé en coordonnées 2D ($X$ ligne 0, $Y$ ligne 1).
+  4. **RoPE 2D multidimensionnelle axiale séparée :** Fréquence $\theta = 100.0$. Divisée en deux blocs indépendants de 36 dimensions pour $X$ et $Y$ (layout $[W, W, H, H]$).
+  5. **Normalisation per-head et unscaled V RMSNorm :** Query et Key normalisés par RMSNorm per-head. Value normalisé par un RMSNorm unitaire sans poids (`with_scale=false`).
+  6. **Facteur d'échelle d'attention :** $kq\_scale = 1.0$ (pas de division par $\sqrt{d}$).
+  7. **Activation FFN :** `GELU` (approximation tanh `gate.gelu()`).
+  8. **Spatial Pooling & Pré-projection Norm :** Average pooling 2D $3 \times 3 \to 266$ tokens, mise à l'échelle $\sqrt{1152}$, standardisation $(x - \text{bias}) \times \text{scale}$, et normalisation RMSNorm non pondérée avant projection linéaire vers 5376 dimensions.
+  9. **Substitution des tokens d'image :** Remplacement dans l'embedding continu des 266 jetons `<|image|>` (`258880`) encadrés par `<|image>` (`255999`) et `<image|>` (`258882`).
 
 ### Qwen 3.8 27B (`qwen35` hybrid SSM / Full Attention)
 - **Status :** ✅ **100% Opérationnel sur ROCm (Radeon AI PRO R9700 `gfx1201`) en Rust pur**
