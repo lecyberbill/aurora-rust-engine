@@ -144,14 +144,17 @@ cargo run --release --features cuda --bin test_tts
 ```
 
 ### 11. CausalLM Text Generation (Pure Rust / RDNA4 & CUDA)
-LLM / CausalLM inference (e.g., Qwen3.8-27B, DeepSeek-R1, Llama 3) with native GGUF 4-bit (`Q4_K_M`) support:
+LLM / CausalLM inference (e.g., IBM Granite 4.2 30B, Qwen3.8-27B, DeepSeek-R1, Gemma 4, Llama 3) with native GGUF support:
+- **IBM Granite 4.2 Support**: Native support for Granite dense architectures (`granite-4.2-30b-Q6_K.gguf`) with explicit `attention.scale` ($0.0078125$), chain-of-thought chat template (`<|im_start|>assistant\n<think>\n`), and official tokenizer auto-discovery.
 - **AMD RDNA 4 (`gfx1201`) on ROCm 10**: portable `QMatMul` GEMM path. An experimental WMMA INT4 kernel (`__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12`) is available via the standalone `test_wmma_q4k` binary but is not yet wired into the model path. Measured Qwen3.8-27B hybrid (GDN): **~11.7 tok/s** decode (400 tokens, temp 0.7), **71.7 s** load.
-- **Sampling & streaming**: `TextGenParams` (`temperature`, `top_p`, `top_k`, `repetition_penalty`, `stop_tokens`) and `generate_stream_with_params` are wired for Qwen 3.5/3.8 and Gemma; greedy is used when `temperature <= 0`. The dense Qwen3 non-stream path still uses its existing generator.
+- **Sampling & streaming**: `TextGenParams` (`temperature`, `top_p`, `top_k`, `repetition_penalty`, `stop_tokens`) and `generate_stream_with_params` are wired for Granite, Qwen 3.5/3.8 and Gemma; greedy is used when `temperature <= 0`.
 - **NVIDIA CUDA**: High-throughput decoding via CUDA Tensor Cores with cross-platform compatibility and zero API regression.
-- **Qwen 3.5/3.8 tokenizer**: hybrid checkpoints require `assets/tokenizers/qwen35_tokenizer.json` (auto-resolved and EOS-checked against the GGUF).
 
 ```bash
-# AMD ROCm / HIP (Linux / RDNA 4)
+# AMD ROCm / HIP (Linux / RDNA 4) — IBM Granite 4.2 Reasoning
+TOP_P=0.95 ./target/release/test_text_gen /models/llm/granite-4.2-30b-Q6_K.gguf "Explain quantum mechanics in 3 bullet points:" 128 1.0
+
+# AMD ROCm / HIP (Linux / RDNA 4) — General LLM
 cargo run --release --features rocm --bin test_text_gen -- <path_to_model.gguf> "Explain quantum mechanics in 3 bullet points:" 128 0.7
 
 # NVIDIA CUDA

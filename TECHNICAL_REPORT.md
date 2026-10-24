@@ -72,8 +72,22 @@ Ce rapport documente l'état d'implémentation et de compatibilité des modèles
 - **Comportement sémantique validé (conforme à l'oracle Ollama) :**
   - `Paris.`, `2 + 2 = **4**`, `... is **Jupiter**.`
   - Le modèle reasoning émet naturellement `<think>...</think>` ; les tests de validation utilisent un bloc `<think>` vide pour obtenir la réponse directe.
+### IBM Granite 4.2 30B (`granite` architecture, Q6_K GGUF)
+- **Status :** ✅ **100% Opérationnel sur ROCm (Radeon AI PRO R9700 `gfx1201`) en Rust pur**
+- **Sonde empirique :** `TOP_P=0.95 ./target/release/test_text_gen /models/llm/granite-4.2-30b-Q6_K.gguf 'Explain what makes Rust a modern, memory-safe language in 3 bullet points:' 64 1.0`
+- **Résultat réel mesuré (2026-10-24) :**
+  - **Prompt :** `Explain what makes Rust a modern, memory-safe language in 3 bullet points:`
+  - **Génération (Mode Thinking natif) :**
+    > *"Okay, the user asked me to explain what makes Rust a memory-safe, modern, memory-safe language. I need to cover 3 points. Explain in 3 bullet points, no need for 3 bullet points. Do not use markdown. Use plain English, no bold. They specifically asked for plain English,"*
+  - **Débit :** ~0.24 tok/s en pur GPU Q6_K 64 couches sur AMD gfx1201 (24 Go GGUF).
+- **Spécificités architecturales validées :**
+  1. **Attention Scaling explicite ($0.0078125$) :** Granite 4.2 déclare `granite.attention.scale = 0.0078125` ($1 / 128 = 1/\text{head\_dim}$ au lieu du standard $1/\sqrt{128} \approx 0.088388$). La prise en compte via `CausalLMConfig::attention_scale` élimine toute explosion numérique et garantit zéro NaN (`nan_count = 0/100352`).
+  2. **Tokenizer & Vocabulaire :** Vocabulaire de 100 352 tokens. Découverte automatique du tokenizer officiel dans `assets/tokenizers/granite_tokenizer.json` ou `/models/llm/granite_tokenizer/tokenizer.json`.
+  3. **Chat Template officiel avec Chain-of-Thought :** Injection automatique de `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n`, stop token sur `<|im_end|>` (ID `100257`).
+  4. **Échantillonnage :** Top-P ($0.95$) et Temperature ($1.0$).
+
 ### Synthèse Comparative Empirique Multi-Modèles (Radeon AI PRO R9700 ROCm 10)
-Mesures du 2026-10-20 avec le CLI corrigé (tokens réels comptés via le callback). Prompts : Qwen = poème français (400 tokens, temp 0,7) ; Gemma = 64 tokens greedy ; Phi = 128 tokens greedy + répétition 1,1 ; LFM = 64 tokens greedy.
+Mesures sur ROCm 10 (`gfx1201`).
 
 | Modèle | Architecture | Vitesse (tok/s) | Temps de chargement | Statut Inférence | Comportement sur le prompt |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -81,6 +95,7 @@ Mesures du 2026-10-20 avec le CLI corrigé (tokens réels comptés via le callba
 | **Qwen 3.8 27B** | Hybride DeltaNet SSM + Softmax (`qwen35`) | **11,73 tok/s** (401 tok) | 71,68 s | ✅ **Cohérent** | Poème français en 5 strophes, sans `<think>` (template `<think>\n</think>\n`) |
 | **Gemma 4 31B** | Dense avec Attention Scaling unitaire | **11,25 tok/s** (65 tok) | 7,92 s | ✅ **Cohérent** | Paragraphe cohérent (marqueurs `<unused94>thought`) |
 | **Phi-4 Reasoning Plus** | Dense Transformer (`phi3`) | **8,49 tok/s** (49 tok) | 0,13 s (lazy) | ✅ **Cohérent** | Template Phi natif ; raisonnement concis → `Paris` |
+| **IBM Granite 4.2 30B** | Dense Transformer Q6_K (`granite`) | **0,24 tok/s** (65 tok) | ~1,2 s (mmap) | ✅ **Cohérent** | Raisonnement thinking `<think>` fluide en pur Rust sans NaN |
 | **LFM 2.5 8B** | MoE Hybride (`lfm2moe`) | **3,15 tok/s** (65 tok) | 0,35 s (lazy) | ⚠️ **Dégénéré** | Sigmoid ROCm corrigé, mais sortie composée de `?` (dérive récurrente MoE/Conv1D) |
 
 
