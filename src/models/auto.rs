@@ -512,27 +512,20 @@ fn resolve_tokenizer_named(
     filename: &str,
     arch: &Architecture,
 ) -> Option<tokenizers::Tokenizer> {
-    // 1. Try local tokenizer.json in model dir or alongside file
+    // 1. Try local specific filename first
     let local_dir = if weights.is_dir() {
         weights.to_path_buf()
     } else {
         weights.parent().unwrap_or(Path::new(".")).to_path_buf()
     };
-    for candidate in [
-        local_dir.join(filename),
-        local_dir.join("tokenizer.json"),
-        local_dir.join("granite_tokenizer/tokenizer.json"),
-        local_dir.join("granite_tokenizer/tokenizer(3).json"),
-    ] {
-        if candidate.exists() {
-            if let Ok(t) = tokenizers::Tokenizer::from_file(&candidate) {
-                return Some(t);
-            }
+    let local_specific = local_dir.join(filename);
+    if local_specific.exists() {
+        if let Ok(t) = tokenizers::Tokenizer::from_file(&local_specific) {
+            return Some(t);
         }
     }
 
-    // 2. Try standard root cache and assets/tokenizers directories
-
+    // 2. Try standard root cache and assets/tokenizers directories for the specific filename
     let mut search_roots = vec![
         PathBuf::from("."),
         PathBuf::from("assets/tokenizers"),
@@ -561,6 +554,7 @@ fn resolve_tokenizer_named(
         search_roots.push(m_path.join("assets/tokenizers"));
     }
 
+    // Search specifically for `filename` across all roots
     for root in &search_roots {
         let p = root.join(filename);
         if p.exists() {
@@ -568,6 +562,22 @@ fn resolve_tokenizer_named(
                 return Some(t);
             }
         }
+    }
+
+    // 3. Fallback to generic tokenizer.json locally or in search roots
+    for candidate in [
+        local_dir.join("tokenizer.json"),
+        local_dir.join("granite_tokenizer/tokenizer.json"),
+        local_dir.join("granite_tokenizer/tokenizer(3).json"),
+    ] {
+        if candidate.exists() {
+            if let Ok(t) = tokenizers::Tokenizer::from_file(&candidate) {
+                return Some(t);
+            }
+        }
+    }
+
+    for root in &search_roots {
         let p_generic = root.join("tokenizer.json");
         if p_generic.exists() {
             if let Ok(t) = tokenizers::Tokenizer::from_file(&p_generic) {
