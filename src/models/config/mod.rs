@@ -28,6 +28,7 @@ pub enum Architecture {
     Nemotron,
     Lfm,
     Phi,
+    Granite,
     T5,
     ClipL,
     OpenClip,
@@ -40,7 +41,7 @@ impl Architecture {
     pub fn model_kind(&self) -> ModelKind {
         match self {
             Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma => ModelKind::Text,
-            Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Nemotron | Architecture::Lfm | Architecture::Phi => ModelKind::Text,
+            Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Nemotron | Architecture::Lfm | Architecture::Phi | Architecture::Granite => ModelKind::Text,
             Architecture::T5 | Architecture::ClipL | Architecture::OpenClip => ModelKind::TextEncoder,
             Architecture::ZImageTurbo
             | Architecture::Flux2Dev
@@ -74,6 +75,7 @@ impl Architecture {
             Architecture::Nemotron => "nemotron".into(),
             Architecture::Lfm => "lfm".into(),
             Architecture::Phi => "phi".into(),
+            Architecture::Granite => "granite".into(),
             Architecture::T5 => "t5".into(),
             Architecture::ClipL => "clip-l".into(),
             Architecture::OpenClip => "open-clip".into(),
@@ -96,6 +98,8 @@ pub fn detect_architecture(src: &dyn WeightsSource) -> Architecture {
             return Architecture::Gemma;
         } else if arch_lower.starts_with("qwen") {
             return Architecture::Qwen3;
+        } else if arch_lower.starts_with("granite") {
+            return Architecture::Granite;
         } else if arch_lower.starts_with("llama") {
             return Architecture::Llama;
         } else if arch_lower.starts_with("deepseek") {
@@ -223,6 +227,7 @@ pub fn detect_from_model_type(model_type: Option<&str>) -> Result<Architecture> 
         "deepseek" | "deepseek_v2" | "deepseek_v3" => Architecture::DeepSeek,
         "lfm" | "lfm2" | "lfm2moe" | "liquid" => Architecture::Lfm,
         "phi" | "phi3" | "phi4" | "phi-3" | "phi-4" => Architecture::Phi,
+        "granite" | "granite-4.2" | "granitemoe" => Architecture::Granite,
         "gemma" | "gemma2" | "gemma3" | "gemma4" => Architecture::Gemma,
         "mistral" | "mistral3" => Architecture::Mistral3,
         "t5" | "t5xxl" => Architecture::T5,

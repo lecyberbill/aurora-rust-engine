@@ -305,9 +305,8 @@ impl AutoModel {
                 let diff = super::auto::build_diffusion(&arch, &weights, &device, dtype)?;
                 Arc::new(Mutex::new(diff))
             }
-            // ---- Text / CausalLM models -----------------------------------------
             Architecture::Qwen3 | Architecture::Mistral3 | Architecture::Nemotron | Architecture::T5
-            | Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma | Architecture::Lfm | Architecture::Phi
+            | Architecture::Llama | Architecture::DeepSeek | Architecture::Gemma | Architecture::Lfm | Architecture::Phi | Architecture::Granite
             | Architecture::ClipL | Architecture::OpenClip => {
                 let text = super::auto::build_text(&arch, &weights, &device, dtype)?;
                 Arc::new(Mutex::new(text))
@@ -466,7 +465,7 @@ fn build_text(
                 Ok(TextModel::causal_lm(id, arch.slug(), pipeline))
             }
         }
-        Architecture::Llama | Architecture::DeepSeek | Architecture::Mistral3 | Architecture::Nemotron | Architecture::Lfm | Architecture::Phi => {
+        Architecture::Llama | Architecture::DeepSeek | Architecture::Mistral3 | Architecture::Nemotron | Architecture::Lfm | Architecture::Phi | Architecture::Granite => {
             let config = crate::models::text::CausalLMConfig::from_weights(&*archive)?;
             let tokenizer = resolve_tokenizer(weights, arch);
             let pipeline = crate::models::text::CausalLMPipeline::new(
@@ -502,6 +501,7 @@ fn resolve_tokenizer(weights: &Path, arch: &Architecture) -> Option<tokenizers::
         Architecture::Nemotron => "nemotron_tokenizer.json",
         Architecture::Lfm => "lfm_tokenizer.json",
         Architecture::Phi => "phi_tokenizer.json",
+        Architecture::Granite => "granite_tokenizer.json",
         _ => "tokenizer.json",
     };
     resolve_tokenizer_named(weights, filename, arch)
@@ -518,7 +518,12 @@ fn resolve_tokenizer_named(
     } else {
         weights.parent().unwrap_or(Path::new(".")).to_path_buf()
     };
-    for candidate in [local_dir.join(filename), local_dir.join("tokenizer.json")] {
+    for candidate in [
+        local_dir.join(filename),
+        local_dir.join("tokenizer.json"),
+        local_dir.join("granite_tokenizer/tokenizer.json"),
+        local_dir.join("granite_tokenizer/tokenizer(3).json"),
+    ] {
         if candidate.exists() {
             if let Ok(t) = tokenizers::Tokenizer::from_file(&candidate) {
                 return Some(t);
@@ -533,6 +538,8 @@ fn resolve_tokenizer_named(
         PathBuf::from("assets/tokenizers"),
         PathBuf::from("/srv/dev/aurora-rust-engine"),
         PathBuf::from("/srv/dev/aurora-rust-engine/assets/tokenizers"),
+        PathBuf::from("/models/llm/granite_tokenizer"),
+        PathBuf::from("/models/granite_tokenizer"),
         PathBuf::from("/models/llm/mistral_tokenizer"),
         PathBuf::from("/models/mistral_tokenizer"),
         PathBuf::from("/models/llm"),
