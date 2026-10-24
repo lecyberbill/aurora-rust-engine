@@ -79,9 +79,15 @@ fn main() -> anyhow::Result<()> {
     let mut params = TextGenParams::default();
     params.max_tokens = max_tokens;
     params.temperature = temperature;
+    if let Ok(top_p_str) = std::env::var("TOP_P") {
+        if let Ok(val) = top_p_str.parse::<f64>() {
+            params.top_p = val;
+        }
+    }
     if let Ok(q_str) = std::env::var("QUANTIZED_KV") {
         params.quantized_kv = q_str == "1" || q_str.eq_ignore_ascii_case("true");
     }
+    println!("⚙️  Sampling: temp = {}, top_p = {}, top_k = {}", params.temperature, params.top_p, params.top_k);
     println!("🔑 Quantized 8-bit KV-Cache: {}", if params.quantized_kv { "ENABLED (U8 + F32 scale)" } else { "DISABLED (Standard F16/F32)" });
 
     let mut token_count = 0usize;

@@ -299,6 +299,7 @@ pub struct CausalLMConfig {
     pub moe_num_experts: usize,
     pub moe_top_k: usize,
     pub moe_shared_experts: usize,
+    pub attention_scale: Option<f64>,
 }
 
 impl CausalLMConfig {
@@ -499,6 +500,9 @@ impl CausalLMConfig {
             (0, 0, 0)
         };
 
+        let attention_scale = src.metadata_f64(&format!("{arch_prefix}attention.scale"))
+            .or_else(|| src.metadata_f64("attention.scale"));
+
         Ok(Self {
             hidden_size,
             intermediate_size,
@@ -525,6 +529,7 @@ impl CausalLMConfig {
             moe_num_experts,
             moe_top_k,
             moe_shared_experts,
+            attention_scale,
         })
     }
 }
@@ -915,13 +920,17 @@ impl CausalLMPipeline {
         self.format_chat_messages(&pairs)
     }
 
-    /// Format a single user prompt for models that need a chat wrapper (Phi-3/4, Mistral).
+    /// Format a single user prompt for models that need a chat wrapper (Granite, Phi-3/4, Mistral).
     /// Prompts already containing format markers are passed through unchanged.
     pub fn format_prompt(&self, prompt: &str) -> String {
-        if prompt.contains("<|im_sep|>") || prompt.contains("[INST]") {
+        if prompt.contains("<|im_sep|>") || prompt.contains("[INST]") || prompt.contains("<|im_start|>") {
             return prompt.to_string();
         }
         let arch = self.arch_name();
+        if arch == "granite" {
+            // Granite 4.2 thinking mode by default
+            return format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n", prompt.trim());
+        }
         if arch == "mistral3" || arch == "mistral" {
             return format!("[INST] {} [/INST]", prompt.trim());
         }
@@ -940,6 +949,14 @@ impl CausalLMPipeline {
     /// Format `(role, content)` messages using the model family's chat template.
     pub fn format_chat_messages(&self, messages: &[(String, String)]) -> String {
         let arch = self.arch_name();
+        if arch == "granite" {
+            let mut prompt = String::new();
+            for (role, content) in messages {
+                prompt.push_str(&format!("<|im_start|>{role}\n{}<|im_end|>\n", content.trim()));
+            }
+            prompt.push_str("<|im_start|>assistant\n<think>\n");
+            return prompt;
+        }
         if arch == "mistral3" || arch == "mistral" {
             let mut prompt = String::new();
             let mut sys_prompt = String::new();
@@ -1012,6 +1029,11 @@ impl CausalLMPipeline {
                 if !stop.contains(&id) {
                     stop.push(id);
                 }
+            }
+        } else if arch == "granite" {
+            // Granite EOS token (<|im_end|> = 100257)
+            if !stop.contains(&100257u32) {
+                stop.push(100257u32);
             }
         }
         stop
@@ -1956,7 +1978,7 @@ impl CausalLMPipeline {
             };
 
             // Scaled dot product attention: q is [B, H, S_q, D], k is [B, H, S_k, D] -> att is [B, H, S_q, S_k]
-            let scale = 1.0 / (cur_head_dim as f64).sqrt();
+            let scale = self.config.attention_scale.unwrap_or(1.0 / (cur_head_dim as f64).sqrt());
             let q = rocm_contiguous(&q)?;
             let k_t = rocm_contiguous(&k.transpose(2, 3).map_err(LuminaError::Candle)?)?;
             let mut att = (q.matmul(&k_t)? * scale).map_err(LuminaError::Candle)?;
@@ -2643,6 +2665,7 @@ mod tests {
             moe_num_experts: 0,
             moe_top_k: 0,
             moe_shared_experts: 0,
+            attention_scale: None,
         };
 
         let dummy_pipeline = CausalLMPipeline::new(
@@ -2688,6 +2711,7 @@ mod tests {
             moe_num_experts: 0,
             moe_top_k: 0,
             moe_shared_experts: 0,
+            attention_scale: None,
         };
 
         let pipeline = CausalLMPipeline::new(
@@ -2979,5 +3003,110 @@ mod tests {
         assert_eq!(trim_stop_markers("Paris.<|end|>junk".into()), "Paris.");
         assert_eq!(trim_stop_markers("<|user|>ignored".into()), "");
         assert_eq!(trim_stop_markers("ok".into()), "ok");
+    }
+
+    #[test]
+    fn test_granite_attention_scale_config() {
+        // Mock weights source with granite architecture metadata
+        struct MockGraniteWeights;
+        impl WeightsSource for MockGraniteWeights {
+            fn keys(&self) -> Vec<String> {
+                vec!["blk.0.attn_q.weight".into(), "token_embd.weight".into()]
+            }
+            fn metadata(&self, key: &str) -> Option<String> {
+                if key == "general.architecture" {
+                    Some("granite".to_string())
+                } else {
+                    None
+                }
+            }
+            fn metadata_usize(&self, key: &str) -> Option<usize> {
+                match key {
+                    "granite.block_count" => Some(64),
+                    "granite.embedding_length" => Some(4096),
+                    "granite.vocab_size" => Some(100352),
+                    "granite.feed_forward_length" => Some(32768),
+                    "granite.attention.head_count" => Some(32),
+                    "granite.attention.head_count_kv" => Some(8),
+                    "granite.attention.key_length" => Some(128),
+                    _ => None,
+                }
+            }
+            fn metadata_f64(&self, key: &str) -> Option<f64> {
+                match key {
+                    "granite.attention.scale" => Some(0.0078125),
+                    "granite.rope.freq_base" => Some(50000000.0),
+                    "granite.attention.layer_norm_rms_epsilon" => Some(1e-5),
+                    _ => None,
+                }
+            }
+            fn get_tensor(&self, _: &str, _: &Device, _: DType) -> Result<Tensor> {
+                unreachable!()
+            }
+            fn contains(&self, key: &str) -> bool {
+                self.keys().iter().any(|k| k == key)
+            }
+            fn raw_info(&self, name: &str) -> Option<(safetensors::Dtype, Vec<usize>)> {
+                if name == "token_embd.weight" {
+                    Some((safetensors::Dtype::F16, vec![4096, 100352]))
+                } else {
+                    None
+                }
+            }
+        }
+
+        let mock = MockGraniteWeights;
+        let cfg = CausalLMConfig::from_weights(&mock).expect("Failed to build CausalLMConfig");
+        assert_eq!(cfg.num_attention_heads, 32);
+        assert_eq!(cfg.num_key_value_heads, 8);
+        assert_eq!(cfg.head_dim, 128);
+        assert_eq!(cfg.attention_scale, Some(0.0078125));
+    }
+
+    #[test]
+    fn test_granite_prompt_template() {
+        struct MockGranitePromptModel {
+            arch: String,
+        }
+        impl MockGranitePromptModel {
+            fn arch_name(&self) -> String {
+                self.arch.clone()
+            }
+            fn format_prompt(&self, prompt: &str) -> String {
+                if prompt.contains("<|im_sep|>") || prompt.contains("[INST]") || prompt.contains("<|im_start|>") {
+                    return prompt.to_string();
+                }
+                let arch = self.arch_name();
+                if arch == "granite" {
+                    return format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n", prompt.trim());
+                }
+                prompt.to_string()
+            }
+        }
+
+        let model = MockGranitePromptModel { arch: "granite".to_string() };
+        let formatted = model.format_prompt("Explain Rust");
+        assert_eq!(
+            formatted,
+            "<|im_start|>user\nExplain Rust<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        );
+    }
+
+    #[test]
+    fn test_granite_finite_logits() -> Result<()> {
+        let device = Device::Cpu;
+        let b = 1;
+        let h = 32;
+        let s = 4;
+        let d = 128;
+        let q = Tensor::randn(0.0f32, 1.0f32, (b, h, s, d), &device).map_err(LuminaError::Candle)?;
+        let k = Tensor::randn(0.0f32, 1.0f32, (b, h, s, d), &device).map_err(LuminaError::Candle)?;
+        let k_t = k.transpose(2, 3).map_err(LuminaError::Candle)?;
+        let scale = 0.0078125f64; // Granite scale = 1.0 / 128.0
+        let att = (q.matmul(&k_t)? * scale).map_err(LuminaError::Candle)?;
+        let probs = candle_nn::ops::softmax_last_dim(&att).map_err(LuminaError::Candle)?;
+        let probs_vec: Vec<f32> = probs.flatten_all().map_err(LuminaError::Candle)?.to_vec1().map_err(LuminaError::Candle)?;
+        assert!(probs_vec.iter().all(|x| x.is_finite() && !x.is_nan()));
+        Ok(())
     }
 }
