@@ -1162,6 +1162,9 @@ impl CausalLMPipeline {
             generated_tokens.push(next_token);
             all_context_tokens.push(next_token);
 
+            let piece_str = self.tokenizer.as_ref().and_then(|t| t.decode(&[next_token], false).ok()).unwrap_or_default();
+            eprintln!("✨ [Step {}] pos={} generated token {} ({:?})", generated_tokens.len(), pos, next_token, piece_str);
+
             if let Some(ref mut cb) = on_token {
                 if let Some(tok_ref) = self.tokenizer.as_ref() {
                     if let Ok(piece) = tok_ref.decode(&[next_token], false) {
