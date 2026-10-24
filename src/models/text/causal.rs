@@ -1545,12 +1545,14 @@ impl CausalLMPipeline {
             }
             hidden = self.forward_layer(layer_idx, &hidden, pos, seq_len)?;
 
-            // Memory hygiene: evict heavy transient layer weights from cache to prevent VRAM OOM on multi-layer / MoE models
-            let prefix_blk = format!("blk.{layer_idx}.");
-            let prefix_model = format!("model.layers.{layer_idx}.");
-            let prefix_layers = format!("layers.{layer_idx}.");
-            self.weights_cache.retain(|k, _| !k.starts_with(&prefix_blk) && !k.starts_with(&prefix_model) && !k.starts_with(&prefix_layers));
-            self.linear_cache.retain(|k, _| !k.starts_with(&prefix_blk) && !k.starts_with(&prefix_model) && !k.starts_with(&prefix_layers));
+            // Memory hygiene: only evict transient layer weights if partial layer offloading is active (saving host/device RAM)
+            if self.n_gpu_layers.is_some() {
+                let prefix_blk = format!("blk.{layer_idx}.");
+                let prefix_model = format!("model.layers.{layer_idx}.");
+                let prefix_layers = format!("layers.{layer_idx}.");
+                self.weights_cache.retain(|k, _| !k.starts_with(&prefix_blk) && !k.starts_with(&prefix_model) && !k.starts_with(&prefix_layers));
+                self.linear_cache.retain(|k, _| !k.starts_with(&prefix_blk) && !k.starts_with(&prefix_model) && !k.starts_with(&prefix_layers));
+            }
 
             if pos == 0 && (layer_idx == 0 || layer_idx == 1 || layer_idx == self.config.num_hidden_layers - 1) {
                 let h_flat = hidden.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
