@@ -250,6 +250,12 @@ pub fn tiled_scaled_dot_product_attention(
                     let v_ptr = v_rocm.slice.as_ptr();
                     let out_ptr = out_rocm.slice.as_ptr() as *mut std::ffi::c_void;
 
+                    let stream = match q.device() {
+                        candle_core::Device::Rocm(dev) => {
+                            dev.stream().as_raw() as *mut std::ffi::c_void
+                        }
+                        _ => std::ptr::null_mut(),
+                    };
                     unsafe {
                         launch_hip_fused_sdpa_f16(
                             q_ptr,
@@ -262,7 +268,7 @@ pub fn tiled_scaled_dot_product_attention(
                             l_k as i32,
                             d as i32,
                             scale as f32,
-                            std::ptr::null_mut(),
+                            stream,
                         );
                     }
                     true

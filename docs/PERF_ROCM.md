@@ -61,6 +61,13 @@ Reference (same GGUF, same GPU, 256 tok, via llama.cpp/ollama): **Qwen 29.4**,
 - **GPU sampling with `sort_last_dim`**: −7% on Gemma. Candle only exposes a
   full sort (O(V log V)); the CPU path is an O(V) `select_nth` plus a 1 MB D2H.
   A true O(V) top-k GPU kernel would be needed (kernel work).
+- **Fused HIP SDPA for decode**: 4–8× *slower* than matmul+softmax
+  (0.15–0.59 ms vs 0.04–0.08 ms per layer at `Lk=256/1024`, `d=128/256`).
+  `src/kernels/fused_sdpa_rdna4.hip` runs one block per (query, head) and
+  loops serially over the KV; with one query at decode, occupancy is far too
+  low. Rejected for decode. (The launch was also on the null stream; it now
+  uses the device stream. The kernel remains useful where it avoids
+  materialising a large `[Lq, Lk]` matrix, i.e. long-context prefill.)
 
 ## Roofline / where the time goes
 
