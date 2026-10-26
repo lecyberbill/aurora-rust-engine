@@ -119,4 +119,4 @@ CUDA reference (RTX 4070 Ti 12 GB, from earlier runs): TinyLlama-1.1B **5.4 tok/
 - **ROCm indexed-MoE** supports q2k/q3k/q4k/q5k/q6k/q8_0 only; Q5_0/Q4_0 expert stacks fall back to the dense path (or are rejected for memory reasons).
 - **Qwen 3.5/3.8 GDN** is an approximation (EMA), not the exact DeltaNet recurrence.
 - **WMMA INT4** for `gfx1201` exists as the standalone `test_wmma_q4k` binary but is not wired into the model path.
-- The **HIP-graph** decode runner needs the local Candle fork patch (`copy2`/`copy_from_host_u32`) and the `hip-graph` feature; the default ROCm build does not require it. It covers Gemma 3 and Qwen 3.5/3.8 (attention KV + GDN conv/recurrent state preallocated and updated in place).
+- The **HIP-graph** decode runner needs the local Candle fork patch (`copy2`/`copy_from_host_u32`) and the `hip-graph` feature; the default ROCm build does not require it. Enable with `cargo build --features rocm,hip-graph` and run with `AURORA_HIP_GRAPH=1`. It covers Gemma 3 and Qwen 3.5/3.8 (attention KV + GDN conv/recurrent state preallocated and updated in place).

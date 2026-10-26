@@ -48,7 +48,7 @@ The full model → status table (validated parity / approximations / abandoned, 
 - **Speech/TTS**: Whisper, Moonshine; Parler-TTS, Kokoro, ChatTTS.
 - **Audio**: ACE-Step 1.5 (cover/repaint/extract/lego/complete), Stable Audio Open, MusicGen.
 - **Memory**: tiled attention, bounded tiling for upscalers, and sequential block streaming for large MMDiT models.
-- **Performance**: fused ROCm kernels (RMSNorm/softmax/RoPE/sigmoid); opt-in HIP-graph decode (`--features hip-graph`).
+- **Performance**: fused ROCm kernels (RMSNorm/softmax/RoPE/sigmoid); opt-in HIP-graph decode (`--features hip-graph` + `AURORA_HIP_GRAPH=1`).
 
 For per-module details and validation numbers, see **[SUPPORTED.md](SUPPORTED.md)** and **[USER_GUIDE.md](USER_GUIDE.md)**.
 
