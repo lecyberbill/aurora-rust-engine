@@ -289,7 +289,7 @@ impl FullAttentionWeights {
         };
 
         // Update the KV cache: static graph cache (full max_len) or growing cache.
-        let (k_rep, v_rep, static_on) = if let (Some(kt), Some(vv)) = (&self.static_k, &self.static_v) {
+        let (k_cache, v_rep, static_on, flash_ctx) = if let (Some(kt), Some(vv)) = (&self.static_k, &self.static_v) {
             let (b_, _, s_, _) = k.dims4()?;
             let (kr, vr) = if n_rep > 1 {
                 let rk = k
@@ -307,7 +307,7 @@ impl FullAttentionWeights {
             let idx = self.static_idx.as_ref().unwrap();
             kt.scatter_set(idx, &kr, 2)?;
             vv.scatter_set(idx, &vr, 2)?;
-            (kt.clone(), vv.clone(), true)
+            (kt.clone(), vv.clone(), true, None)
         } else {
             let (k_all, v_all) = match &self.kv_cache {
                 Some((prev_k, prev_v)) => (
@@ -317,44 +317,58 @@ impl FullAttentionWeights {
                 None => (k, v),
             };
             self.kv_cache = Some((k_all.clone(), v_all.clone()));
-            (repeat_kv(k_all, n_rep)?, repeat_kv(v_all, n_rep)?, false)
+            let scale = 1.0 / (self.head_dim as f64).sqrt();
+            let flash = if l == 1 {
+                crate::device::flash_decode(&q, &k_all, &v_all, scale)?
+            } else {
+                None
+            };
+            if flash.is_some() {
+                (k_all, v_all, false, flash)
+            } else {
+                (repeat_kv(k_all, n_rep)?, repeat_kv(v_all, n_rep)?, false, None)
+            }
         };
 
-        let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let q_cont = q.contiguous()?;
-        let k_t_cont = k_rep.transpose(2, 3)?.contiguous()?;
-        let scores = (q_cont.matmul(&k_t_cont)? * scale)?;
+        let ctx = if let Some(f) = flash_ctx {
+            f
+        } else {
+            let scale = 1.0 / (self.head_dim as f64).sqrt();
+            let q_cont = q.contiguous()?;
+            let k_t_cont = k_cache.transpose(2, 3)?.contiguous()?;
+            let scores = (q_cont.matmul(&k_t_cont)? * scale)?;
 
-        // Mask: static row for the graph path, materialised causal mask for prefill.
-        let (_b, _h, q_len, kv_len) = scores.dims4()?;
-        let scores = if static_on {
-            if let Some(m) = &self.static_mask {
-                scores.broadcast_add(m)?
+            // Mask: static row for the graph path, materialised causal mask for prefill.
+            let (_b, _h, q_len, kv_len) = scores.dims4()?;
+            let scores = if static_on {
+                if let Some(m) = &self.static_mask {
+                    scores.broadcast_add(m)?
+                } else {
+                    scores
+                }
+            } else if q_len > 1 {
+                let mask: Vec<f32> = (0..q_len)
+                    .flat_map(|i| {
+                        (0..kv_len).map(move |j| {
+                            if j > i + offset {
+                                f32::NEG_INFINITY
+                            } else {
+                                0f32
+                            }
+                        })
+                    })
+                    .collect();
+                let mask = Tensor::from_slice(&mask, (1, 1, q_len, kv_len), x.device())?;
+                scores.broadcast_add(&mask.to_dtype(scores.dtype())?)?
             } else {
                 scores
-            }
-        } else if q_len > 1 {
-            let mask: Vec<f32> = (0..q_len)
-                .flat_map(|i| {
-                    (0..kv_len).map(move |j| {
-                        if j > i + offset {
-                            f32::NEG_INFINITY
-                        } else {
-                            0f32
-                        }
-                    })
-                })
-                .collect();
-            let mask = Tensor::from_slice(&mask, (1, 1, q_len, kv_len), x.device())?;
-            scores.broadcast_add(&mask.to_dtype(scores.dtype())?)?
-        } else {
-            scores
-        };
+            };
 
-        let probs = softmax_last_dim(&scores)?;
-        let probs_cont = probs.contiguous()?;
-        let v_cont = v_rep.contiguous()?;
-        let ctx = probs_cont.matmul(&v_cont)?; // [B, num_heads, L, head_dim]
+            let probs = softmax_last_dim(&scores)?;
+            let probs_cont = probs.contiguous()?;
+            let v_cont = v_rep.contiguous()?;
+            probs_cont.matmul(&v_cont)?
+        };
 
         // Reshape ctx to [B, L, num_heads, head_dim]
         let ctx = ctx.transpose(1, 2)?.contiguous()?;

@@ -30,11 +30,13 @@ used only as an external measuring stick, never called by the engine.
 | Fused Candle ROCm ops (`rms_norm`/`softmax`/`rope`/`sigmoid`/`silu`) | ~12.6 tok/s | ~35.7 tok/s | kept (default) |
 | Per-shape mmvq/dmmv autotune (fork) | **16.4 → 18.1** (+10%) | **36.2 → 38.0** (+5%) | kept (fork, default) |
 | HIP-graph decode (`hip-graph` feature) | 12.6 → 12.7 (neutral) | **35.7 → 38.5** (+8%) | opt-in |
+| Split-K flash-decoding attention (repo) | **12.6 → 16.8** (+33%) | **35.7 → 41.4** (+16%) | kept (default) |
 | F16 activations | — | 38.4 → 33.0 (**−14%**) | rejected |
 | GPU sampling via `sort_last_dim` | — | 35.3 → 32.9 (**−7%**) | rejected |
 
 Reference (same GGUF, same GPU, 256 tok, via llama.cpp/ollama): **Qwen 29.4**,
-**Gemma 62.7** tok/s. The remaining gap is ~1.6×.
+**Gemma 62.7** tok/s. After the flash kernel the remaining gap is ~1.5× (Gemma)
+to ~1.75× (Qwen).
 
 ## What helped
 
@@ -49,7 +51,14 @@ Reference (same GGUF, same GPU, 256 tok, via llama.cpp/ollama): **Qwen 29.4**,
    `lm_head` (`Q6K 248320×5120`) and most Gemma shapes prefer `dmmv`. The
    autotune times both once per `(dtype, n, k)` at first decode and caches the
    winner. `CANDLE_ROCM_AUTOTUNE=0` disables it.
-3. **HIP-graph decode** for attention-only models: +8% on Gemma (257 tok).
+3. **Split-K flash-decoding attention** (`src/kernels/flash_decode_rdna4.hip`,
+   repo-level, no fork needed). The old decode path repeated K/V to every query
+   head (`n_rep`× copy, ×6 for Qwen), transposed the whole K cache and ran two
+   matmuls + softmax. The kernel reads the **unique** GQA K/V once, computes
+   online-softmax partials per KV chunk (one warp per head/chunk) and combines
+   them: 4.8× faster per layer (0.15 → 0.03 ms). Default on ROCm F32 `D=256`;
+   `AURORA_NO_FLASH=1` reverts to the portable path.
+4. **HIP-graph decode** for attention-only models: +8% on Gemma (257 tok).
    Neutral on Qwen 3.5/3.8 because the graph attends over the full `max_len`,
    and that extra attention offsets the launch-gap recovery.
 
@@ -61,13 +70,13 @@ Reference (same GGUF, same GPU, 256 tok, via llama.cpp/ollama): **Qwen 29.4**,
 - **GPU sampling with `sort_last_dim`**: −7% on Gemma. Candle only exposes a
   full sort (O(V log V)); the CPU path is an O(V) `select_nth` plus a 1 MB D2H.
   A true O(V) top-k GPU kernel would be needed (kernel work).
-- **Fused HIP SDPA for decode**: 4–8× *slower* than matmul+softmax
-  (0.15–0.59 ms vs 0.04–0.08 ms per layer at `Lk=256/1024`, `d=128/256`).
-  `src/kernels/fused_sdpa_rdna4.hip` runs one block per (query, head) and
-  loops serially over the KV; with one query at decode, occupancy is far too
-  low. Rejected for decode. (The launch was also on the null stream; it now
-  uses the device stream. The kernel remains useful where it avoids
-  materialising a large `[Lq, Lk]` matrix, i.e. long-context prefill.)
+- **Fused HIP SDPA for decode**: the old one-block-per-head kernel was 4–8×
+  *slower* than matmul+softmax (0.15–0.59 ms vs 0.04–0.08 ms per layer at
+  `Lk=256/1024`, `d=128/256`); it loops serially over the KV with one query.
+  Rejected for decode (superseded by the split-K kernel above, which keeps the
+  same fused idea but splits the KV across blocks). The launch was also on the
+  null stream; it now uses the device stream. The old kernel remains useful for
+  long-context prefill where it avoids materialising a large `[Lq, Lk]`.
 - **Bucketed HIP graphs**: rejected. Candle's allocator is shared, so a second
   capture reuses the first graph's intermediate buffers (which that graph still
   writes to on replay) → corrupted output / HIP errors with several buckets.

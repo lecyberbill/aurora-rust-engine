@@ -236,7 +236,7 @@ impl LayerWeights {
         };
 
         // K/V: static graph cache (full max_len) or the growing cache.
-        let (k_cache, v, static_on) = if let (Some(kt), Some(vv)) = (&self.static_k, &self.static_v) {
+        let (k_cache, v, static_on, flash_ctx) = if let (Some(kt), Some(vv)) = (&self.static_k, &self.static_v) {
             let n_rep = self.n_head / self.n_kv_head;
             let (kr, vr) = if n_rep > 1 {
                 let rk = k
@@ -254,7 +254,7 @@ impl LayerWeights {
             let idx = self.static_idx_v.as_ref().unwrap();
             kt.scatter_set(idx, &kr, 2)?;
             vv.scatter_set(idx, &vr, 2)?;
-            (kt.clone(), vv.clone(), true)
+            (kt.clone(), vv.clone(), true, None)
         } else {
             let (k, v) = match &self.kv_cache {
                 None => (k, v),
@@ -270,26 +270,39 @@ impl LayerWeights {
                 }
             };
             self.kv_cache = Some((k.clone(), v.clone()));
-            let k = repeat_kv(k, self.n_head / self.n_kv_head)?;
-            let v = repeat_kv(v, self.n_head / self.n_kv_head)?;
-            (k, v, false)
+            let flash = if seq_len == 1 {
+                crate::device::flash_decode(&q, &k, &v, self.attention_scale)?
+            } else {
+                None
+            };
+            if flash.is_some() {
+                (k, v, false, flash)
+            } else {
+                let k = repeat_kv(k, self.n_head / self.n_kv_head)?;
+                let v = repeat_kv(v, self.n_head / self.n_kv_head)?;
+                (k, v, false, None)
+            }
         };
 
-        // Scaled Dot-Product Attention
-        let k_t = k_cache.transpose(2, 3)?.contiguous()?;
-        let scale = self.attention_scale;
-        let mut attn_weights = (q.matmul(&k_t)? * scale)?;
+        // Scaled Dot-Product Attention (or the split-K flash kernel for decode).
+        let attn_output = if let Some(ctx) = flash_ctx {
+            ctx
+        } else {
+            let k_t = k_cache.transpose(2, 3)?.contiguous()?;
+            let scale = self.attention_scale;
+            let mut attn_weights = (q.matmul(&k_t)? * scale)?;
 
-        if static_on {
-            if let Some(m) = &self.static_mask {
-                attn_weights = attn_weights.broadcast_add(m)?;
+            if static_on {
+                if let Some(m) = &self.static_mask {
+                    attn_weights = attn_weights.broadcast_add(m)?;
+                }
+            } else if let Some(mask) = mask {
+                attn_weights = attn_weights.broadcast_add(mask)?;
             }
-        } else if let Some(mask) = mask {
-            attn_weights = attn_weights.broadcast_add(mask)?;
-        }
 
-        let attn_weights = crate::device::softmax_last_dim(&attn_weights)?;
-        let attn_output = attn_weights.matmul(&v)?;
+            let attn_weights = crate::device::softmax_last_dim(&attn_weights)?;
+            attn_weights.matmul(&v)?
+        };
 
         let attn_output = attn_output
             .transpose(1, 2)?

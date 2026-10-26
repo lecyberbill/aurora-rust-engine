@@ -319,4 +319,114 @@ pub fn tiled_scaled_dot_product_attention(
     out_f32.to_dtype(orig_dtype)
 }
 
+/// Split-K flash-decoding attention for a single query per head (ROCm, F32, D=256).
+///
+/// `k`/`v` are the *unique* GQA tensors `[B, Hkv, L, D]`; head `h` reads kv head
+/// `h / (H / Hkv)`, so no repeat/transpose copy is needed. Returns `None` when
+/// the shape or backend is unsupported so the caller keeps the portable path.
+#[cfg(feature = "rocm")]
+pub fn flash_decode(
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    scale: f64,
+) -> candle_core::Result<Option<candle_core::Tensor>> {
+    use candle_core::rocm_backend::RocmStorageSlice;
+    use candle_core::{DType, Device, Storage};
+
+    extern "C" {
+        #[allow(clippy::too_many_arguments)]
+        fn launch_flash_decode_f32(
+            q: *const f32,
+            k: *const f32,
+            v: *const f32,
+            pm: *mut f32,
+            pl: *mut f32,
+            pacc: *mut f32,
+            out: *mut f32,
+            b: i32,
+            h: i32,
+            hkv: i32,
+            l: i32,
+            nc: i32,
+            ck: i32,
+            scale: f32,
+            stream: *mut std::ffi::c_void,
+        );
+    }
+
+    if std::env::var_os("AURORA_NO_FLASH").is_some() {
+        return Ok(None);
+    }
+    if !q.device().is_rocm() || q.dtype() != DType::F32 {
+        return Ok(None);
+    }
+    let (b, h, lq, d) = q.dims4()?;
+    let (_bk, hkv, l, _dk) = k.dims4()?;
+    if lq != 1 || d != 256 || h == 0 || hkv == 0 || h % hkv != 0 {
+        return Ok(None);
+    }
+
+    fn ptr_of(t: &candle_core::Tensor) -> candle_core::Result<*mut std::ffi::c_void> {
+        let (st, layout) = t.storage_and_layout();
+        let off = layout.start_offset();
+        match &*st {
+            Storage::Rocm(r) => match &r.slice {
+                RocmStorageSlice::F32(m) => Ok(unsafe { m.ptr_at(off) }),
+                _ => candle_core::bail!("flash: not f32"),
+            },
+            _ => candle_core::bail!("flash: not rocm"),
+        }
+    }
+
+    let ck = 64usize;
+    let nc = l.div_ceil(ck);
+    let dev = q.device().clone();
+    // The KV cache can hand back a non-contiguous `v` (it is a transposed view
+    // when the prompt prefill stored it). The flat kernel needs packed inputs.
+    let q = q.contiguous()?;
+    let k = k.contiguous()?;
+    let v = v.contiguous()?;
+    let pm = candle_core::Tensor::zeros((b * h * nc,), DType::F32, &dev)?;
+    let pl = candle_core::Tensor::zeros((b * h * nc,), DType::F32, &dev)?;
+    let pacc = candle_core::Tensor::zeros((b * h * nc, d), DType::F32, &dev)?;
+    let out = candle_core::Tensor::zeros((b * h, d), DType::F32, &dev)?;
+
+    let stream = match &dev {
+        Device::Rocm(d) => d.stream().as_raw() as *mut std::ffi::c_void,
+        _ => return Ok(None),
+    };
+
+    unsafe {
+        launch_flash_decode_f32(
+            ptr_of(&q)? as *const f32,
+            ptr_of(&k)? as *const f32,
+            ptr_of(&v)? as *const f32,
+            ptr_of(&pm)? as *mut f32,
+            ptr_of(&pl)? as *mut f32,
+            ptr_of(&pacc)? as *mut f32,
+            ptr_of(&out)? as *mut f32,
+            b as i32,
+            h as i32,
+            hkv as i32,
+            l as i32,
+            nc as i32,
+            ck as i32,
+            scale as f32,
+            stream,
+        );
+    }
+    Ok(Some(out.reshape((b, h, 1, d))?))
+}
+
+#[cfg(not(feature = "rocm"))]
+pub fn flash_decode(
+    _q: &candle_core::Tensor,
+    _k: &candle_core::Tensor,
+    _v: &candle_core::Tensor,
+    _scale: f64,
+) -> candle_core::Result<Option<candle_core::Tensor>> {
+    Ok(None)
+}
+
 

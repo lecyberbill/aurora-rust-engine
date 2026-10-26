@@ -93,10 +93,8 @@ Protocol: batch size 1, single request, **load time excluded**, `AURORA_IGNORE_E
 
 | Model | File | Size | Load | Decode | Notes |
 |---|---|---:|---:|---:|---|
-| Qwen 3.8 27B | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | 71 s | **12.6 tok/s** (256 tok) | Hybrid GDN — approximate recurrence |
-| Qwen 3.8 27B + HIP graph | same | 17.44 GB | 71 s | **12.7 tok/s** (256 tok, ≈neutral) | full-length attention offsets the launch gain |
-| Gemma 3 12B | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | ~4 s | **35.7 tok/s** (256 tok) | Default backend |
-| Gemma 3 12B + HIP graph | same | 7.30 GB | ~4 s | **38.5 tok/s** (256 tok, +8%) | `--features hip-graph` (opt-in) |
+| Qwen 3.8 27B | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | 71 s | **16.8 tok/s** (256 tok) | Hybrid GDN; split-K flash attention |
+| Gemma 3 12B | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | ~4 s | **41.4 tok/s** (256 tok) | split-K flash attention |
 | Gemma 4 31B (text) | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | 7.9 s | 11.3 tok/s | Earlier run |
 | Gemma 4 31B (VLM) | + `mmproj-gemma-4-31b-BF16.gguf` | 18.82 + 1.2 GB | 6.3 s + 0.9 s | 11.5 tok/s | OCR/VQA, 266 visual tokens |
 | Phi-4 Reasoning Plus 14B | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | lazy | **22.9 tok/s** (256 tok) | Native chat template |
@@ -105,7 +103,7 @@ Protocol: batch size 1, single request, **load time excluded**, `AURORA_IGNORE_E
 
 CUDA reference (RTX 4070 Ti 12 GB, from earlier runs): TinyLlama-1.1B **5.4 tok/s**, Moonshine Tiny **1.6 s**, Real-ESRGAN x4 **5.5 s**, FLUX.2-Klein-4B **25.9 s**.
 
-> With the server-local Candle fork autotune (patches in [`docs/patches/`](docs/patches/)), Qwen 3.8 reaches **18.2 tok/s** and Gemma 3 12B **~38 tok/s**. See [`docs/PERF_ROCM.md`](docs/PERF_ROCM.md) for full measurements, rejected experiments (F16 activations, GPU sampling) and the roofline analysis.
+> The split-K flash-decoding kernel is the default on ROCm F32 `D=256` (`AURORA_NO_FLASH=1` reverts to the portable path). The server-local Candle fork autotune (patches in [`docs/patches/`](docs/patches/)) adds ~5–10% on top, and the opt-in HIP graph adds ~8% on Gemma. See [`docs/PERF_ROCM.md`](docs/PERF_ROCM.md) for full measurements, rejected experiments (F16 activations, GPU sampling, bucketed graphs) and the roofline analysis.
 
 ---
 
