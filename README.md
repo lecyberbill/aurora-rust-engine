@@ -17,6 +17,7 @@
 👉 **Looking for full documentation? See the complete [User & Developer Guide (USER_GUIDE.md)](USER_GUIDE.md)** for SDK examples, REST API payloads, scheduler configurations, and VRAM optimization tips.  
 👉 **Running on AMD GPUs (e.g. `gfx1201` / RDNA 3.5 / RDNA 4)? See the [AMD ROCm 10.0 & Candle Setup Guide (docs/ROCM_SETUP.md)](docs/ROCM_SETUP.md)**.
 👉 **Wondering what actually works? See [SUPPORTED.md](SUPPORTED.md)** for the model → status table, validation metrics and known limitations.
+👉 **Tuning on AMD ROCm? See the [ROCm performance notes (docs/PERF_ROCM.md)](docs/PERF_ROCM.md)** for the measured levers, rejected experiments, the fork patches and the roofline analysis.
 
 It runs image, text, speech and music models in pure Rust, with CUDA and ROCm/HIP backends. Large diffusion models can be streamed block-by-block, and LoRA weights are merged in memory.
 

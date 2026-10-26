@@ -1,0 +1,250 @@
+From a928b84a92860a6b377236dcf9c04e948a350f31 Mon Sep 17 00:00:00 2001
+From: Aurora AI Dev <ai-dev@aurora-svc.local>
+Date: Sat, 17 Oct 2026 13:41:05 +0000
+Subject: [PATCH 1/2] fix(rocm): handle non-contiguous matmul operands and
+ mixed-dtype rms/layer-norm
+
+- Automatically materialize contiguous view on MatMulNonContiguous in rocm_backend::gemm
+- Align weights dtype in rms_norm and layer_norm for mixed-precision inference (F32 weights on F16/BF16 activations)
+- Add regression tests for transposed attention matmul and mixed-dtype rms_norm
+---
+ candle-core/src/rocm_backend/gemm.rs          | 92 +++++++++++++++++--
+ .../tests/non_contiguous_matmul_test.rs       | 28 ++++++
+ candle-nn/src/ops.rs                          | 21 ++++-
+ .../tests/rmsnorm_dtype_mismatch_test.rs      | 27 ++++++
+ 4 files changed, 157 insertions(+), 11 deletions(-)
+ create mode 100644 candle-core/tests/non_contiguous_matmul_test.rs
+ create mode 100644 candle-nn/tests/rmsnorm_dtype_mismatch_test.rs
+
+diff --git a/candle-core/src/rocm_backend/gemm.rs b/candle-core/src/rocm_backend/gemm.rs
+index 224db957..8b568faa 100644
+--- a/candle-core/src/rocm_backend/gemm.rs
++++ b/candle-core/src/rocm_backend/gemm.rs
+@@ -321,21 +321,38 @@ macro_rules! dispatch_matmul {
+         let lhs_ptr = unsafe { $self.slice.offset_ptr($lhs_l.start_offset()) };
+         let rhs_ptr = unsafe { $rhs.slice.offset_ptr($rhs_l.start_offset()) };
+         let device = $dev.clone();
+-        let slice = match (&$self.slice, &$rhs.slice) {
++        let slice_res: std::result::Result<RocmStorageSlice, crate::Error> = match (&$self.slice, &$rhs.slice) {
+             $(
+                 (RocmStorageSlice::$variant(_), RocmStorageSlice::$variant(_)) => {
+-                    let cfg = $cfg_fn($alpha, $zero, ($b, $m, $n, $k), $lhs_l, $rhs_l)?;
+-                    let out = $dev.alloc::<$rust_ty>(elem_count)?;
+-                    unsafe { $gemm_fn(&$dev.blas, cfg, rhs_ptr, lhs_ptr, out.as_ptr() $(, $ex_datatype)?)?; }
+-                    RocmStorageSlice::$variant(out)
++                    match $cfg_fn($alpha, $zero, ($b, $m, $n, $k), $lhs_l, $rhs_l) {
++                        Ok(cfg) => {
++                            let out = $dev.alloc::<$rust_ty>(elem_count)?;
++                            unsafe { $gemm_fn(&$dev.blas, cfg, rhs_ptr, lhs_ptr, out.as_ptr() $(, $ex_datatype)?)?; }
++                            Ok(RocmStorageSlice::$variant(out))
++                        }
++                        Err(e) => Err(crate::Error::Rocm(Box::new(e)).bt()),
++                    }
+                 }
+             )+
+-            _ => return Err(RocmError::Internal("dtype mismatch in matmul".into()).into()),
++            _ => Err(RocmError::Internal("dtype mismatch in matmul".into()).into()),
+         };
+-        Ok(RocmStorage { slice, device })
++        slice_res.map(|slice| RocmStorage { slice, device })
+     }};
+ }
+ 
++fn make_contiguous_storage(s: &RocmStorage, l: &Layout) -> Result<(RocmStorage, Layout)> {
++    use crate::backend::{BackendDevice, BackendStorage};
++    if l.is_contiguous() {
++        let storage = s.try_clone(l)?;
++        Ok((storage, l.clone()))
++    } else {
++        let mut dst = unsafe { s.device.alloc_uninit(l.shape(), s.dtype())? };
++        s.copy_strided_src(&mut dst, 0, l)?;
++        let new_l = Layout::contiguous(l.shape());
++        Ok((dst, new_l))
++    }
++}
++
+ pub(super) fn matmul(
+     lhs: &RocmStorage,
+     rhs: &RocmStorage,
+@@ -345,7 +362,7 @@ pub(super) fn matmul(
+ ) -> Result<RocmStorage> {
+     use rocm_rs::rocblas::ffi;
+     lhs.device.bind()?;
+-    dispatch_matmul!(
++    let res = dispatch_matmul!(
+         lhs,
+         rhs,
+         b,
+@@ -375,5 +392,62 @@ pub(super) fn matmul(
+             gemm_strided_batched_ex,
+             ffi::rocblas_datatype__rocblas_datatype_bf16_r
+         ),
+-    )
++    );
++
++    match res {
++        Ok(out) => Ok(out),
++        Err(e) => {
++            fn check_non_contig(err: &crate::Error) -> bool {
++                match err {
++                    crate::Error::Rocm(re) => {
++                        re.downcast_ref::<RocmError>().map_or(false, |e| {
++                            matches!(e, RocmError::MatMulNonContiguous { .. })
++                        })
++                    }
++                    crate::Error::WithBacktrace { inner, .. } => check_non_contig(inner),
++                    crate::Error::Context { inner, .. } => check_non_contig(inner),
++                    crate::Error::WithPath { inner, .. } => check_non_contig(inner),
++                    _ => false,
++                }
++            }
++            let is_non_contig = check_non_contig(&e);
++            if is_non_contig {
++                let (lhs_c, lhs_cl) = make_contiguous_storage(lhs, lhs_l)?;
++                let (rhs_c, rhs_cl) = make_contiguous_storage(rhs, rhs_l)?;
++                dispatch_matmul!(
++                    &lhs_c,
++                    &rhs_c,
++                    b,
++                    m,
++                    n,
++                    k,
++                    &lhs_cl,
++                    &rhs_cl,
++                    &lhs.device,
++                    (F32, f32, 1.0f32, 0.0f32, gemm_config, gemm_strided_batched),
++                    (F64, f64, 1.0f64, 0.0f64, gemm_config, gemm_strided_batched),
++                    (
++                        F16,
++                        f16,
++                        1.0f32,
++                        0.0f32,
++                        gemm_ex_config,
++                        gemm_strided_batched_ex,
++                        ffi::rocblas_datatype__rocblas_datatype_f16_r
++                    ),
++                    (
++                        BF16,
++                        bf16,
++                        1.0f32,
++                        0.0f32,
++                        gemm_ex_config,
++                        gemm_strided_batched_ex,
++                        ffi::rocblas_datatype__rocblas_datatype_bf16_r
++                    ),
++                )
++            } else {
++                Err(e)
++            }
++        }
++    }
+ }
+diff --git a/candle-core/tests/non_contiguous_matmul_test.rs b/candle-core/tests/non_contiguous_matmul_test.rs
+new file mode 100644
+index 00000000..06f856cc
+--- /dev/null
++++ b/candle-core/tests/non_contiguous_matmul_test.rs
+@@ -0,0 +1,28 @@
++use candle_core::{Device, Result, Tensor};
++
++#[test]
++fn test_rocm_matmul_transposed_attention() -> Result<()> {
++    if !candle_core::utils::rocm_is_available() {
++        return Ok(());
++    }
++    let dev = Device::new_rocm(0)?;
++
++    // Simulate multi-head attention shapes:
++    // Q: [1, 9, 32, 128] -> transposed to [1, 32, 9, 128] (non-contiguous)
++    // K: [1, 9, 32, 128] -> transposed to [1, 32, 9, 128] -> transposed to [1, 32, 128, 9] (non-contiguous)
++    let q = Tensor::randn(0.0f32, 1.0f32, (1, 9, 32, 128), &dev)?;
++    let k = Tensor::randn(0.0f32, 1.0f32, (1, 9, 32, 128), &dev)?;
++
++    let q_t = q.transpose(1, 2)?;
++    let k_t = k.transpose(1, 2)?.transpose(2, 3)?;
++
++    assert!(!q_t.is_contiguous(), "q_t must be non-contiguous");
++    assert!(!k_t.is_contiguous(), "k_t must be non-contiguous");
++
++    // This matmul on non-contiguous operands previously panicked with RocmError::MatMulNonContiguous
++    let att = q_t.matmul(&k_t)?;
++    assert_eq!(att.shape().dims(), &[1, 32, 9, 9]);
++
++    println!("SUCCESS: MatMul on non-contiguous transposed tensors succeeded on ROCm!");
++    Ok(())
++}
+diff --git a/candle-nn/src/ops.rs b/candle-nn/src/ops.rs
+index 2a3aa5a9..0d001e43 100644
+--- a/candle-nn/src/ops.rs
++++ b/candle-nn/src/ops.rs
+@@ -977,7 +977,13 @@ pub fn rms_norm(xs: &Tensor, alpha: &Tensor, eps: f32) -> Result<Tensor> {
+             alpha.shape()
+         )
+     }
+-    xs.apply_op2_no_bwd(alpha, &RmsNorm { eps })
++    // Transparently align weights dtype to operand dtype (e.g. F32 weight for F16/BF16 activations)
++    let alpha = if alpha.dtype() != xs.dtype() {
++        alpha.to_dtype(xs.dtype())?
++    } else {
++        alpha.clone()
++    };
++    xs.apply_op2_no_bwd(&alpha, &RmsNorm { eps })
+ }
+ 
+ #[derive(Debug, Clone)]
+@@ -1366,7 +1372,18 @@ pub fn layer_norm(xs: &Tensor, alpha: &Tensor, beta: &Tensor, eps: f32) -> Resul
+             beta.shape()
+         )
+     }
+-    xs.apply_op3_no_bwd(alpha, beta, &LayerNorm { eps })
++    // Transparently align weights dtype to operand dtype
++    let alpha = if alpha.dtype() != xs.dtype() {
++        alpha.to_dtype(xs.dtype())?
++    } else {
++        alpha.clone()
++    };
++    let beta = if beta.dtype() != xs.dtype() {
++        beta.to_dtype(xs.dtype())?
++    } else {
++        beta.clone()
++    };
++    xs.apply_op3_no_bwd(&alpha, &beta, &LayerNorm { eps })
+ }
+ 
+ // https://pytorch.org/docs/stable/generated/torch.nn.PixelShuffle.html
+diff --git a/candle-nn/tests/rmsnorm_dtype_mismatch_test.rs b/candle-nn/tests/rmsnorm_dtype_mismatch_test.rs
+new file mode 100644
+index 00000000..94787e71
+--- /dev/null
++++ b/candle-nn/tests/rmsnorm_dtype_mismatch_test.rs
+@@ -0,0 +1,27 @@
++use candle::{DType, Device, Result, Tensor};
++
++#[test]
++fn test_rmsnorm_mixed_dtype_rocm() -> Result<()> {
++    if !candle::utils::rocm_is_available() {
++        return Ok(());
++    }
++    let dev = Device::new_rocm(0)?;
++
++    // x is F16 (activation), alpha is F32 (layer_norm weight often stored in F32)
++    let x = Tensor::randn(0.0f32, 1.0f32, (1, 16, 128), &dev)?.to_dtype(DType::F16)?;
++    let alpha = Tensor::randn(0.0f32, 1.0f32, (128,), &dev)?.to_dtype(DType::F32)?;
++
++    // This now succeeds transparently on ROCm without panic or manual casts!
++    let out = candle_nn::ops::rms_norm(&x, &alpha, 1e-5)?;
++    println!("rms_norm mixed dtype returned dtype {:?}", out.dtype());
++    assert_eq!(out.dtype(), DType::F16);
++    assert_eq!(out.shape().dims(), &[1, 16, 128]);
++
++    // Also test BF16 + F32
++    let x_bf16 = Tensor::randn(0.0f32, 1.0f32, (1, 16, 128), &dev)?.to_dtype(DType::BF16)?;
++    let out_bf16 = candle_nn::ops::rms_norm(&x_bf16, &alpha, 1e-5)?;
++    assert_eq!(out_bf16.dtype(), DType::BF16);
++
++    println!("SUCCESS: Mixed dtype rms_norm works seamlessly on ROCm!");
++    Ok(())
++}
+-- 
+2.53.0
+

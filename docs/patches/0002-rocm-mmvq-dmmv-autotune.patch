@@ -1,0 +1,299 @@
+From 7e7ec1404a075f25f6ec48a5cd66aefe6b2cb1bc Mon Sep 17 00:00:00 2001
+From: Aurora AI Dev <ai-dev@aurora-svc.local>
+Date: Mon, 26 Oct 2026 16:42:29 +0000
+Subject: [PATCH 2/2] perf(rocm): per-shape mmvq/dmmv autotune for batch-1
+ decode
+
+---
+ candle-core/src/inplace.rs                 | 70 +++++++++++++++++++
+ candle-core/src/lib.rs                     |  1 +
+ candle-core/src/quantized/rocm.rs          | 81 +++++++++++++++++++++-
+ candle-core/src/quantized/rocm/autotune.rs | 35 ++++++++++
+ candle-core/src/quantized/rocm/mmvq.rs     |  5 +-
+ candle-core/src/quantized/rocm/q8_1.rs     |  9 +++
+ 6 files changed, 198 insertions(+), 3 deletions(-)
+ create mode 100644 candle-core/src/inplace.rs
+ create mode 100644 candle-core/src/quantized/rocm/autotune.rs
+
+diff --git a/candle-core/src/inplace.rs b/candle-core/src/inplace.rs
+new file mode 100644
+index 00000000..788fe344
+--- /dev/null
++++ b/candle-core/src/inplace.rs
+@@ -0,0 +1,70 @@
++//! In-place tensor updates used by the HIP graph decode runner.
++//!
++//! Graph replay bakes in every buffer address, so the per-token inputs (token
++//! embedding, RoPE cos/sin, attention mask, KV scatter index) have to be written
++//! into fixed device buffers instead of allocating fresh tensors.
++
++use crate::backend::BackendStorage;
++use crate::{DType, Result, Tensor};
++
++impl Tensor {
++    /// In-place host-to-device copy into a U32 tensor.
++    #[cfg(feature = "rocm")]
++    pub fn copy_from_host_u32(&self, data: &[u32]) -> Result<()> {
++        if self.dtype() != DType::U32 {
++            crate::bail!(
++                "copy_from_host_u32: tensor is {:?}, expected U32",
++                self.dtype()
++            );
++        }
++        if data.len() != self.elem_count() {
++            crate::bail!(
++                "copy_from_host_u32: {} values for {} elements",
++                data.len(),
++                self.elem_count()
++            );
++        }
++        let (mut storage, _layout) = self.storage_mut_and_layout();
++        match &mut *storage {
++            crate::Storage::Rocm(s) => match &mut s.slice {
++                crate::rocm_backend::RocmStorageSlice::U32(mem) => mem
++                    .copy_from_host(data)
++                    .map_err(|e| crate::Error::Msg(format!("copy_from_host_u32: {e}"))),
++                _ => crate::bail!("copy_from_host_u32: ROCm storage is not U32"),
++            },
++            _ => crate::bail!("copy_from_host_u32: tensor is not on a ROCm device"),
++        }
++    }
++
++    /// In-place device-to-device copy of `src` into `self`.
++    ///
++    /// Both tensors must have the same shape and dtype and live on the same
++    /// device. Used to refresh the static graph input buffers without changing
++    /// their addresses.
++    #[cfg(feature = "rocm")]
++    pub fn copy2(&self, src: &Tensor) -> Result<()> {
++        if self.shape() != src.shape() {
++            crate::bail!(
++                "copy2: shape mismatch {:?} vs {:?}",
++                self.shape(),
++                src.shape()
++            );
++        }
++        if self.dtype() != src.dtype() {
++            crate::bail!(
++                "copy2: dtype mismatch {:?} vs {:?}",
++                self.dtype(),
++                src.dtype()
++            );
++        }
++        if self.same_storage(src) {
++            crate::bail!("copy2: source and destination share storage");
++        }
++        let src_c = src.contiguous()?;
++        let src_layout = src_c.layout().clone();
++        let (mut dst_storage, dst_layout) = self.storage_mut_and_layout();
++        let dst_off = dst_layout.start_offset();
++        let src_storage = src_c.storage();
++        src_storage.copy_strided_src(&mut *dst_storage, dst_off, &src_layout)
++    }
++}
+diff --git a/candle-core/src/lib.rs b/candle-core/src/lib.rs
+index ca93c2e4..86999ab2 100644
+--- a/candle-core/src/lib.rs
++++ b/candle-core/src/lib.rs
+@@ -78,6 +78,7 @@ pub mod pickle;
+ pub mod quantized;
+ #[cfg(feature = "rocm")]
+ pub mod rocm_backend;
++mod inplace;
+ pub mod safetensors;
+ pub mod scalar;
+ pub mod shape;
+diff --git a/candle-core/src/quantized/rocm.rs b/candle-core/src/quantized/rocm.rs
+index def33b6d..46c84031 100644
+--- a/candle-core/src/quantized/rocm.rs
++++ b/candle-core/src/quantized/rocm.rs
+@@ -34,6 +34,7 @@ use crate::rocm_backend::{
+ use crate::{CpuStorage, DType, Layout, Result, Shape};
+ 
+ mod dense;
++mod autotune;
+ mod device_ptr;
+ mod dmmv;
+ mod kernels;
+@@ -272,8 +273,86 @@ impl QRocmStorage {
+         };
+ 
+         let b_size = b * m;
++
++        // Optional per-shape autotune of the batch-1 decode GEMV: time both
++        // kernels once and cache the winner (CANDLE_ROCM_AUTOTUNE=1).
++        if b_size == 1 && autotune::enabled() && dmmv::has_kernel(self.dtype) {
++            let run_mmvq = || -> Result<Option<crate::rocm_backend::SendSyncDeviceMemory<f32>>> {
++                mmvq::try_fwd(self, n, k, b_size, storage, layout, true)
++            };
++            let run_dmmv = || -> Result<Option<crate::rocm_backend::SendSyncDeviceMemory<f32>>> {
++                if let RocmStorageSlice::F32(y) = &storage.slice {
++                    if let Some((o1, o2)) = layout.contiguous_offsets() {
++                        if o2 - o1 == k {
++                            return Ok(Some(dmmv::mul_mat_vec(
++                                &self.data,
++                                self.len,
++                                y,
++                                o1,
++                                self.dtype,
++                                k,
++                                n,
++                                &self.device,
++                            )?));
++                        }
++                    }
++                }
++                Ok(None)
++            };
++
++            if let Some(prefer_mmvq) = autotune::cached(self.dtype, n, k) {
++                if prefer_mmvq {
++                    if let Some(dst) = run_mmvq()? {
++                        return Ok(wrap(dst));
++                    }
++                } else if let Some(dst) = run_dmmv()? {
++                    return Ok(wrap(dst));
++                }
++            } else {
++                let mut mm = None;
++                let mut t_mm = std::time::Duration::MAX;
++                for _ in 0..3 {
++                    let t = std::time::Instant::now();
++                    mm = run_mmvq()?;
++                    self.device.synchronize()?;
++                    t_mm = t_mm.min(t.elapsed());
++                }
++                let mut dm = None;
++                let mut t_dm = std::time::Duration::MAX;
++                for _ in 0..3 {
++                    let t = std::time::Instant::now();
++                    dm = run_dmmv()?;
++                    self.device.synchronize()?;
++                    t_dm = t_dm.min(t.elapsed());
++                }
++                match (mm, dm) {
++                    (Some(m), Some(d)) => {
++                        let prefer = t_mm < t_dm;
++                        autotune::store(self.dtype, n, k, prefer);
++                        eprintln!(
++                            "[rocm autotune] {:?} n={n} k={k}: mmvq={:?} dmmv={:?} -> {}",
++                            self.dtype,
++                            t_mm,
++                            t_dm,
++                            if prefer { "mmvq" } else { "dmmv" }
++                        );
++                        return Ok(wrap(if prefer { m } else { d }));
++                    }
++                    (Some(m), None) => {
++                        autotune::store(self.dtype, n, k, true);
++                        return Ok(wrap(m));
++                    }
++                    (None, Some(d)) => {
++                        autotune::store(self.dtype, n, k, false);
++                        return Ok(wrap(d));
++                    }
++                    (None, None) => {}
++                }
++            }
++        }
++
+         if b_size <= mmvq::MAX_BATCH {
+-            if let Some(dst) = mmvq::try_fwd(self, n, k, b_size, storage, layout)? {
++            if let Some(dst) = mmvq::try_fwd(self, n, k, b_size, storage, layout, false)? {
+                 return Ok(wrap(dst));
+             }
+         }
+diff --git a/candle-core/src/quantized/rocm/autotune.rs b/candle-core/src/quantized/rocm/autotune.rs
+new file mode 100644
+index 00000000..ea05da32
+--- /dev/null
++++ b/candle-core/src/quantized/rocm/autotune.rs
+@@ -0,0 +1,35 @@
++//! Per-shape autotune of the batch-1 decode GEMV (dmmv vs mmvq).
++
++use std::collections::HashMap;
++use std::sync::{Mutex, OnceLock};
++
++use crate::quantized::GgmlDType;
++
++type Key = (u8, usize, usize);
++
++static CACHE: OnceLock<Mutex<HashMap<Key, bool>>> = OnceLock::new();
++static ENABLED: OnceLock<bool> = OnceLock::new();
++
++/// `CANDLE_ROCM_AUTOTUNE=1` enables the per-shape timing pass.
++pub(super) fn enabled() -> bool {
++    *ENABLED.get_or_init(|| match std::env::var("CANDLE_ROCM_AUTOTUNE") {
++        Ok(v) => v != "0" && !v.is_empty(),
++        Err(_) => true,
++    })
++}
++
++/// `Some(true)` = mmvq won, `Some(false)` = dmmv won, `None` = not tuned yet.
++pub(super) fn cached(dtype: GgmlDType, n: usize, k: usize) -> Option<bool> {
++    CACHE
++        .get_or_init(|| Mutex::new(HashMap::new()))
++        .lock()
++        .ok()?
++        .get(&(dtype as u8, n, k))
++        .copied()
++}
++
++pub(super) fn store(dtype: GgmlDType, n: usize, k: usize, prefer_mmvq: bool) {
++    if let Ok(mut m) = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
++        m.insert((dtype as u8, n, k), prefer_mmvq);
++    }
++}
+diff --git a/candle-core/src/quantized/rocm/mmvq.rs b/candle-core/src/quantized/rocm/mmvq.rs
+index 0b1be17a..a822cc68 100644
+--- a/candle-core/src/quantized/rocm/mmvq.rs
++++ b/candle-core/src/quantized/rocm/mmvq.rs
+@@ -12,7 +12,7 @@
+ //! argument order, and a wrong guess is a silent wrong answer.
+ 
+ use super::kernels::{arg, launch_err, WARP_SIZE};
+-use super::q8_1::{buffer_bytes, force_dmmv, pad, quantize_q8_1};
++use super::q8_1::{buffer_bytes, force_dmmv, force_mmvq, pad, quantize_q8_1};
+ use super::QRocmStorage;
+ use crate::backend::BackendStorage;
+ use crate::quantized::GgmlDType;
+@@ -199,6 +199,7 @@ pub(super) fn try_fwd(
+     b_size: usize,
+     storage: &RocmStorage,
+     layout: &Layout,
++    force: bool,
+ ) -> Result<Option<SendSyncDeviceMemory<f32>>> {
+     if force_dmmv() || !supports(q.dtype, n, k, b_size) {
+         return Ok(None);
+@@ -219,7 +220,7 @@ pub(super) fn try_fwd(
+         RocmStorageSlice::F32(y) => {
+             // The only case where a *cheaper* alternative exists: DMMV takes
+             // exactly a batch of one, contiguous and f32.
+-            if b_size == 1 && super::dmmv::has_kernel(q.dtype) && dmmv_is_faster(q.dtype, n * k) {
++            if !force && b_size == 1 && !force_mmvq() && super::dmmv::has_kernel(q.dtype) && dmmv_is_faster(q.dtype, n * k) {
+                 return Ok(None);
+             }
+             (y, o1)
+diff --git a/candle-core/src/quantized/rocm/q8_1.rs b/candle-core/src/quantized/rocm/q8_1.rs
+index 81f93e0f..d745db9b 100644
+--- a/candle-core/src/quantized/rocm/q8_1.rs
++++ b/candle-core/src/quantized/rocm/q8_1.rs
+@@ -38,6 +38,15 @@ pub(super) fn force_dmmv() -> bool {
+     })
+ }
+ 
++/// Force the q8_1 MMVQ path instead of the dmmv fallback (decode tuning).
++pub(super) fn force_mmvq() -> bool {
++    static FORCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *FORCE.get_or_init(|| match std::env::var("CANDLE_ROCM_FORCE_MMVQ") {
++        Ok(v) => v != "0" && !v.is_empty(),
++        Err(_) => false,
++    })
++}
++
+ /// Bytes a `q8_1` buffer of `rows` rows of `k` columns needs, padding included.
+ pub(super) fn buffer_bytes(k: usize, rows: usize) -> usize {
+     rows * pad(k, MATRIX_ROW_PADDING) * GgmlDType::Q8_1.type_size() / GgmlDType::Q8_1.block_size()
+-- 
+2.53.0
+

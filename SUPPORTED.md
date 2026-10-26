@@ -105,6 +105,8 @@ Protocol: batch size 1, single request, **load time excluded**, `AURORA_IGNORE_E
 
 CUDA reference (RTX 4070 Ti 12 GB, from earlier runs): TinyLlama-1.1B **5.4 tok/s**, Moonshine Tiny **1.6 s**, Real-ESRGAN x4 **5.5 s**, FLUX.2-Klein-4B **25.9 s**.
 
+> With the server-local Candle fork autotune (patches in [`docs/patches/`](docs/patches/)), Qwen 3.8 reaches **18.2 tok/s** and Gemma 3 12B **~38 tok/s**. See [`docs/PERF_ROCM.md`](docs/PERF_ROCM.md) for full measurements, rejected experiments (F16 activations, GPU sampling) and the roofline analysis.
+
 ---
 
 ## Validation methodology
