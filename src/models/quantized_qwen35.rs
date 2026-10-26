@@ -62,22 +62,11 @@ impl<R: Read + Seek> Gguf<R> {
 }
 
 fn sigmoid(x: &Tensor) -> Result<Tensor> {
-    let orig_dtype = x.dtype();
-    let x_f32 = x.to_dtype(DType::F32)?;
-    // sigmoid(x) = (1 + exp(-x))^-1
-    let neg_x = x_f32.neg()?;
-    let exp_neg = neg_x.exp()?;
-    let denom = (exp_neg + 1.0)?;
-    let sig = denom.recip()?;
-    sig.to_dtype(orig_dtype)
+    candle_nn::ops::sigmoid(x)
 }
 
 fn silu(x: &Tensor) -> Result<Tensor> {
-    let orig_dtype = x.dtype();
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let sig = sigmoid(&x_f32)?;
-    let res = (x_f32 * sig)?;
-    res.to_dtype(orig_dtype)
+    candle_nn::ops::silu(x)
 }
 
 fn softplus(x: &Tensor) -> Result<Tensor> {

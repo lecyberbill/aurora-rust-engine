@@ -143,6 +143,14 @@ struct LayerWeights {
     is_gemma4: bool,
 
     kv_cache: Option<(Tensor, Tensor)>,
+
+    // HIP-graph static decode buffers.
+    static_k: Option<Tensor>,   // [1, n_head, head_dim, max_len] (transposed K)
+    static_v: Option<Tensor>,   // [1, n_head, max_len, head_dim]
+    static_rope: Option<(Tensor, Tensor)>, // cos/sin [1, head_dim/2]
+    static_idx_k: Option<Tensor>,
+    static_idx_v: Option<Tensor>,
+    static_mask: Option<Tensor>,
 }
 
 impl LayerWeights {
@@ -216,33 +224,67 @@ impl LayerWeights {
             v
         };
 
-        let (q, k) = self
-            .rotary_embedding
-            .apply_rotary_emb_qkv(&q, &k, index_pos)?;
-
-        let (k, v) = match &self.kv_cache {
-            None => (k, v),
-            Some((k_cache, v_cache)) => {
-                if index_pos == 0 {
-                    (k, v)
-                } else {
-                    let k = Tensor::cat(&[k_cache, &k], 2)?;
-                    let v = Tensor::cat(&[v_cache, &v], 2)?;
-                    (k, v)
-                }
-            }
+        // RoPE: static buffers for the graph path, table + fused kernel otherwise.
+        let (q, k) = if let Some((cos_buf, sin_buf)) = &self.static_rope {
+            (
+                rope(&q.contiguous()?, cos_buf, sin_buf)?,
+                rope(&k.contiguous()?, cos_buf, sin_buf)?,
+            )
+        } else {
+            self.rotary_embedding
+                .apply_rotary_emb_qkv(&q, &k, index_pos)?
         };
-        self.kv_cache = Some((k.clone(), v.clone()));
 
-        // Repeat KV for GQA
-        let k = repeat_kv(k, self.n_head / self.n_kv_head)?;
-        let v = repeat_kv(v, self.n_head / self.n_kv_head)?;
+        // K/V: static graph cache (full max_len) or the growing cache.
+        let (k_cache, v, static_on) = if let (Some(kt), Some(vv)) = (&self.static_k, &self.static_v) {
+            let n_rep = self.n_head / self.n_kv_head;
+            let (kr, vr) = if n_rep > 1 {
+                let rk = k
+                    .unsqueeze(2)?
+                    .expand((b_sz, self.n_kv_head, n_rep, seq_len, self.head_dim))?
+                    .reshape((b_sz, self.n_head, seq_len, self.head_dim))?;
+                let rv = v
+                    .unsqueeze(2)?
+                    .expand((b_sz, self.n_kv_head, n_rep, seq_len, self.head_dim))?
+                    .reshape((b_sz, self.n_head, seq_len, self.head_dim))?;
+                (rk, rv)
+            } else {
+                (k.clone(), v.clone())
+            };
+            let idx = self.static_idx_v.as_ref().unwrap();
+            kt.scatter_set(idx, &kr, 2)?;
+            vv.scatter_set(idx, &vr, 2)?;
+            (kt.clone(), vv.clone(), true)
+        } else {
+            let (k, v) = match &self.kv_cache {
+                None => (k, v),
+                Some((k_cache, v_cache)) => {
+                    if index_pos == 0 {
+                        (k, v)
+                    } else {
+                        (
+                            Tensor::cat(&[k_cache, &k], 2)?,
+                            Tensor::cat(&[v_cache, &v], 2)?,
+                        )
+                    }
+                }
+            };
+            self.kv_cache = Some((k.clone(), v.clone()));
+            let k = repeat_kv(k, self.n_head / self.n_kv_head)?;
+            let v = repeat_kv(v, self.n_head / self.n_kv_head)?;
+            (k, v, false)
+        };
 
         // Scaled Dot-Product Attention
+        let k_t = k_cache.transpose(2, 3)?.contiguous()?;
         let scale = self.attention_scale;
-        let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+        let mut attn_weights = (q.matmul(&k_t)? * scale)?;
 
-        if let Some(mask) = mask {
+        if static_on {
+            if let Some(m) = &self.static_mask {
+                attn_weights = attn_weights.broadcast_add(m)?;
+            }
+        } else if let Some(mask) = mask {
             attn_weights = attn_weights.broadcast_add(mask)?;
         }
 
@@ -257,7 +299,7 @@ impl LayerWeights {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ModelWeights {
     tok_embeddings: Embedding,
     embedding_length: usize,
@@ -265,6 +307,17 @@ pub struct ModelWeights {
     norm: RmsNorm,
     output: QMatMul,
     final_logit_softcapping: Option<f64>,
+    emb_weight: Tensor,
+    // HIP-graph decode state.
+    static_h0: Option<Tensor>,
+    static_idx: Option<Tensor>,
+    mask_src_global: Option<Tensor>,
+    mask_src_slide: Option<Tensor>,
+    mask_row_global: Option<Tensor>,
+    mask_row_slide: Option<Tensor>,
+    graph_exec: Option<crate::models::text::causal::HipGraphExec>,
+    graph_logits: Option<Tensor>,
+    graph_max_len: usize,
 }
 
 impl ModelWeights {
@@ -509,9 +562,16 @@ impl ModelWeights {
                 attention_scale,
                 is_gemma4,
                 kv_cache: None,
+                static_k: None,
+                static_v: None,
+                static_rope: None,
+                static_idx_k: None,
+                static_idx_v: None,
+                static_mask: None,
             })
         }
 
+        let emb_weight = tok_embeddings.clone();
         Ok(Self {
             tok_embeddings: Embedding::new(tok_embeddings, embedding_length),
             embedding_length,
@@ -519,14 +579,300 @@ impl ModelWeights {
             norm,
             output: QMatMul::from_qtensor(output)?,
             final_logit_softcapping,
+            emb_weight,
+            static_h0: None,
+            static_idx: None,
+            mask_src_global: None,
+            mask_src_slide: None,
+            mask_row_global: None,
+            mask_row_slide: None,
+            graph_exec: None,
+            graph_logits: None,
+            graph_max_len: 0,
         })
+    }
+
+    /// Whether the static HIP-graph decode path can serve this model.
+    pub fn supports_static_graph(&self) -> bool {
+        !self.layers.is_empty() && self.layers.iter().all(|l| !l.is_gemma4)
+    }
+
+    /// Allocate static decode buffers, seed them from the prefill K/V, warm up
+    /// and capture one decode step into a HIP graph.
+    #[cfg(feature = "hip-graph")]
+    pub fn setup_static_graph(&mut self, prefill_len: usize, max_len: usize) -> Result<()> {
+        use crate::models::text::causal::HipGraphExec;
+        use candle_core::rocm_backend::rocm_rs::hip::bindings;
+
+        if !self.supports_static_graph() {
+            return Err(candle_core::Error::Msg("HIP graph: unsupported gemma variant".into()));
+        }
+        if prefill_len + 16 >= max_len {
+            return Err(candle_core::Error::Msg("HIP graph: context does not fit".into()));
+        }
+        for l in &self.layers {
+            if let Some(w) = l.sliding_window_size {
+                if w < max_len {
+                    return Err(candle_core::Error::Msg("HIP graph: sliding window < max_len".into()));
+                }
+            }
+        }
+        let dev = self.emb_weight.device().clone();
+        if !dev.is_rocm() {
+            return Err(candle_core::Error::Msg("HIP graph: not a ROCm device".into()));
+        }
+        let dtype = self.emb_weight.dtype();
+        let n_head = self.layers[0].n_head;
+
+        let build = |window: Option<usize>| -> Vec<f32> {
+            let mut m = vec![0f32; max_len * max_len];
+            for i in 0..max_len {
+                for j in 0..max_len {
+                    let blocked = j > i || window.map_or(false, |w| j + w < i);
+                    if blocked {
+                        m[i * max_len + j] = -1e4;
+                    }
+                }
+            }
+            m
+        };
+        let sw = self.layers.iter().find_map(|l| l.sliding_window_size).unwrap_or(1024);
+        let mask_src_global = Tensor::from_vec(build(None), (max_len, max_len), &dev)?;
+        let mask_src_slide = Tensor::from_vec(build(Some(sw)), (max_len, max_len), &dev)?;
+        let mask_row_global = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
+        let mask_row_slide = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
+
+        let head_dim = self.layers[0].head_dim;
+        let shared_idx = Tensor::zeros((1, n_head, 1, head_dim), DType::U32, &dev)?;
+        shared_idx.copy_from_host_u32(&vec![prefill_len as u32; n_head * head_dim])?;
+
+        for layer in self.layers.iter_mut() {
+            let (pk, pv) = layer
+                .kv_cache
+                .clone()
+                .ok_or_else(|| candle_core::Error::Msg("HIP graph: empty prefill KV".into()))?;
+            let n_rep = layer.n_head / layer.n_kv_head;
+            let (b, nkv, s, d) = pk.shape().dims4().map_err(|e| candle_core::Error::Msg(format!("{e}")))?;
+            let (rk, rv) = if n_rep > 1 {
+                let rk = pk
+                    .unsqueeze(2)?
+                    .expand((b, nkv, n_rep, s, d))?
+                    .reshape((b, layer.n_head, s, d))?;
+                let rv = pv
+                    .unsqueeze(2)?
+                    .expand((b, nkv, n_rep, s, d))?
+                    .reshape((b, layer.n_head, s, d))?;
+                (rk, rv)
+            } else {
+                (pk.clone(), pv.clone())
+            };
+
+            let sk = Tensor::zeros((1, layer.n_head, max_len, layer.head_dim), dtype, &dev)?;
+            let sv = Tensor::zeros((1, layer.n_head, max_len, layer.head_dim), dtype, &dev)?;
+            let mut idx_kv = Vec::with_capacity(layer.n_head * s * d);
+            for _ in 0..layer.n_head {
+                for si in 0..s {
+                    for _ in 0..d {
+                        idx_kv.push(si as u32);
+                    }
+                }
+            }
+            let idx_v = Tensor::from_vec(idx_kv, (1, layer.n_head, s, d), &dev)?;
+            sk.scatter_set(&idx_v, &rk, 2)?;
+            sv.scatter_set(&idx_v, &rv, 2)?;
+
+            let cos_buf = Tensor::zeros((1, layer.head_dim / 2), dtype, &dev)?;
+            let sin_buf = Tensor::zeros((1, layer.head_dim / 2), dtype, &dev)?;
+            cos_buf.copy2(&layer.rotary_embedding.cos.narrow(0, prefill_len, 1)?)?;
+            sin_buf.copy2(&layer.rotary_embedding.sin.narrow(0, prefill_len, 1)?)?;
+
+            let mask_row = if layer.sliding_window_size.is_some() {
+                mask_row_slide.clone()
+            } else {
+                mask_row_global.clone()
+            };
+
+            layer.static_k = Some(sk);
+            layer.static_v = Some(sv);
+            layer.static_rope = Some((cos_buf, sin_buf));
+            layer.static_idx_k = None;
+            layer.static_idx_v = Some(shared_idx.clone());
+            layer.static_mask = Some(mask_row);
+        }
+
+        let h0 = Tensor::zeros((1, 1, self.embedding_length), dtype, &dev)?;
+        self.static_idx = Some(shared_idx);
+        let row_g = mask_src_global.narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?;
+        mask_row_global.copy2(&row_g)?;
+        let row_s = mask_src_slide.narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?;
+        mask_row_slide.copy2(&row_s)?;
+
+        self.static_h0 = Some(h0);
+        self.mask_src_global = Some(mask_src_global);
+        self.mask_src_slide = Some(mask_src_slide);
+        self.mask_row_global = Some(mask_row_global);
+        self.mask_row_slide = Some(mask_row_slide);
+        self.graph_max_len = max_len;
+        self.graph_exec = None;
+        self.graph_logits = None;
+
+        let dummy = Tensor::zeros((1, 1), DType::U32, &dev)?;
+        for _ in 0..3 {
+            let _ = self.forward(&dummy, prefill_len)?;
+        }
+        dev.synchronize().map_err(|e| candle_core::Error::Msg(format!("{e}")))?;
+
+        let stream = match &dev {
+            Device::Rocm(d) => d.stream().as_raw(),
+            _ => unreachable!(),
+        };
+        let r = unsafe {
+            bindings::hipStreamBeginCapture(
+                stream,
+                bindings::hipStreamCaptureMode_hipStreamCaptureModeThreadLocal,
+            )
+        };
+        if r != bindings::hipError_t_hipSuccess {
+            return Err(candle_core::Error::Msg(format!("hipStreamBeginCapture: {r}")));
+        }
+        let logits_res = self.forward(&dummy, prefill_len);
+        let mut graph = std::ptr::null_mut();
+        let r = unsafe { bindings::hipStreamEndCapture(stream, &mut graph) };
+        if logits_res.is_err() {
+            if !graph.is_null() {
+                unsafe { bindings::hipGraphDestroy(graph); }
+            }
+            return logits_res.map(|_| ());
+        }
+        let logits = logits_res?;
+        if r != bindings::hipError_t_hipSuccess {
+            return Err(candle_core::Error::Msg(format!("hipStreamEndCapture: {r}")));
+        }
+        dev.synchronize().map_err(|e| candle_core::Error::Msg(format!("{e}")))?;
+        let mut exec = std::ptr::null_mut();
+        let r = unsafe {
+            bindings::hipGraphInstantiate(&mut exec, graph, std::ptr::null_mut(), std::ptr::null_mut(), 0)
+        };
+        if r != bindings::hipError_t_hipSuccess {
+            return Err(candle_core::Error::Msg(format!("hipGraphInstantiate: {r}")));
+        }
+        unsafe { bindings::hipGraphDestroy(graph); }
+
+        self.graph_logits = Some(logits);
+        self.graph_exec = Some(HipGraphExec {
+            exec: exec as usize,
+            stream: stream as usize,
+        });
+        Ok(())
+    }
+
+    #[cfg(not(feature = "hip-graph"))]
+    pub fn setup_static_graph(&mut self, _prefill_len: usize, _max_len: usize) -> Result<()> {
+        Err(candle_core::Error::Msg("HIP graph requires the hip-graph feature".into()))
+    }
+
+    #[cfg(feature = "hip-graph")]
+    fn graph_step(&mut self, x: &Tensor, pos: usize) -> Result<Tensor> {
+        let flat = x.flatten_all()?;
+        let tok = match flat.dtype() {
+            DType::U32 => flat.to_vec1::<u32>()?,
+            DType::I64 => flat.to_vec1::<i64>()?.into_iter().map(|v| v as u32).collect(),
+            other => return Err(candle_core::Error::Msg(format!("graph step: token dtype {other:?}"))),
+        };
+        let tok = *tok.first().ok_or_else(|| candle_core::Error::Msg("graph step: empty token".into()))?;
+        let h0 = self
+            .emb_weight
+            .narrow(0, tok as usize, 1)?
+            .reshape((1, 1, self.embedding_length))?;
+        self.static_h0
+            .as_ref()
+            .ok_or_else(|| candle_core::Error::Msg("graph h0 missing".into()))?
+            .copy2(&h0)?;
+
+        let max_len = self.graph_max_len;
+        let n_head = self.layers[0].n_head;
+        let head_dim = self.layers[0].head_dim;
+        // One host->device sync per token: the scatter index and the two mask
+        // rows are shared by every layer.
+        if let Some(idx) = &self.static_idx {
+            idx.copy_from_host_u32(&vec![pos as u32; n_head * head_dim])?;
+        }
+        if let (Some(buf), Some(src)) = (&self.mask_row_global, &self.mask_src_global) {
+            let row = src.narrow(0, pos, 1)?.reshape((1, 1, 1, max_len))?;
+            buf.copy2(&row)?;
+        }
+        if let (Some(buf), Some(src)) = (&self.mask_row_slide, &self.mask_src_slide) {
+            let row = src.narrow(0, pos, 1)?.reshape((1, 1, 1, max_len))?;
+            buf.copy2(&row)?;
+        }
+        for layer in self.layers.iter() {
+            if let Some((cb, sb)) = &layer.static_rope {
+                cb.copy2(&layer.rotary_embedding.cos.narrow(0, pos, 1)?)?;
+                sb.copy2(&layer.rotary_embedding.sin.narrow(0, pos, 1)?)?;
+            }
+        }
+
+        // Debug: run the static path directly (no replay) to separate a static
+        // math bug from a capture/replay bug.
+        if std::env::var_os("AURORA_GRAPH_STATIC_ONLY").is_some() {
+            let saved = self.graph_exec.take();
+            let out = self.forward(x, pos);
+            self.graph_exec = saved;
+            return out;
+        }
+
+        self.graph_exec
+            .as_ref()
+            .ok_or_else(|| candle_core::Error::Msg("graph exec missing".into()))?
+            .launch()
+            .map_err(|e| candle_core::Error::Msg(format!("{e}")))?;
+        self.graph_logits
+            .as_ref()
+            .ok_or_else(|| candle_core::Error::Msg("graph logits missing".into()))
+            .map(|t| t.clone())
+    }
+
+    #[cfg(not(feature = "hip-graph"))]
+    fn graph_step(&mut self, _x: &Tensor, _pos: usize) -> Result<Tensor> {
+        Err(candle_core::Error::Msg("HIP graph requires the hip-graph feature".into()))
+    }
+
+    /// Drop the static graph state and return to the normal path.
+    pub fn clear_static_graph(&mut self) {
+        for layer in self.layers.iter_mut() {
+            layer.static_k = None;
+            layer.static_v = None;
+            layer.static_rope = None;
+            layer.static_idx_k = None;
+            layer.static_idx_v = None;
+            layer.static_mask = None;
+        }
+        self.static_h0 = None;
+        self.static_idx = None;
+        self.mask_src_global = None;
+        self.mask_src_slide = None;
+        self.mask_row_global = None;
+        self.mask_row_slide = None;
+        self.graph_exec = None;
+        self.graph_logits = None;
+        self.graph_max_len = 0;
     }
 
     pub fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
         let (b_sz, seq_len) = x.dims2()?;
 
-        let mut layer_in = self.tok_embeddings.forward(x)?;
-        layer_in = (layer_in * (self.embedding_length as f64).sqrt())?;
+        if seq_len == 1 && self.graph_exec.is_some() {
+            return self.graph_step(x, index_pos);
+        }
+
+        // A static h0 (graph capture) holds the raw embedding row; the sqrt
+        // scale is applied inside the captured graph.
+        let mut layer_in = if let Some(h0) = &self.static_h0 {
+            (h0 * (self.embedding_length as f64).sqrt())?
+        } else {
+            let e = self.tok_embeddings.forward(x)?;
+            (e * (self.embedding_length as f64).sqrt())?
+        };
 
         for layer in self.layers.iter_mut() {
             let attention_mask = if seq_len == 1 {

@@ -648,13 +648,15 @@ impl LogitsProcessor {
             *v /= sum_exp;
         }
 
-        // Top-K / Top-P sampling
+        // Top-K / Top-P sampling. A full-vocab sort here is the dominant
+        // per-token cost on 100k+ vocabularies: partition the top-k out with an
+        // O(V) selection first and only sort the retained candidates.
         let mut indexed_probs: Vec<(usize, f32)> = logits_vec.into_iter().enumerate().collect();
-        indexed_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        if self.top_k > 0 && indexed_probs.len() > self.top_k {
+        if self.top_k > 0 && self.top_k < indexed_probs.len() {
+            indexed_probs.select_nth_unstable_by(self.top_k, |a, b| b.1.total_cmp(&a.1));
             indexed_probs.truncate(self.top_k);
         }
+        indexed_probs.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         if self.top_p < 1.0 {
             let mut cumsum = 0.0f32;
@@ -858,6 +860,55 @@ fn trim_stop_markers(mut text: String) -> String {
     text.trim().to_string()
 }
 
+/// Preallocated K/V cache for the HIP-graph decode path ([1, heads, max_len, dim]).
+#[derive(Clone)]
+pub struct StaticKvLayer {
+    pub k: Tensor,
+    pub v: Tensor,
+}
+
+/// A captured HIP graph executable. Pointers are kept as `usize` so the
+/// pipeline stays `Send`; `launch` recovers them on the current stream.
+pub struct HipGraphExec {
+    pub exec: usize,
+    pub stream: usize,
+}
+
+impl HipGraphExec {
+    #[cfg(feature = "rocm")]
+    pub fn launch(&self) -> Result<()> {
+        use candle_core::rocm_backend::rocm_rs::hip::bindings;
+        let r = unsafe { bindings::hipGraphLaunch(self.exec as _, self.stream as _) };
+        if r != bindings::hipError_t_hipSuccess {
+            return Err(LuminaError::Config(format!("hipGraphLaunch failed: {r}")));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "rocm"))]
+    pub fn launch(&self) -> Result<()> {
+        Err(LuminaError::Config("HIP graph requires the rocm feature".into()))
+    }
+}
+
+impl std::fmt::Debug for HipGraphExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HipGraphExec({:#x})", self.exec)
+    }
+}
+
+impl Drop for HipGraphExec {
+    fn drop(&mut self) {
+        #[cfg(feature = "rocm")]
+        if self.exec != 0 {
+            use candle_core::rocm_backend::rocm_rs::hip::bindings;
+            unsafe {
+                bindings::hipGraphExecDestroy(self.exec as _);
+            }
+        }
+    }
+}
+
 pub struct CausalLMPipeline {
     pub config: CausalLMConfig,
     pub tokenizer: Option<Tokenizer>,
@@ -869,6 +920,19 @@ pub struct CausalLMPipeline {
     pub linear_cache: std::collections::HashMap<String, LinearLayer>,
     /// Number of transformer layers offloaded to GPU (None = all layers on GPU)
     pub n_gpu_layers: Option<usize>,
+    /// Precomputed, duplicated RoPE cos/sin tables keyed by (theta bits, sliding).
+    pub rope_cache: std::collections::HashMap<(u32, bool), (Tensor, Tensor)>,
+    /// HIP-graph decode state (attention-only models). All buffers are static so
+    /// the captured graph keeps reading the same addresses on every replay.
+    pub static_h0: Option<Tensor>,
+    pub static_kv: Option<Vec<Option<StaticKvLayer>>>,
+    pub static_mask: Option<Tensor>,
+    pub static_mask_src: Option<Tensor>,
+    pub static_rope: Option<std::collections::HashMap<(u32, bool), (Tensor, Tensor)>>,
+    pub static_idx: Option<Tensor>,
+    pub graph_exec: Option<HipGraphExec>,
+    pub graph_logits: Option<Tensor>,
+    pub graph_max_len: usize,
 }
 
 impl CausalLMPipeline {
@@ -893,6 +957,16 @@ impl CausalLMPipeline {
             weights_cache,
             linear_cache,
             n_gpu_layers: None,
+            rope_cache: std::collections::HashMap::new(),
+            static_h0: None,
+            static_kv: None,
+            static_mask: None,
+            static_mask_src: None,
+            static_rope: None,
+            static_idx: None,
+            graph_exec: None,
+            graph_logits: None,
+            graph_max_len: 0,
         }
     }
 
@@ -1131,6 +1205,27 @@ impl CausalLMPipeline {
         // Track all context tokens for repetition penalty
         let mut all_context_tokens = prompt_tokens.clone();
 
+        // Optional HIP-graph decode for attention-only models (opt-in).
+        if std::env::var_os("AURORA_HIP_GRAPH").is_some() {
+            let max_len = std::env::var("AURORA_GRAPH_MAX_LEN")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1024);
+            if prompt_tokens.len() + params.max_tokens + 16 < max_len {
+                if let Err(e) = self.setup_hip_graph(prompt_tokens.len(), max_len) {
+                    self.clear_hip_graph();
+                    eprintln!("⚠️ HIP graph disabled: {e}");
+                } else {
+                    eprintln!("⚡ HIP graph decode enabled (max_len={max_len})");
+                }
+            } else {
+                eprintln!(
+                    "⚠️ HIP graph skipped: {} prompt + {} new >= {} max_len",
+                    prompt_tokens.len(), params.max_tokens, max_len
+                );
+            }
+        }
+
         let mut next_token = logits_processor.sample(&last_logits, &all_context_tokens)?;
         generated_tokens.push(next_token);
         all_context_tokens.push(next_token);
@@ -1147,10 +1242,12 @@ impl CausalLMPipeline {
         }
 
         let mut pos = prompt_tokens.len();
+        // Benchmark helper: keep decoding past EOS for a stable token budget.
+        let ignore_eos = std::env::var_os("AURORA_IGNORE_EOS").is_some();
 
         // Autoregressive decoding loop
         for _ in 0..params.max_tokens {
-            if stop_tokens.contains(&next_token) {
+            if !ignore_eos && stop_tokens.contains(&next_token) {
                 break;
             }
 
@@ -1162,8 +1259,10 @@ impl CausalLMPipeline {
             generated_tokens.push(next_token);
             all_context_tokens.push(next_token);
 
-            let piece_str = self.tokenizer.as_ref().and_then(|t| t.decode(&[next_token], false).ok()).unwrap_or_default();
-            eprintln!("✨ [Step {}] pos={} generated token {} ({:?})", generated_tokens.len(), pos, next_token, piece_str);
+            if std::env::var_os("AURORA_DEBUG_TOKENS").is_some() {
+                let piece_str = self.tokenizer.as_ref().and_then(|t| t.decode(&[next_token], false).ok()).unwrap_or_default();
+                eprintln!("✨ [Step {}] pos={} generated token {} ({:?})", generated_tokens.len(), pos, next_token, piece_str);
+            }
 
             if let Some(ref mut cb) = on_token {
                 if let Some(tok_ref) = self.tokenizer.as_ref() {
@@ -1494,33 +1593,37 @@ impl CausalLMPipeline {
 
     /// Explicit configured RMSNorm
     pub fn apply_rms_norm_configured(x: &Tensor, weight: &Tensor, eps: f64, unit_offset: bool) -> Result<Tensor> {
-        let orig_dtype = x.dtype();
-        let x_f32 = x.to_dtype(DType::F32)?;
-        let sq = x_f32.sqr()?;
-        let last_dim = sq.dims().len() - 1;
-        let mean = sq.mean_keepdim(last_dim)?;
-        let rms = (mean + eps)?.sqrt()?;
-        let norm = x_f32.broadcast_div(&rms)?;
-
-        let mut target_shape = vec![1; x.dims().len()];
-        target_shape[last_dim] = weight.dim(0)?;
-        let w = weight.to_dtype(DType::F32)?.reshape(target_shape.as_slice())?;
-        let final_w = if unit_offset {
-            (w + 1.0)?
+        // Single fused RMSNorm kernel (CUDA/ROCm/Metal). The weight has to match
+        // the activation dtype; Gemma's unit offset folds into it as +1.
+        let w = if weight.dtype() == x.dtype() {
+            weight.clone()
+        } else {
+            weight.to_dtype(x.dtype()).map_err(LuminaError::Candle)?
+        };
+        let w = if unit_offset {
+            w.affine(1.0, 1.0).map_err(LuminaError::Candle)?
         } else {
             w
         };
-        let out = norm.broadcast_mul(&final_w)?.to_dtype(orig_dtype)?;
-        Ok(out)
+        candle_nn::ops::rms_norm(x, &w, eps as f32).map_err(LuminaError::Candle)
     }
 
     /// Forward pass through the Transformer
     pub fn forward(&mut self, input_ids: &Tensor, pos: usize) -> Result<Tensor> {
         let (_b_size, seq_len) = input_ids.shape().dims2().map_err(LuminaError::Candle)?;
 
-        // 1. Embedding lookup
-        let embed_w = self.get_weight_or_fallback(&["model.embed_tokens.weight", "token_embd.weight", "embed_tokens.weight"])?;
-        let mut hidden = Embedding::new(embed_w, self.config.hidden_size).forward(input_ids).map_err(LuminaError::Candle)?;
+        // HIP-graph decode: replay the captured graph instead of running the ops.
+        if seq_len == 1 && self.graph_exec.is_some() {
+            return self.graph_step(input_ids, pos);
+        }
+
+        // 1. Embedding lookup (a static h0 is used when capturing the decode graph)
+        let mut hidden = if let Some(h0) = &self.static_h0 {
+            h0.clone()
+        } else {
+            let embed_w = self.get_weight_or_fallback(&["model.embed_tokens.weight", "token_embd.weight", "embed_tokens.weight"])?;
+            Embedding::new(embed_w, self.config.hidden_size).forward(input_ids).map_err(LuminaError::Candle)?
+        };
 
         if self.config.is_gemma {
             let normalizer = (self.config.hidden_size as f64).sqrt();
@@ -1618,8 +1721,8 @@ impl CausalLMPipeline {
         let (_attn_out, x) = if is_shortconv_layer {
             // LFM ShortConv double-gated 1D convolution block:
             // 1. in_proj: [hidden_dim, 3 * hidden_dim] -> BCx is [B, S, 3 * hidden_dim]
-            let in_proj_w = self.get_layer_weight(layer_idx, &["shortconv.in_proj.weight", "conv.in_proj.weight", "in_proj.weight"])?;
-            let bcx = Self::matmul_linear(&normed_x, &in_proj_w)?;
+            let in_proj_l = self.get_layer_linear(layer_idx, &["shortconv.in_proj.weight", "conv.in_proj.weight", "in_proj.weight"])?;
+            let bcx = in_proj_l.forward(&normed_x)?;
             let hidden_dim = normed_x.dim(candle_core::D::Minus1)?;
             let b_gate = bcx.narrow(candle_core::D::Minus1, 0, hidden_dim)?;
             let c_gate = bcx.narrow(candle_core::D::Minus1, hidden_dim, hidden_dim)?;
@@ -1686,15 +1789,17 @@ impl CausalLMPipeline {
             let modulated = (&c_gate * &conv_out).map_err(LuminaError::Candle)?;
 
             // 5. Output projection: out_proj(y)
-            let out_proj_w = self.get_layer_weight(layer_idx, &["shortconv.out_proj.weight", "conv.out_proj.weight", "out_proj.weight"])?;
-            let out = Self::matmul_linear(&modulated, &out_proj_w)?;
+            let out_proj_l = self.get_layer_linear(layer_idx, &["shortconv.out_proj.weight", "conv.out_proj.weight", "out_proj.weight"])?;
+            let out = out_proj_l.forward(&modulated)?;
             let x_res = (x + &out).map_err(LuminaError::Candle)?;
             (out, x_res)
         } else if is_ssm_layer {
             // SSM / Linear Attention / Conv1D DeltaNet forward pass:
             // 1. in_proj (attn_qkv): [10240, 5120] -> projected is [B, S, 10240]
-            let in_proj_w = self.get_layer_weight(layer_idx, &["attn_qkv.weight", "ssm_in.weight", "self_attn.qkv_proj.weight", "ssm_proj.weight"])?;
-            let projected = Self::matmul_linear(&normed_x, &in_proj_w)?;
+            // Generic: route the large projection through the quantized QMatMul path (W4A16)
+            // like the attention/dense-MLP branches, instead of dequantising to dense F16.
+            let in_proj_l = self.get_layer_linear(layer_idx, &["attn_qkv.weight", "ssm_in.weight", "self_attn.qkv_proj.weight", "ssm_proj.weight"])?;
+            let projected = in_proj_l.forward(&normed_x)?;
             
             // 2. Conv1D over features with kernel size 4
             let conv_act = if let Ok(conv_w) = self.get_layer_weight(layer_idx, &["ssm_conv1d.weight", "conv1d.weight"]) {
@@ -1777,19 +1882,17 @@ impl CausalLMPipeline {
             };
 
             // 3. Alpha & Beta gates projection: [48, 5120] -> [B, S, 48]
-            let gated_act = if let (Ok(alpha_w), Ok(beta_w)) = (
-                self.get_layer_weight(layer_idx, &["ssm_alpha.weight", "alpha.weight"]),
-                self.get_layer_weight(layer_idx, &["ssm_beta.weight", "beta.weight"]),
+            let gated_act = if let (Ok(alpha_l), Ok(beta_l)) = (
+                self.get_layer_linear(layer_idx, &["ssm_alpha.weight", "alpha.weight"]),
+                self.get_layer_linear(layer_idx, &["ssm_beta.weight", "beta.weight"]),
             ) {
-                let alpha_logits = Self::matmul_linear(&normed_x, &alpha_w)?;
-                let beta_logits = Self::matmul_linear(&normed_x, &beta_w)?;
+                let alpha_logits = alpha_l.forward(&normed_x)?;
+                let beta_logits = beta_l.forward(&normed_x)?;
 
                 let fast_sigmoid = |t: &Tensor| -> Result<Tensor> {
-                    let neg_t = (t * -1.0).map_err(LuminaError::Candle)?;
-                    let exp_neg = neg_t.exp().map_err(LuminaError::Candle)?;
-                    let one_plus_exp = (exp_neg + 1.0).map_err(LuminaError::Candle)?;
-                    let ones = Tensor::ones_like(&one_plus_exp).map_err(LuminaError::Candle)?;
-                    ones.broadcast_div(&one_plus_exp).map_err(LuminaError::Candle)
+                    // Fused unary sigmoid (usigmoid_* on ROCm) instead of
+                    // neg/exp/add/recip, which cost four kernels per call.
+                    candle_nn::ops::sigmoid(t).map_err(LuminaError::Candle)
                 };
 
                 let alpha = fast_sigmoid(&alpha_logits)?;
@@ -1839,8 +1942,8 @@ impl CausalLMPipeline {
             };
 
             // 4. Gate modulation if attn_gate present
-            let modulated = if let Ok(gate_w) = self.get_layer_weight(layer_idx, &["attn_gate.weight", "ssm_gate.weight"]) {
-                let gate = Self::matmul_linear(&normed_x, &gate_w)?;
+            let modulated = if let Ok(gate_l) = self.get_layer_linear(layer_idx, &["attn_gate.weight", "ssm_gate.weight"]) {
+                let gate = gate_l.forward(&normed_x)?;
                 let silu_gate = candle_nn::ops::silu(&gate).map_err(LuminaError::Candle)?;
                 (gated_act * silu_gate).map_err(LuminaError::Candle)?
             } else {
@@ -1848,8 +1951,8 @@ impl CausalLMPipeline {
             };
 
             // 5. Output projection: project back to model hidden dimension
-            let out_proj_w = self.get_layer_weight(layer_idx, &["ssm_out.weight", "self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
-            let out = Self::matmul_linear(&modulated, &out_proj_w)?;
+            let out_proj_l = self.get_layer_linear(layer_idx, &["ssm_out.weight", "self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
+            let out = out_proj_l.forward(&modulated)?;
             let x_res = (x + &out).map_err(LuminaError::Candle)?;
             (out, x_res)
         } else if self.weights.contains(&format!("blk.{layer_idx}.ffn_gate_inp.weight"))
@@ -1949,13 +2052,38 @@ impl CausalLMPipeline {
             };
 
             // Append to KV Cache with sliding window bounding
-            let (k, v) = self.kv_cache.layers[layer_idx]
-                .append_with_window(&k, &v, sw)
-                .map_err(LuminaError::Candle)?;
-
-            // GQA repeat KV if needed
             let n_rep = (cur_num_heads / cur_num_kv_heads).max(1);
-            let (k, v) = if n_rep > 1 {
+            let static_on = self.static_kv.is_some();
+            let (k, v) = if static_on {
+                // Decode: write the new K/V into the preallocated graph cache with
+                // a device-indexed in-place scatter (capture-safe).
+                let (b, n_kv_heads, s_len, h_dim) = k.shape().dims4().map_err(LuminaError::Candle)?;
+                let (rep_k, rep_v) = if n_rep > 1 {
+                    let rk = k.unsqueeze(2)?.expand((b, n_kv_heads, n_rep, s_len, h_dim))?.reshape((b, n_kv_heads * n_rep, s_len, h_dim))?;
+                    let rv = v.unsqueeze(2)?.expand((b, n_kv_heads, n_rep, s_len, h_dim))?.reshape((b, n_kv_heads * n_rep, s_len, h_dim))?;
+                    (rocm_contiguous(&rk)?, rocm_contiguous(&rv)?)
+                } else {
+                    (k.clone(), v.clone())
+                };
+                let idx = self.static_idx.as_ref()
+                    .ok_or_else(|| LuminaError::Config("static KV index missing".into()))?
+                    .clone();
+                let layers = self.static_kv.as_mut().unwrap();
+                let layer = layers[layer_idx].as_ref()
+                    .ok_or_else(|| LuminaError::Config(format!("static KV missing for layer {layer_idx}")))?;
+                layer.k.scatter_set(&idx, &rep_k, 2).map_err(LuminaError::Candle)?;
+                layer.v.scatter_set(&idx, &rep_v, 2).map_err(LuminaError::Candle)?;
+                (layer.k.clone(), layer.v.clone())
+            } else {
+                self.kv_cache.layers[layer_idx]
+                    .append_with_window(&k, &v, sw)
+                    .map_err(LuminaError::Candle)?
+            };
+
+            // GQA repeat KV if needed (the static cache is already repeated)
+            let (k, v) = if static_on {
+                (k, v)
+            } else if n_rep > 1 {
                 let (b, n_kv_heads, s_len, h_dim) = k.shape().dims4().map_err(LuminaError::Candle)?;
                 let rep_k = k.unsqueeze(2)?.expand((b, n_kv_heads, n_rep, s_len, h_dim))?.reshape((b, n_kv_heads * n_rep, s_len, h_dim))?;
                 let rep_v = v.unsqueeze(2)?.expand((b, n_kv_heads, n_rep, s_len, h_dim))?.reshape((b, n_kv_heads * n_rep, s_len, h_dim))?;
@@ -1980,8 +2108,13 @@ impl CausalLMPipeline {
                 }
             }
 
-            // Causal mask for prefill (supports sliding window)
-            let att = if seq_len > 1 {
+            // Causal mask for prefill (supports sliding window); the graph path
+            // uses a static mask row refreshed before each replay.
+            let att = if static_on {
+                let mask = self.static_mask.as_ref()
+                    .ok_or_else(|| LuminaError::Config("static mask missing".into()))?;
+                att.broadcast_add(mask).map_err(LuminaError::Candle)?
+            } else if seq_len > 1 {
                 let mask = self.causal_mask(seq_len, att.device(), sw)?;
                 att.broadcast_add(&mask).map_err(LuminaError::Candle)?
             } else {
@@ -2048,14 +2181,7 @@ impl CausalLMPipeline {
             let is_nemotron_moe = self.weights.contains(&"blk.1.ffn_gate_inp.weight".to_string());
 
             let router_probs = if is_lfm || is_nemotron_moe {
-                // Portable sigmoid in F32: (1 + exp(-x))^-1
-                let orig_dt = router_logits.dtype();
-                let f32_logits = router_logits.to_dtype(DType::F32).map_err(LuminaError::Candle)?;
-                let neg = f32_logits.neg().map_err(LuminaError::Candle)?;
-                let exp = neg.exp().map_err(LuminaError::Candle)?;
-                let denom = (exp + 1.0).map_err(LuminaError::Candle)?;
-                let sig = denom.recip().map_err(LuminaError::Candle)?;
-                sig.to_dtype(orig_dt).map_err(LuminaError::Candle)?
+                candle_nn::ops::sigmoid(&router_logits).map_err(LuminaError::Candle)?
             } else {
                 crate::device::softmax_last_dim(&router_logits).map_err(LuminaError::Candle)?
             };
@@ -2078,6 +2204,9 @@ impl CausalLMPipeline {
             let total_tokens = b_sz * seq_len;
             let hidden_dim = normed_post_x.dim(candle_core::D::Minus1).map_err(LuminaError::Candle)?;
 
+            if let Some(fast) = self.moe_forward_indexed(layer_idx, &normed_post_x, &selection_probs, &router_probs, num_experts, top_k, is_nemotron_moe)? {
+                fast
+            } else {
             let mut accum_out: Option<Tensor> = None;
 
             let has_fused_exps = self.weights.contains(&format!("blk.{layer_idx}.ffn_gate_exps.weight"))
@@ -2304,22 +2433,22 @@ impl CausalLMPipeline {
             let str_refs_u: Vec<&str> = shared_up_names.iter().map(|s| s.as_str()).collect();
             let str_refs_d: Vec<&str> = shared_down_names.iter().map(|s| s.as_str()).collect();
 
-            if let (Ok(su_w), Ok(sd_w)) = (
-                self.get_weight_or_fallback(&str_refs_u),
-                self.get_weight_or_fallback(&str_refs_d),
+            if let (Ok(su_l), Ok(sd_l)) = (
+                self.get_linear_or_fallback(&str_refs_u),
+                self.get_linear_or_fallback(&str_refs_d),
             ) {
-                let su = Self::matmul_linear(&normed_post_x, &su_w)?;
+                let su = su_l.forward(&normed_post_x)?;
                 let shared_act = if is_nemotron_moe {
                     let relu_su = su.relu().map_err(LuminaError::Candle)?;
                     relu_su.sqr().map_err(LuminaError::Candle)?
-                } else if let Ok(sg_w) = self.get_weight_or_fallback(&str_refs_g) {
-                    let sg = Self::matmul_linear(&normed_post_x, &sg_w)?;
+                } else if let Ok(sg_l) = self.get_linear_or_fallback(&str_refs_g) {
+                    let sg = sg_l.forward(&normed_post_x)?;
                     let silu_sg = candle_nn::ops::silu(&sg).map_err(LuminaError::Candle)?;
                     (silu_sg * su).map_err(LuminaError::Candle)?
                 } else {
                     candle_nn::ops::silu(&su).map_err(LuminaError::Candle)?
                 };
-                let shared_out = Self::matmul_linear(&shared_act, &sd_w)?;
+                let shared_out = sd_l.forward(&shared_act)?;
 
                 accum_out = match accum_out {
                     Some(prev) => Some((prev + shared_out).map_err(LuminaError::Candle)?),
@@ -2328,6 +2457,7 @@ impl CausalLMPipeline {
             }
 
             accum_out.unwrap_or_else(|| normed_post_x.clone())
+            }
         } else {
             // Standard dense SwiGLU MLP / Nemotron squared ReLU MLP
             if is_nemotron {
@@ -2412,12 +2542,29 @@ impl CausalLMPipeline {
         rocm_contiguous(&x)
     }
 
-    fn apply_rope(&self, q: &Tensor, k: &Tensor, pos: usize, seq_len: usize, theta: f32, is_sliding_layer: bool) -> Result<(Tensor, Tensor)> {
-        let dev = q.device();
+    /// Build (and cache) the duplicated cos/sin RoPE table up to `needed`
+    /// positions, on `device` in `dtype`. Keyed by (theta, sliding), so the
+    /// per-layer hot path becomes a contiguous row slice instead of a matmul,
+    /// two trig kernels, two `cat`s and `half_dim` CPU `powf`s.
+    fn rope_tables(&mut self, theta: f32, is_sliding_layer: bool, needed: usize, device: &Device, dtype: DType) -> Result<(Tensor, Tensor)> {
+        let key = (theta.to_bits(), is_sliding_layer);
+        if let Some((cos, sin)) = self.rope_cache.get(&key) {
+            if cos.dim(0).map_err(LuminaError::Candle)? >= needed
+                && cos.device().same_device(device)
+                && cos.dtype() == dtype
+            {
+                return Ok((cos.clone(), sin.clone()));
+            }
+        }
+
         let head_dim = self.config.head_dim;
         let half_dim = head_dim / 2;
+        // Grow lazily (power of two) instead of materialising the model's full
+        // max context: decode only touches the current position.
+        let max_pos = needed.max(2048).next_power_of_two();
 
-        let (positions, freqs) = if !is_sliding_layer && self.config.rope_scaling_type.as_deref() == Some("yarn") {
+        let is_yarn = !is_sliding_layer && self.config.rope_scaling_type.as_deref() == Some("yarn");
+        let (positions, freqs) = if is_yarn {
             let orig_ctx = self.config.rope_scaling_orig_ctx as f32;
             let factor = self.config.rope_scaling_factor.max(1.0);
             let beta_slow = self.config.yarn_beta_slow;
@@ -2437,7 +2584,7 @@ impl CausalLMPipeline {
                     (1.0 - alpha) * base_freq + alpha * (base_freq / factor)
                 }
             }).collect();
-            let positions: Vec<f32> = (pos..pos + seq_len).map(|p| p as f32).collect();
+            let positions: Vec<f32> = (0..max_pos).map(|p| p as f32).collect();
             (positions, freqs)
         } else {
             let scale_factor = if !is_sliding_layer && self.config.rope_scaling_factor > 0.0 {
@@ -2445,21 +2592,58 @@ impl CausalLMPipeline {
             } else {
                 1.0f32
             };
-            let positions: Vec<f32> = (pos..pos + seq_len).map(|p| (p as f32) / scale_factor).collect();
+            let positions: Vec<f32> = (0..max_pos).map(|p| (p as f32) / scale_factor).collect();
             let freqs: Vec<f32> = (0..half_dim).map(|i| 1.0f32 / theta.powf((2 * i) as f32 / head_dim as f32)).collect();
             (positions, freqs)
         };
 
-        let pos_tensor = Tensor::new(&positions[..], dev)?.unsqueeze(1)?; // [S, 1]
-        let freq_tensor = Tensor::new(&freqs[..], dev)?.unsqueeze(0)?; // [1, half_dim]
+        let pos_t = Tensor::new(&positions[..], device)?.unsqueeze(1)?; // [max_pos, 1]
+        let freq_t = Tensor::new(&freqs[..], device)?.unsqueeze(0)?; // [1, half_dim]
+        let angles = pos_t.matmul(&freq_t).map_err(LuminaError::Candle)?;
+        let cos_half = angles.cos().map_err(LuminaError::Candle)?;
+        let sin_half = angles.sin().map_err(LuminaError::Candle)?;
+        let cos = Tensor::cat(&[&cos_half, &cos_half], 1)?
+            .to_dtype(dtype)
+            .map_err(LuminaError::Candle)?;
+        let sin = Tensor::cat(&[&sin_half, &sin_half], 1)?
+            .to_dtype(dtype)
+            .map_err(LuminaError::Candle)?;
+        let cos = rocm_contiguous(&cos)?;
+        let sin = rocm_contiguous(&sin)?;
+        self.rope_cache.insert(key, (cos.clone(), sin.clone()));
+        Ok((cos, sin))
+    }
 
-        let angles = pos_tensor.matmul(&freq_tensor).map_err(LuminaError::Candle)?; // [S, half_dim]
-        let cos = angles.cos().map_err(LuminaError::Candle)?;
-        let sin = angles.sin().map_err(LuminaError::Candle)?;
+    fn apply_rope(&mut self, q: &Tensor, k: &Tensor, pos: usize, seq_len: usize, theta: f32, is_sliding_layer: bool) -> Result<(Tensor, Tensor)> {
+        let head_dim = self.config.head_dim;
+        let half_dim = head_dim / 2;
 
-        // cos/sin: [1, 1, seq_len, head_dim] matching q/k shape [B, num_heads, seq_len, head_dim]
-        let cos = Tensor::cat(&[&cos, &cos], 1)?.unsqueeze(0)?.unsqueeze(1)?.to_dtype(q.dtype())?;
-        let sin = Tensor::cat(&[&sin, &sin], 1)?.unsqueeze(0)?.unsqueeze(1)?.to_dtype(q.dtype())?;
+        // HIP-graph path: cos/sin come from small static buffers refreshed per
+        // step, so no position-dependent slice is baked into the graph.
+        if seq_len == 1 {
+            if let Some(map) = &self.static_rope {
+                if let Some((cos_t, sin_t)) = map.get(&(theta.to_bits(), is_sliding_layer)) {
+                    let cos = cos_t.clone();
+                    let sin = sin_t.clone();
+                    let rotate = |x: &Tensor| -> CandleResult<Tensor> {
+                        let x1 = x.narrow(3, 0, half_dim)?;
+                        let x2 = x.narrow(3, half_dim, half_dim)?;
+                        let neg_x2 = (x2 * -1.0)?;
+                        Tensor::cat(&[&neg_x2, &x1], 3)
+                    };
+                    let q_rot = rotate(q).map_err(LuminaError::Candle)?;
+                    let k_rot = rotate(k).map_err(LuminaError::Candle)?;
+                    let q_out = ((q.broadcast_mul(&cos)?) + (q_rot.broadcast_mul(&sin)?)).map_err(LuminaError::Candle)?;
+                    let k_out = ((k.broadcast_mul(&cos)?) + (k_rot.broadcast_mul(&sin)?)).map_err(LuminaError::Candle)?;
+                    return Ok((rocm_contiguous(&q_out)?, rocm_contiguous(&k_out)?));
+                }
+            }
+        }
+
+        let (cos_t, sin_t) = self.rope_tables(theta, is_sliding_layer, pos + seq_len, q.device(), q.dtype())?;
+        // Contiguous row slice: [1, 1, seq_len, head_dim] for [B, H, S, D].
+        let cos = cos_t.narrow(0, pos, seq_len)?.unsqueeze(0)?.unsqueeze(0)?;
+        let sin = sin_t.narrow(0, pos, seq_len)?.unsqueeze(0)?.unsqueeze(0)?;
 
         let rotate = |x: &Tensor| -> CandleResult<Tensor> {
             let x1 = x.narrow(3, 0, half_dim)?;
@@ -2543,6 +2727,267 @@ impl CausalLMPipeline {
         }
     }
 
+    /// Whether the HIP-graph decode path can serve this model.
+    pub fn hip_graph_supported(&self) -> bool {
+        self.dtype == DType::F16
+            && !self.kv_cache.is_quantized()
+            && !self.weights.contains("blk.0.ssm_a")
+            && !self.weights.contains("model.layers.0.ssm_a")
+            && !self.weights.contains("blk.0.shortconv.conv.weight")
+            && !self.weights.contains("blk.0.ffn_gate_inp.weight")
+            && self.config.num_hidden_layers > 0
+    }
+
+    /// Refresh the static graph input buffers. Every operation here is
+    /// allocation-free, so it never touches the memory captured by the graph.
+    #[cfg(feature = "hip-graph")]
+    fn graph_update_buffers(&mut self, pos: usize, h0_src: Option<&Tensor>) -> Result<()> {
+        let h = self.config.num_attention_heads;
+        let d = self.config.head_dim;
+        if let Some(h0) = h0_src {
+            if let Some(buf) = &self.static_h0 {
+                buf.copy2(h0)?;
+            }
+        }
+        if let Some(idx) = &self.static_idx {
+            idx.copy_from_host_u32(&vec![pos as u32; h * d])?;
+        }
+        if let (Some(buf), Some(src)) = (&self.static_mask, &self.static_mask_src) {
+            let max_len = self.graph_max_len;
+            let row = src.narrow(0, pos, 1)?.reshape((1, 1, 1, max_len))?;
+            buf.copy2(&row)?;
+        }
+        if let Some(map) = &self.static_rope {
+            let map = map.clone();
+            for (&key, (cos_buf, sin_buf)) in map.iter() {
+                if let Some((cos_t, sin_t)) = self.rope_cache.get(&key) {
+                    let cr = cos_t.narrow(0, pos, 1)?.reshape((1, 1, 1, d))?;
+                    let sr = sin_t.narrow(0, pos, 1)?.reshape((1, 1, 1, d))?;
+                    cos_buf.copy2(&cr)?;
+                    sin_buf.copy2(&sr)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "hip-graph"))]
+    fn graph_update_buffers(&mut self, _pos: usize, _h0_src: Option<&Tensor>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Decode one token by replaying the captured HIP graph.
+    #[cfg(feature = "hip-graph")]
+    fn graph_step(&mut self, input_ids: &Tensor, pos: usize) -> Result<Tensor> {
+        let flat = input_ids.flatten_all().map_err(LuminaError::Candle)?;
+        let tok = match flat.dtype() {
+            DType::U32 => flat.to_vec1::<u32>().map_err(LuminaError::Candle)?,
+            DType::I64 => flat.to_vec1::<i64>().map_err(LuminaError::Candle)?.into_iter().map(|v| v as u32).collect(),
+            other => return Err(LuminaError::Config(format!("graph step: unsupported token dtype {other:?}"))),
+        };
+        let tok = *tok.first().ok_or_else(|| LuminaError::Config("graph step: empty token".into()))?;
+        let embed_w = self.get_weight_or_fallback(&["model.embed_tokens.weight", "token_embd.weight", "embed_tokens.weight"])?;
+        let h0 = embed_w
+            .narrow(0, tok as usize, 1)
+            .map_err(LuminaError::Candle)?
+            .reshape((1, 1, self.config.hidden_size))
+            .map_err(LuminaError::Candle)?;
+        self.graph_update_buffers(pos, Some(&h0))?;
+        self.graph_exec
+            .as_ref()
+            .ok_or_else(|| LuminaError::Config("graph step without a captured graph".into()))?
+            .launch()?;
+        self.graph_logits
+            .as_ref()
+            .ok_or_else(|| LuminaError::Config("graph step without logits".into()))
+            .map(|t| t.clone())
+    }
+
+    #[cfg(not(feature = "hip-graph"))]
+    fn graph_step(&mut self, _input_ids: &Tensor, _pos: usize) -> Result<Tensor> {
+        Err(LuminaError::Config("HIP graph requires the hip-graph feature".into()))
+    }
+
+    /// Preallocate the static decode buffers, copy the prefill KV cache into
+    /// them, warm up, and capture one decode step into a HIP graph.
+    #[cfg(feature = "hip-graph")]
+    pub fn setup_hip_graph(&mut self, prefill_len: usize, max_len: usize) -> Result<()> {
+        use candle_core::rocm_backend::rocm_rs::hip::bindings;
+
+        if !self.hip_graph_supported() {
+            return Err(LuminaError::Config("HIP graph: unsupported model".into()));
+        }
+        if !self.device.is_rocm() {
+            return Err(LuminaError::Config("HIP graph: not a ROCm device".into()));
+        }
+        if prefill_len + 16 >= max_len {
+            return Err(LuminaError::Config("HIP graph: context does not fit max_len".into()));
+        }
+        if let Some(w) = self.config.sliding_window {
+            if w < max_len {
+                return Err(LuminaError::Config("HIP graph: sliding window < max_len".into()));
+            }
+        }
+
+        let dev = self.device.clone();
+        let dtype = self.dtype;
+        let h = self.config.num_attention_heads;
+        let kvh = self.config.num_key_value_heads.max(1);
+        let head_dim = self.config.head_dim;
+        let n_rep = (h / kvh).max(1);
+        let n_layers = self.config.num_hidden_layers;
+        let hidden = self.config.hidden_size;
+
+        // 1. Copy the prefill K/V into heads-repeated preallocated caches.
+        let mut static_kv: Vec<Option<StaticKvLayer>> = Vec::with_capacity(n_layers);
+        for l in 0..n_layers {
+            let (pk, pv) = match &self.kv_cache.layers[l].storage {
+                KVCacheStorage::Standard { k, v } => (k.clone(), v.clone()),
+                _ => return Err(LuminaError::Config("HIP graph: quantized KV".into())),
+            };
+            let (pk, pv) = match (pk, pv) {
+                (Some(k), Some(v)) => (k, v),
+                _ => return Err(LuminaError::Config("HIP graph: empty prefill KV".into())),
+            };
+            let sk = Tensor::zeros((1, h, max_len, head_dim), dtype, &dev)?;
+            let sv = Tensor::zeros((1, h, max_len, head_dim), dtype, &dev)?;
+            let (b, nkv, s, dd) = pk.shape().dims4().map_err(LuminaError::Candle)?;
+            let (rk, rv) = if n_rep > 1 {
+                let rk = pk.unsqueeze(2)?.expand((b, nkv, n_rep, s, dd))?.reshape((b, h, s, dd))?;
+                let rv = pv.unsqueeze(2)?.expand((b, nkv, n_rep, s, dd))?.reshape((b, h, s, dd))?;
+                (rk, rv)
+            } else {
+                (pk.clone(), pv.clone())
+            };
+            let mut idxv = Vec::with_capacity(h * s * dd);
+            for _ in 0..h { for si in 0..s { for _ in 0..dd { idxv.push(si as u32); } } }
+            let idx = Tensor::from_vec(idxv, (1, h, s, dd), &dev)?;
+            sk.scatter_set(&idx, &rk, 2).map_err(LuminaError::Candle)?;
+            sv.scatter_set(&idx, &rv, 2).map_err(LuminaError::Candle)?;
+            static_kv.push(Some(StaticKvLayer { k: sk, v: sv }));
+        }
+
+        // 2. Causal mask matrix + the single-row decode buffer.
+        let mut mv = vec![0f32; max_len * max_len];
+        for i in 0..max_len {
+            for j in (i + 1)..max_len {
+                mv[i * max_len + j] = -1e4;
+            }
+        }
+        let mask_src = Tensor::from_vec(mv, (max_len, max_len), &dev)?.to_dtype(dtype)?;
+        let mask_row = Tensor::zeros((1, 1, 1, max_len), dtype, &dev)?;
+
+        // 3. RoPE static buffers, one pair per distinct (theta, sliding).
+        let mut static_rope = std::collections::HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        for l in 0..n_layers {
+            let sw = match (self.config.sliding_window, self.config.sliding_window_pattern) {
+                (Some(w), Some(p)) if p > 0 => {
+                    if (l + 1) % p == 0 { None } else { Some(w) }
+                }
+                (s, _) => s,
+            };
+            let theta = if self.config.is_gemma && sw.is_some() { 10_000.0f32 } else { self.config.rope_theta };
+            let key = (theta.to_bits(), sw.is_some());
+            if seen.insert(key) {
+                let _ = self.rope_tables(theta, sw.is_some(), max_len, &dev, dtype)?;
+                static_rope.insert(
+                    key,
+                    (
+                        Tensor::zeros((1, 1, 1, head_dim), dtype, &dev)?,
+                        Tensor::zeros((1, 1, 1, head_dim), dtype, &dev)?,
+                    ),
+                );
+            }
+        }
+
+        // 4. Static scatter index and embedding-output buffer.
+        let idx = Tensor::zeros((1, h, 1, head_dim), DType::U32, &dev)?;
+        let h0 = Tensor::zeros((1, 1, hidden), dtype, &dev)?;
+
+        self.static_kv = Some(static_kv);
+        self.static_mask = Some(mask_row);
+        self.static_mask_src = Some(mask_src);
+        self.static_rope = Some(static_rope);
+        self.static_idx = Some(idx);
+        self.static_h0 = Some(h0);
+        self.graph_max_len = max_len;
+        self.graph_exec = None;
+        self.graph_logits = None;
+
+        self.graph_update_buffers(prefill_len, None)?;
+
+        // 5. Warm up so every allocation and weight lookup is already cached.
+        let dummy = Tensor::zeros((1, 1), DType::U32, &dev)?;
+        for _ in 0..3 {
+            let _ = self.forward(&dummy, prefill_len)?;
+        }
+        self.device.synchronize().map_err(LuminaError::Candle)?;
+
+        // 6. Capture and instantiate.
+        let stream = match &self.device {
+            Device::Rocm(d) => d.stream().as_raw(),
+            _ => unreachable!(),
+        };
+        let r = unsafe {
+            bindings::hipStreamBeginCapture(
+                stream,
+                bindings::hipStreamCaptureMode_hipStreamCaptureModeThreadLocal,
+            )
+        };
+        if r != bindings::hipError_t_hipSuccess {
+            return Err(LuminaError::Config(format!("hipStreamBeginCapture: {r}")));
+        }
+        let logits_res = self.forward(&dummy, prefill_len);
+        let mut graph = std::ptr::null_mut();
+        let r = unsafe { bindings::hipStreamEndCapture(stream, &mut graph) };
+        if logits_res.is_err() {
+            // Abort the capture cleanly so the stream is usable by the fallback.
+            if !graph.is_null() {
+                unsafe { bindings::hipGraphDestroy(graph); }
+            }
+            return logits_res.map(|_| ());
+        }
+        let logits = logits_res?;
+        if r != bindings::hipError_t_hipSuccess {
+            return Err(LuminaError::Config(format!("hipStreamEndCapture: {r}")));
+        }
+        self.device.synchronize().map_err(LuminaError::Candle)?;
+        let mut exec = std::ptr::null_mut();
+        let r = unsafe {
+            bindings::hipGraphInstantiate(&mut exec, graph, std::ptr::null_mut(), std::ptr::null_mut(), 0)
+        };
+        if r != bindings::hipError_t_hipSuccess {
+            return Err(LuminaError::Config(format!("hipGraphInstantiate: {r}")));
+        }
+        unsafe { bindings::hipGraphDestroy(graph); }
+
+        self.graph_logits = Some(logits);
+        self.graph_exec = Some(HipGraphExec {
+            exec: exec as usize,
+            stream: stream as usize,
+        });
+        Ok(())
+    }
+
+    #[cfg(not(feature = "hip-graph"))]
+    pub fn setup_hip_graph(&mut self, _prefill_len: usize, _max_len: usize) -> Result<()> {
+        Err(LuminaError::Config("HIP graph requires the hip-graph feature".into()))
+    }
+
+    /// Drop every static buffer / captured graph and return to the normal path.
+    pub fn clear_hip_graph(&mut self) {
+        self.static_h0 = None;
+        self.static_kv = None;
+        self.static_mask = None;
+        self.static_mask_src = None;
+        self.static_rope = None;
+        self.static_idx = None;
+        self.graph_exec = None;
+        self.graph_logits = None;
+        self.graph_max_len = 0;
+    }
+
     fn get_layer_weight(&mut self, layer_idx: usize, suffixes: &[&str]) -> Result<Tensor> {
         let layer_dev = self.device_for_layer(layer_idx);
         let prefixes = [
@@ -2599,6 +3044,154 @@ impl CausalLMPipeline {
             "Linear layer for layer {} with suffixes {:?} not found",
             layer_idx, suffixes
         )))
+    }
+
+    /// Fused quantized MoE forward: routes every token's top-k experts through
+    /// candle's `indexed_moe_forward`, keeping the `(E, n, k)` expert stacks
+    /// quantized on device (W4A16) instead of dequantising the whole stack.
+    ///
+    /// Returns `Ok(None)` when the layer has no reusable fused expert stack or
+    /// the backend cannot serve it, so the caller keeps the dense fallback.
+    fn moe_forward_indexed(
+        &mut self,
+        layer_idx: usize,
+        x: &Tensor,
+        selection_probs: &Tensor,
+        router_probs: &Tensor,
+        num_experts: usize,
+        top_k: usize,
+        is_nemotron_moe: bool,
+    ) -> Result<Option<Tensor>> {
+        // Only the full-resident GPU path keeps the quantized expert stacks on
+        // the compute device; partial CPU offload falls back to the dense loop.
+        if self.n_gpu_layers.is_some() {
+            return Ok(None);
+        }
+        if !(self.device.is_rocm() || self.device.is_cuda()) {
+            return Ok(None);
+        }
+        if std::env::var("AURORA_DISABLE_MOE_INDEXED")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+
+        let up_l = match self.get_layer_linear(layer_idx, &["ffn_up_exps.weight", "mlp.experts.up_exps.weight"]) {
+            Ok(l) => l,
+            Err(_) => return Ok(None),
+        };
+        let down_l = match self.get_layer_linear(layer_idx, &["ffn_down_exps.weight", "mlp.experts.down_exps.weight"]) {
+            Ok(l) => l,
+            Err(_) => return Ok(None),
+        };
+        let indexed_ok = |l: &LinearLayer| {
+            matches!(
+                l.quantized_dtype(),
+                Some(
+                    candle_core::quantized::GgmlDType::Q2K
+                        | candle_core::quantized::GgmlDType::Q3K
+                        | candle_core::quantized::GgmlDType::Q4K
+                        | candle_core::quantized::GgmlDType::Q5K
+                        | candle_core::quantized::GgmlDType::Q6K
+                        | candle_core::quantized::GgmlDType::Q8_0
+                )
+            )
+        };
+        if !indexed_ok(&up_l) || !indexed_ok(&down_l) {
+            return Ok(None);
+        }
+        let gate_l = if is_nemotron_moe {
+            None
+        } else {
+            match self.get_layer_linear(layer_idx, &["ffn_gate_exps.weight", "mlp.experts.gate_exps.weight"]) {
+                Ok(l) if indexed_ok(&l) => Some(l),
+                _ => return Ok(None),
+            }
+        };
+
+        let (b_sz, s_len, hidden) = match x.dims3() {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+        let tokens = b_sz * s_len;
+        if tokens == 0 || top_k == 0 || num_experts == 0 {
+            return Ok(None);
+        }
+
+        let sel_flat = selection_probs
+            .flatten_all()
+            .map_err(LuminaError::Candle)?
+            .to_dtype(DType::F32)
+            .map_err(LuminaError::Candle)?
+            .to_vec1::<f32>()
+            .map_err(LuminaError::Candle)?;
+        let clean_flat = router_probs
+            .flatten_all()
+            .map_err(LuminaError::Candle)?
+            .to_dtype(DType::F32)
+            .map_err(LuminaError::Candle)?
+            .to_vec1::<f32>()
+            .map_err(LuminaError::Candle)?;
+        if sel_flat.len() != tokens * num_experts || clean_flat.len() != tokens * num_experts {
+            return Ok(None);
+        }
+
+        // Rank on the (optionally biased) probabilities, combine with the
+        // unbiased ones and renormalise — identical to the dense loop.
+        let mut ids: Vec<u32> = Vec::with_capacity(tokens * top_k);
+        let mut weights: Vec<f32> = Vec::with_capacity(tokens * top_k);
+        for t in 0..tokens {
+            let row = &sel_flat[t * num_experts..(t + 1) * num_experts];
+            let clean_row = &clean_flat[t * num_experts..(t + 1) * num_experts];
+            let mut order: Vec<usize> = (0..num_experts).collect();
+            order.sort_by(|&a, &b| row[b].partial_cmp(&row[a]).unwrap_or(std::cmp::Ordering::Equal));
+            order.truncate(top_k);
+            let sum: f32 = order.iter().map(|&i| clean_row[i]).sum();
+            let norm = if sum.abs() > f32::EPSILON { 1.0 / sum } else { 1.0 };
+            for &i in &order {
+                ids.push(i as u32);
+                weights.push(clean_row[i] * norm);
+            }
+        }
+
+        let ids_t = Tensor::from_vec(ids, (tokens, top_k), &self.device).map_err(LuminaError::Candle)?;
+        let x1 = x
+            .reshape((tokens, hidden))
+            .map_err(LuminaError::Candle)?
+            .to_dtype(DType::F32)
+            .map_err(LuminaError::Candle)?
+            .reshape((tokens, 1, hidden))
+            .map_err(LuminaError::Candle)?;
+
+        let up = up_l.indexed_moe_forward(&x1, &ids_t)?;
+        let act = if is_nemotron_moe {
+            let relu_up = up.relu().map_err(LuminaError::Candle)?;
+            relu_up.sqr().map_err(LuminaError::Candle)?
+        } else if let Some(g_l) = gate_l {
+            let g = g_l.indexed_moe_forward(&x1, &ids_t)?;
+            let silu_g = candle_nn::ops::silu(&g).map_err(LuminaError::Candle)?;
+            (silu_g * up).map_err(LuminaError::Candle)?
+        } else {
+            candle_nn::ops::silu(&up).map_err(LuminaError::Candle)?
+        };
+        let act = act.to_dtype(DType::F32).map_err(LuminaError::Candle)?;
+        let down = down_l.indexed_moe_forward(&act, &ids_t)?;
+
+        let w_t = Tensor::from_vec(weights, (tokens, top_k, 1), &self.device)
+            .map_err(LuminaError::Candle)?
+            .to_dtype(DType::F32)
+            .map_err(LuminaError::Candle)?;
+        let out = down
+            .broadcast_mul(&w_t)
+            .map_err(LuminaError::Candle)?
+            .sum(1)
+            .map_err(LuminaError::Candle)?
+            .reshape((b_sz, s_len, hidden))
+            .map_err(LuminaError::Candle)?
+            .to_dtype(x.dtype())
+            .map_err(LuminaError::Candle)?;
+        Ok(Some(out))
     }
 }
 

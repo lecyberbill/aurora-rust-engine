@@ -40,7 +40,9 @@ cpu = []
 # Accélération Nvidia CUDA
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 # Accélération AMD ROCm (Linux / aurora-svc)
-rocm = ["candle-core/rocm"]
+rocm = ["candle-core/rocm", "candle-nn/rocm", "candle-transformers/rocm"]
+# HIP-graph decode runner: needs the local candle fork's in-place copy APIs.
+hip-graph = ["rocm"]
 flash-attn = ["cuda", "dep:candle-flash-attn"]
 ui = ["dep:grio"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]

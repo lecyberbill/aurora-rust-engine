@@ -1,6 +1,6 @@
 # Aurora Rust Engine (`aurora-rust-engine`)
 
-> **Pure Rust inference engine for image, text, speech & music generation — zero Python**
+> **Pure Rust inference engine for image, text, speech & music — no Python runtime**
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![CUDA](https://img.shields.io/badge/cuda-12.x%20%2F%2013.x-green.svg)](https://developer.nvidia.com/cuda-toolkit)
@@ -16,58 +16,41 @@
 
 👉 **Looking for full documentation? See the complete [User & Developer Guide (USER_GUIDE.md)](USER_GUIDE.md)** for SDK examples, REST API payloads, scheduler configurations, and VRAM optimization tips.  
 👉 **Running on AMD GPUs (e.g. `gfx1201` / RDNA 3.5 / RDNA 4)? See the [AMD ROCm 10.0 & Candle Setup Guide (docs/ROCM_SETUP.md)](docs/ROCM_SETUP.md)**.
+👉 **Wondering what actually works? See [SUPPORTED.md](SUPPORTED.md)** for the model → status table, validation metrics and known limitations.
 
-It provides a robust, zero-Python alternative for running state-of-the-art generative models across **four modalities** — image (**SDXL / Pony**, **FLUX.1 & FLUX.2**, **Z-Image Turbo**), text (**CausalLM**: Qwen / Llama / Mistral / Gemma / DeepSeek), speech (**Whisper STT**, **Parler-TTS / Kokoro**) and **music** (**ACE-Step 1.5**) — with deterministic execution, in-memory zero-overhead LoRA weight merging, and a sub-8 GB VRAM footprint.
+It runs image, text, speech and music models in pure Rust, with CUDA and ROCm/HIP backends. Large diffusion models can be streamed block-by-block, and LoRA weights are merged in memory.
 
 ### 🧠 Supported Models
 
-| Modality | Models |
+The full model → status table (validated parity / approximations / abandoned, with reasons) lives in **[SUPPORTED.md](SUPPORTED.md)**.
+
+| Modality | Highlights |
 |---|---|
-| **Image (Diffusion)** | SDXL / Pony XL (all single-file checkpoints), FLUX.1 `[dev/schnell]`, FLUX.2-Klein-4B / Klein-9B / Dev, Z-Image Turbo (S3-DiT 6B) |
-| **Video (DiT 3D)** | **CogVideoX-2B** (3D Spatio-Temporal DiT + Causal RoPE + Flow Matching ODE) |
-| **Super-Resolution / Upscaling** | **Real-ESRGAN** (x2/x4/x8), **4x-UltraSharp**, **NMKD**, **SRVGGNetCompact** (Anime-6B) with Bounded Tiling & Seam Blending |
-| **Vision-Language (VLM)** | **Gemma 4 31B Multimodal**, **Qwen2-VL**, **Qwen2.5-VL**, **Qwen3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, **SmolVLM** |
-| **Text (CausalLM)** | Qwen 2.5/3, **Qwen 3.5/3.8 hybrid (Gated DeltaNet)**, **Gemma 3 & Gemma 4 (31B)**, **Microsoft Phi-4 (15B)**, **Liquid AI LFM 2.5 (ShortConv-MoE)**, Llama 3, Mistral, DeepSeek — GGUF (Q4_K_M/Q8_0) & SafeTensors |
-| **Speech-to-Text** | Whisper Large-v3 / Turbo, **Moonshine** (native Mel + encoder/decoder) |
-| **Text-to-Speech** | Parler-TTS, Kokoro-82M, **ChatTTS** (Conversational Prosody & Vocos) |
-| **Text-to-Music & Editing** | ACE-Step 1.5 — Turbo / Base / SFT / XL, 48 kHz stereo, lyrics, WAV / OGG / MP3, **cover / repaint / extract / lego / complete** |
-| **Text-to-Audio / Sound Design** | Stable Audio Open 1.0 — T5 + timing conds, 44.1 kHz stereo (≤47 s), SFX / ambient / music |
-| **Text-to-Music (AR)** | MusicGen-small — T5 + autoregressive decoder + EnCodec 32 kHz |
+| **Image / Video** | SDXL · Pony · FLUX.1 · FLUX.2 (Klein 4B/9B, Dev) · Z-Image Turbo · CogVideoX-2B |
+| **Upscaling / VLM** | Real-ESRGAN · 4x-UltraSharp · Gemma 4 31B · Qwen2/2.5/3-VL · PaliGemma 2 · SmolVLM |
+| **Text** | Qwen 2.5/3 · Gemma 3/4 · Phi-4 · Granite 4.2 · Llama 3 · Mistral · DeepSeek |
+| **Speech / TTS** | Whisper · Moonshine · Parler-TTS · Kokoro · ChatTTS |
+| **Music / Audio** | ACE-Step 1.5 · Stable Audio Open · MusicGen |
+
+> Not everything works: e.g. gpt-oss (MXFP4), LFM 2.5 and Nemotron are **not** supported. Reasons in [SUPPORTED.md § Not supported](SUPPORTED.md#not-supported-abandoned).
 
 ---
 
-## ✨ Features
+## ✨ Highlights
 
-- **Pure Rust Native Inference**: Zero Python dependencies, zero PyTorch overhead, compiled directly to a native standalone executable.
-- **Universal Multi-Container Zero-Copy Loader**: Direct mmap and slice-based ingestion across **GGUF (v2/v3)**, **SafeTensors**, and **ONNX Initializers** with zero external Protobuf runtime dependencies and alignment-safe zero-copy buffers (`Cow<'_, [T]>`).
-- **Unified HuggingFace AutoModel Facade**: Standard `AutoModel::from_local` and `AutoModel::from_pretrained` interface supporting both generative diffusion pipelines and autoregressive text models.
-- **Vision-Language Multimodal Understanding (Pure Rust VLM)**: Complete SigLIP/ViT visual encoder + Multimodal MLP Projector + Causal LLM decoder supporting **Qwen2/2.5/3-VL**, **PaliGemma 2**, **Gemma 3 Vision**, and **SmolVLM** for Visual Question Answering (VQA) and dense image captioning.
-- **CausalLM Text-to-Text Generation (Pure Rust)**: Autoregressive text generation with GPU KV-Cache supporting **Llama 3 / DeepSeek V3/R1**, **Qwen 2.5/3**, **Qwen 3.5/3.8 hybrid (Gated DeltaNet + full attention)**, **Gemma 2/4** (with unit-offset RMSNorm & attention logit softcapping), and **Mistral** in both **GGUF** (quantized Q4_K_M, Q8_0) and **SafeTensors** formats.
-- **Token-by-Token Native Streaming Callback**: Clean zero-overhead streaming via `TokenCallback` without pulling web/async dependencies into the inference core.
-- **Dynamic Sparse MoE Top-K Routing**: Normalized Top-K dispatch across independent and shared experts for DeepSeek V3/R1 and Mixtral architectures.
-- **Super-Resolution & Neural Upscaling (Real-ESRGAN & 4x-UltraSharp)**: High-speed pure Rust neural upscaling (x2, x4, x8) powered by `RRDBNet` and `SRVGGNetCompact` with bounded-memory tiled processing, seam blending, and transparency preservation.
-- **Flux.1 & Flux.2 Family Full Support**: Native implementation of Multimodal Diffusion Transformers (MMDiT) for **Flux.1 [dev/schnell]**, **Flux.2-Klein-4B**, **Flux.2-Klein-9B**, and **Flux.2-Dev Scaled** with exact 3D/4D Rotary Position Embeddings (RoPE).
-- **Z-Image Turbo Realtime DiT (S3-DiT 6B)**: 100% pure Rust 4-step real-time inference with native FlashAttention-2, Qwen3-4B text conditioning, 16-channel VAE, and dynamic shift timestep scheduling.
-- **FLUX.2 Multi-Image Reference Conditioning (Mode Édition)**: Native zero-adapter reference image guidance using 4D RoPE spatial-temporal coordinates $[T, Y, X, \text{Ref}]$ and VAE latent token injection for identity preservation across scenes.
-- **Universal Multiplatform Hardware Acceleration**: Unified execution across **NVIDIA CUDA**, **AMD ROCm / HIP** (RDNA2/RDNA3/RDNA4), **Apple Silicon Metal**, and multi-core CPU.
-- **Universal Tiled Scaled Dot-Product Attention (Chunked 512 + Online Softmax)**: Pure Rust cross-platform attention engine avoiding $O(N^2)$ memory spikes on arbitrary GPU/CPU architectures without external C++ bindings.
-- **Async Double-Buffering & Host-to-Device Streaming**: Ring-buffered MPSC background worker pre-loading and dequantizing block $N+1$ on CPU during block $N$ GPU computation to completely mask PCIe I/O latency.
-- **Sub-7.5GB VRAM Flux Sequential Block Streaming**: Executes massive MMDiT models (3.88B to 12B parameters) with on-demand per-block GPU streaming and zero WDDM paging.
-- **FLUX.2 Image-to-Image (Img2Img) & Inpainting with LoRA**: Contextual ODE transformation, LoRA adapter hot-splicing during block streaming, and sharp mask boundary preservation with flow-matching background re-injection.
-- **Pure Rust 32-Channel & 16-Channel `FluxVaeEncoder` & `FluxVaeDecoder`**: Bit-exact VAE encoding and decoding with BatchNorm latent standardization.
-- **SDXL & Pony XL Full Support**: Seamless support for all `.safetensors` single-file checkpoints from Civitai and Hugging Face.
-- **Native FlashAttention-2 Acceleration**: Up to 9.5x faster attention computation with fused CUDA kernels under Windows MSVC and Linux.
-- **Zero-Overhead In-Memory LoRA Merging**: Instant hot-patching of UNet and CLIP weights directly in GPU/CPU memory with 0 MB extra VRAM overhead.
-- **Exact Penultimate Text Parity**: Custom penultimate hidden state extractors for CLIP-L, OpenCLIP-bigG, and multi-layer concat for Qwen3-4B (Layers 9/18/27).
-- **Seamless $C^\infty$ Cosine Tiled VAE**: 4-quadrant $72\times 72$ latent decoding with 128px smooth cosine cross-fade eliminating all tile seams.
-- **Deterministic Schedulers**: Continuous Euler Discrete, Flow Matching Rectified Euler ODE (`step_at` support for arbitrary start step), and DPM-Solver++ 2M Karras.
-- **Whisper Speech-to-Text (Pure Rust)**: Bit-exact Whisper Large-v3 / Turbo transcription with a native Slaney Mel-filterbank, pure Rust WAV I/O, and multilingual decoding in `src/pipelines/whisper.rs`.
-- **Moonshine Speech-to-Text (Pure Rust)**: Lightweight encoder-decoder ASR (`src/models/moonshine.rs`) — conv audio frontend + partial interleaved RoPE, validated vs `transformers` (encoder 6.9e-6, token ids identical).
-- **Neural Text-to-Speech (Parler-TTS, Kokoro-82M & ChatTTS)**: Pure Rust TTS with voice/style descriptors in `src/pipelines/tts.rs` and conversational expressive synthesis (`[laugh]`, pauses) in `src/pipelines/chattts.rs` with high-speed Vocos vocoding.
-- **ACE-Step 1.5 Text-to-Music & Editing (Pure Rust)**: Full 1D DiT + Flow-Matching + Oobleck 48 kHz stereo VAE port with bit-exact validation vs HuggingFace Diffusers. Supports **Turbo / Base / SFT / XL** variants, classifier-free guidance (APG), Qwen3 text+lyric conditioning, a **5Hz Qwen3 LM planner** (CoT metadata + constrained semantic audio-code generation driving the DiT), a bit-exact **5Hz FSQ audio codec**, a deterministic seeded RNG, and WAV / OGG Vorbis / MP3 export. The **source-audio tasks** — **cover** (with optional FSQ roundtrip), **repaint** (bit-exact), **extract**, **lego** and **complete** — run through `TaskRequest` + `AudioDiffusionPipeline::generate_task` (SFT-stems `Global:/Local:/Mask Control:` captions included). A **low-VRAM** loader (encoders on CPU) fits the 5B **XL** checkpoints on 12 GB. See [`docs/ACESTEP_AUDIO_SPEC.md`](docs/ACESTEP_AUDIO_SPEC.md) and [`docs/ACESTEP_TASKS_PLAN.md`](docs/ACESTEP_TASKS_PLAN.md).
+- **Pure Rust, no Python runtime** — one native binary.
+- **CUDA and AMD ROCm/HIP** backends (RDNA2/3/4, tested on `gfx1201`), plus Metal and CPU.
+- **GGUF (Q4_K_M/Q8_0) and SafeTensors** loaders (mmap/slice-based).
+- **Image**: SDXL/Pony, FLUX.1, FLUX.2 (Klein 4B/9B, Dev), Z-Image Turbo; img2img, inpaint, ControlNet, in-memory LoRA merge.
+- **Video**: CogVideoX-2B (3D DiT).
+- **VLM**: Gemma 4 31B, Qwen2/2.5/3-VL, PaliGemma 2, SmolVLM.
+- **Text**: Qwen, Gemma, Phi-4, Granite, Llama, Mistral, DeepSeek with KV cache, streaming and sampling.
+- **Speech/TTS**: Whisper, Moonshine; Parler-TTS, Kokoro, ChatTTS.
+- **Audio**: ACE-Step 1.5 (cover/repaint/extract/lego/complete), Stable Audio Open, MusicGen.
+- **Memory**: tiled attention, bounded tiling for upscalers, and sequential block streaming for large MMDiT models.
+- **Performance**: fused ROCm kernels (RMSNorm/softmax/RoPE/sigmoid); opt-in HIP-graph decode (`--features hip-graph`).
 
-- **Stable Audio Open 1.0 (Pure Rust)**: Text-to-audio / sound-design pipeline — T5-base prompt + Fourier `seconds_start`/`seconds_total` conditioners, a 24-layer **DiT** continuous transformer with GQA cross-attention and partial RoPE, an **EDM/SDE DPM-Solver++** scheduler (`v_prediction`), and the **AutoencoderOobleck** 44.1 kHz stereo VAE. All modules validated vs `diffusers`; see [`USER_GUIDE.md`](USER_GUIDE.md).
-- **MusicGen Text-to-Music (Pure Rust)**: T5-base prompt → `enc_to_dec_proj` → 24-layer autoregressive decoder (learned positions, 4 LM heads) with the MusicGen **delay pattern** (CFG) → **EnCodec 32 kHz** decoder (weight-norm conv/convT + LSTM + residual blocks). Validated vs `transformers` (EnCodec 1.9e-6, decoder 5e-4); see [`USER_GUIDE.md`](USER_GUIDE.md).
+For per-module details and validation numbers, see **[SUPPORTED.md](SUPPORTED.md)** and **[USER_GUIDE.md](USER_GUIDE.md)**.
 
 ---
 
@@ -173,7 +156,7 @@ fn main() -> anyhow::Result<()> {
     let device = Device::new_cuda(0)?;
     let mut pipeline = StableDiffusionXLPipeline::from_safetensors("checkpoint.safetensors", &device)?;
 
-    // Hot-merge LoRA directly into model weights (< 10 seconds, 0 MB extra VRAM)
+    // Merge LoRA directly into the model weights (in place)
     pipeline.load_lora("style_lora.safetensors", 0.85)?;
 
     let params = DiffusionParams {
@@ -328,8 +311,8 @@ cargo run --release --bin server --features cuda,flash-attn
 | Modality & Task | Model & Configuration | Empirical Result | Hardware / Notes |
 |---|---|---|---|
 | **Super-Resolution (4x)** | RealESRGAN_x4 (66.8 Mo, tiled 256px) | **5.51 s** (512² → 2048²) | CUDA (RTX 4070 Ti), 0.14s load |
-| **Speech-to-Text (ASR)** | Moonshine Tiny (108 Mo, 48k samples) | **1.60 s** | CUDA (RTX 4070 Ti), bit-exact |
-| **Speech-to-Text (ASR)** | Whisper Large-v3 / Turbo | Bit-exact vs PyTorch | Native Slaney Mel + greedy/beam |
+| **Speech-to-Text (ASR)** | Moonshine Tiny (108 Mo, 48k samples) | **1.60 s** | CUDA (RTX 4070 Ti), parity vs `transformers` |
+| **Speech-to-Text (ASR)** | Whisper Large-v3 / Turbo | Parity vs PyTorch | Native Slaney Mel + greedy/beam |
 | **Text Generation (LLM)** | TinyLlama-1.1B-Chat (2.2 Go F16) | **5.38 tok/s** (2.06s load) | CUDA (RTX 4070 Ti), KV-cache |
 | **Image Synthesis (DiT)** | FLUX.2-Klein-4B (4 steps, 1024²) | **25.85 s** ODE, 3.64s VAE | CUDA (RTX 4070 Ti), 1.88 Mo output |
 | ACE-Step 1.5 **Turbo** | 5 s, 8 steps | Real-time | CUDA / ROCm |
@@ -337,20 +320,18 @@ cargo run --release --bin server --features cuda,flash-attn
 | ACE-Step 1.5 **Base** | 10 s, 30 steps (CFG/APG) | 2.7 s | CUDA / ROCm |
 | Audio Export | 48 kHz stereo | WAV · OGG · MP3 | Zero C/FFmpeg dependencies |
 
-### 🚀 Pure Rust LLM Inference Benchmarks (AMD ROCm / Radeon AI PRO R9700 `gfx1201`)
+### 🚀 LLM decode benchmarks (AMD ROCm, `gfx1201`)
 
-| Model | Checkpoint File | Size | Load Time | Generation Throughput | Test Case |
-|---|---|---|---|---|---|
-| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.68 s** | **11.73 tok/s** (401 tok / 34.19 s) | French poem, temp 0.7 (GDN path) |
-| **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **3.85 s** | **17.80 tok/s** (65 tok / 3.65 s) | Ocean paragraph, greedy |
-| **Gemma 4 31B (Text)** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **7.92 s** | **11.25 tok/s** (65 tok / 5.78 s) | Ocean paragraph, greedy |
-| **Gemma 4 31B (Multimodal VLM)** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` + `mmproj-gemma-4-31b-BF16.gguf` | 18.82 GB + 1.2 GB | **6.33 s** (LLM) + **0.90 s** (Vision) | **11.47 tok/s** (257 tok / 22.41 s) | Dense comic strip OCR & VQA (`Le-Complexe.jpg`, 266 visual tokens in 1.17s) |
-| **Phi-4 Reasoning Plus 15B** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.13 s** (lazy) | **8.49 tok/s** (49 tok / 5.77 s) | Native Phi template; concise reasoning → "Paris" |
-| **LFM 2.5 8B** | `LFM2.5-8B-A1B-Q4_K_M.gguf` | 4.80 GB | **0.35 s** (lazy) | **3.15 tok/s** (65 tok / 20.65 s) | Degenerate output (`?` tokens); engine does not crash |
+Single stream, load excluded, 200–256 tokens. Full table and methodology in **[SUPPORTED.md](SUPPORTED.md#benchmarks--single-stream-decode-rocm-100-radeon-ai-pro-r9700-gfx1201)**.
 
-> **Qwen 3.5 / 3.8 note:** hybrid checkpoints declare `general.architecture = qwen35`. The engine auto-loads `assets/tokenizers/qwen35_tokenizer.json` (248k vocab) and refuses to start when its `<|im_end|>` id does not match the GGUF EOS. Sampling (temperature/top-p/top-k/repetition) is available for Qwen 3.5/3.8 and Gemma; greedy when `temperature <= 0`. Batch size is 1 and the GDN recurrence runs in F32 through portable `QMatMul` (no experimental WMMA kernel).
->
-> Benchmarked on 2026-10-20 with the corrected CLI (actual tokens counted by the streaming callback). Phi-4 and LFM load times are metadata-only (lazy loading); LFM output is still degenerate, while Phi-4 uses its native GGUF chat template and a 1.1 repetition penalty.
+| Model | Size | Decode | Note |
+|---|---:|---:|---|
+| Qwen 3.8 27B (Q4_K_M) | 17.4 GB | **15.2 tok/s** | Hybrid GDN (approximate recurrence) |
+| Gemma 3 12B (Q4_K_M) | 7.3 GB | **30–38 tok/s** | ~41 tok/s with `--features hip-graph` |
+| Phi-4 14B (Q4_K_M) | 8.5 GB | **22.9 tok/s** | Native chat template |
+| Gemma 4 31B (UD-Q4_K_XL) | 18.8 GB | 11.3 tok/s | Text; VLM ~11.5 tok/s |
+
+> gpt-oss and LFM/Nemotron are **not** supported in-engine — see [SUPPORTED.md § Not supported](SUPPORTED.md#not-supported-abandoned). As a reference, gpt-oss-20b runs at ~158 tok/s under ollama.
 
 ---
 

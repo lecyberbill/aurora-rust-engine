@@ -38,11 +38,14 @@ impl RmsNorm {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let norm = rms_norm(x, self.eps)?;
-        let scaled = norm
-            .to_dtype(DType::F32)?
-            .broadcast_mul(&self.weight.to_dtype(DType::F32)?)?;
-        scaled.to_dtype(x.dtype())
+        // Single fused kernel when the backend provides one (ROCm/CUDA/Metal),
+        // instead of the F32 cast + sqr/mean/sqrt/div/mul chain.
+        let w = if self.weight.dtype() == x.dtype() {
+            self.weight.clone()
+        } else {
+            self.weight.to_dtype(x.dtype())?
+        };
+        candle_nn::ops::rms_norm(x, &w, self.eps as f32)
     }
 }
 
@@ -57,30 +60,40 @@ pub fn repeat_kv(xs: Tensor, n_rep: usize) -> Result<Tensor> {
     }
 }
 
-/// RoPE (HF `rotate_half` convention) in F32.
+/// RoPE (HF `rotate_half` convention).
 /// `i`: `[B, H, S, D]`; `cos`/`sin`: `[S, D/2]`.
+///
+/// Uses the backend's fused rotary kernel when available (ROCm/CUDA/Metal),
+/// which replaces the F32 cast + two `cat`s + four elementwise ops per call.
 pub fn rope(i: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-    let dim = i.dim(3)?;
-    let half = dim / 2;
-    let x_f32 = i.to_dtype(DType::F32)?;
-    let cos_full = Tensor::cat(&[cos, cos], 1)?.unsqueeze(0)?.unsqueeze(1)?;
-    let sin_full = Tensor::cat(&[sin, sin], 1)?.unsqueeze(0)?.unsqueeze(1)?;
-    let x1 = x_f32.narrow(3, 0, half)?;
-    let x2 = x_f32.narrow(3, half, half)?;
-    let x_rot = Tensor::cat(&[&(x2.neg()?), &x1], 3)?;
-    let out = (x_f32.broadcast_mul(&cos_full)? + x_rot.broadcast_mul(&sin_full)?)?;
-    out.to_dtype(i.dtype())
+    candle_nn::rotary_emb::rope(i, cos, sin).or_else(|_| {
+        let dim = i.dim(3)?;
+        let half = dim / 2;
+        let x_f32 = i.to_dtype(DType::F32)?;
+        let cos_full = Tensor::cat(&[cos, cos], 1)?.unsqueeze(0)?.unsqueeze(1)?;
+        let sin_full = Tensor::cat(&[sin, sin], 1)?.unsqueeze(0)?.unsqueeze(1)?;
+        let x1 = x_f32.narrow(3, 0, half)?;
+        let x2 = x_f32.narrow(3, half, half)?;
+        let x_rot = Tensor::cat(&[&(x2.neg()?), &x1], 3)?;
+        let out = (x_f32.broadcast_mul(&cos_full)? + x_rot.broadcast_mul(&sin_full)?)?;
+        out.to_dtype(i.dtype())
+    })
 }
 
-/// Numerically-stable softmax over the last dimension, computed in F32.
+/// Numerically-stable softmax over the last dimension.
+///
+/// Uses the backend's fused single-kernel op when available (ROCm/CUDA/Metal)
+/// and falls back to the portable F32 composition otherwise.
 pub fn softmax_last_dim(x: &Tensor) -> Result<Tensor> {
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let max = x_f32.max_keepdim(candle_core::D::Minus1)?;
-    let shifted = x_f32.broadcast_sub(&max)?;
-    let exp = shifted.exp()?;
-    let sum = exp.sum_keepdim(candle_core::D::Minus1)?;
-    let out = exp.broadcast_div(&sum)?;
-    out.to_dtype(x.dtype())
+    candle_nn::ops::softmax_last_dim(x).or_else(|_| {
+        let x_f32 = x.to_dtype(DType::F32)?;
+        let max = x_f32.max_keepdim(candle_core::D::Minus1)?;
+        let shifted = x_f32.broadcast_sub(&max)?;
+        let exp = shifted.exp()?;
+        let sum = exp.sum_keepdim(candle_core::D::Minus1)?;
+        let out = exp.broadcast_div(&sum)?;
+        out.to_dtype(x.dtype())
+    })
 }
 
 /// Additive causal (optionally sliding-window) attention mask.

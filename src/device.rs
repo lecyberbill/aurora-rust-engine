@@ -183,13 +183,12 @@ impl Default for KernelDispatchConfig {
 /// Universal Softmax along last dimension that works deterministically across
 /// CPU, CUDA, ROCm (HIP), and Metal without backend kernel dispatch crashes.
 pub fn softmax_last_dim(x: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
-    candle_nn::ops::softmax(x, candle_core::D::Minus1)
-        .or_else(|_| {
-            let max = x.max_keepdim(candle_core::D::Minus1)?;
-            let exp = x.broadcast_sub(&max)?.exp()?;
-            let sum = exp.sum_keepdim(candle_core::D::Minus1)?;
-            exp.broadcast_div(&sum)
-        })
+    // Fused single-kernel softmax when the backend has it (ROCm/CUDA/Metal).
+    // The generic fallback uses reduce ops, which copy metadata to the device on
+    // every call — not capturable in a HIP graph and slower in decode.
+    candle_nn::ops::softmax_last_dim(x).or_else(|_| {
+        candle_nn::ops::softmax(x, candle_core::D::Minus1)
+    })
 }
 
 /// Universal Memory-Efficient Tiled Scaled Dot-Product Attention (Online Softmax / FlashAttention algorithm).

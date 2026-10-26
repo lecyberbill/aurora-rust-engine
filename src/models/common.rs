@@ -98,6 +98,35 @@ impl LinearLayer {
             }
         }
     }
+
+    /// Whether the weights are held in a truly quantized (GGUF/W4A16) form.
+    pub fn is_quantized(&self) -> bool {
+        matches!(self, Self::Quantized(q) if matches!(q.as_ref(), QMatMul::QTensor(_)))
+    }
+
+    /// GGML dtype of the packed weights, when they are a `QTensor`.
+    pub fn quantized_dtype(&self) -> Option<candle_core::quantized::GgmlDType> {
+        match self {
+            Self::Quantized(q) => match q.as_ref() {
+                QMatMul::QTensor(t) => Some(t.dtype()),
+                _ => None,
+            },
+            Self::Tensor(_) => None,
+        }
+    }
+
+    /// Fused indexed mixture-of-experts matmul for a `(num_experts, n, k)` expert
+    /// stack. `x` is `(batch, 1 or topk, k)` and `ids` is `(batch, topk)` u32;
+    /// the result is `(batch, topk, n)`. Only available for quantized weights on
+    /// CUDA/ROCm — callers should fall back to a dense loop otherwise.
+    pub fn indexed_moe_forward(&self, x: &Tensor, ids: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Quantized(q) => q.indexed_moe_forward(x, ids).map_err(LuminaError::Candle),
+            Self::Tensor(_) => Err(LuminaError::Config(
+                "indexed_moe_forward requires quantized expert weights".to_string(),
+            )),
+        }
+    }
 }
 
 /// Progress callback (step_index, total_steps, latent). Used object-safe (boxed, not generic).
