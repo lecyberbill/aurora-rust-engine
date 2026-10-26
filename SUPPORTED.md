@@ -103,7 +103,7 @@ Protocol: batch size 1, single request, **load time excluded**, `AURORA_IGNORE_E
 
 CUDA reference (RTX 4070 Ti 12 GB, from earlier runs): TinyLlama-1.1B **5.4 tok/s**, Moonshine Tiny **1.6 s**, Real-ESRGAN x4 **5.5 s**, FLUX.2-Klein-4B **25.9 s**.
 
-> The split-K flash-decoding kernel is the default on ROCm F32 `D=256` (`AURORA_NO_FLASH=1` reverts to the portable path). The server-local Candle fork autotune (patches in [`docs/patches/`](docs/patches/)) adds ~5–10% on top, and the opt-in HIP graph adds ~8% on Gemma. See [`docs/PERF_ROCM.md`](docs/PERF_ROCM.md) for full measurements, rejected experiments (F16 activations, GPU sampling, bucketed graphs) and the roofline analysis.
+> The split-K flash-decoding kernel is the default on ROCm F32 `D=256` (`AURORA_NO_FLASH=1` reverts to the portable path). The server-local Candle fork autotune (patches in [`docs/patches/`](docs/patches/)) adds ~5–10% on top. The opt-in HIP graph (`--features hip-graph` + `AURORA_HIP_GRAPH=1`) predates the flash kernel and is no longer faster for these models; it is kept for experimentation. See [`docs/PERF_ROCM.md`](docs/PERF_ROCM.md) for full measurements, rejected experiments (F16 activations, GPU sampling, bucketed graphs) and the roofline analysis.
 
 ---
 

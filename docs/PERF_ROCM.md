@@ -58,9 +58,12 @@ to ~1.75× (Qwen).
    online-softmax partials per KV chunk (one warp per head/chunk) and combines
    them: 4.8× faster per layer (0.15 → 0.03 ms). Default on ROCm F32 `D=256`;
    `AURORA_NO_FLASH=1` reverts to the portable path.
-4. **HIP-graph decode** for attention-only models: +8% on Gemma (257 tok).
-   Neutral on Qwen 3.5/3.8 because the graph attends over the full `max_len`,
-   and that extra attention offsets the launch-gap recovery.
+4. **HIP-graph decode** for attention-only models: +8% on Gemma (257 tok) over
+   the *old* attention path. Neutral on Qwen 3.5/3.8 because the graph attends
+   over the full `max_len`, and that extra attention offsets the launch-gap
+   recovery. Since the flash kernel, the non-graph path is faster than the graph
+   path for these models; the graph remains an experimental opt-in
+   (`--features hip-graph` + `AURORA_HIP_GRAPH=1`).
 
 ## What was rejected (and why)
 
