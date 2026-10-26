@@ -68,6 +68,12 @@ Reference (same GGUF, same GPU, 256 tok, via llama.cpp/ollama): **Qwen 29.4**,
   low. Rejected for decode. (The launch was also on the null stream; it now
   uses the device stream. The kernel remains useful where it avoids
   materialising a large `[Lq, Lk]` matrix, i.e. long-context prefill.)
+- **Bucketed HIP graphs**: rejected. Candle's allocator is shared, so a second
+  capture reuses the first graph's intermediate buffers (which that graph still
+  writes to on replay) → corrupted output / HIP errors with several buckets.
+  Recapturing one bucket at a time requires saving/restoring the 48 GDN states
+  (~144 MB) plus three warm-up forwards per boundary; at 256-token runs that
+  overhead offsets the launch-gap gain.
 
 ## Roofline / where the time goes
 
@@ -137,5 +143,4 @@ Env switches: `CANDLE_ROCM_AUTOTUNE=0` (disable autotune),
 - A real O(V) top-k kernel for sampling.
 - GEMV launch tuning for `gfx1201` (nwarps / rows per block), closer to
   llama.cpp's kernels.
-- Bucketed HIP graphs so the attention length tracks the position.
 - Fusing the GDN step (Qwen 3.5/3.8) into fewer kernels.

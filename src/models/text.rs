@@ -544,7 +544,7 @@ impl GenerationModel for TextModel {
                 }
 
                 for i in 0..params.max_tokens {
-                    if stop_ids.contains(&curr_tok) {
+                    if !ignore_eos && stop_ids.contains(&curr_tok) {
                         break;
                     }
                     let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
