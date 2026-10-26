@@ -89,11 +89,12 @@ The README stays short; details live here.
 
 ## Benchmarks — single-stream decode (ROCm 10.0, Radeon AI PRO R9700 `gfx1201`)
 
-Protocol: batch size 1, single request, **load time excluded**, `AURORA_IGNORE_EOS=1` where applicable to avoid early-EOS skew. Numbers are from the default build unless noted.
+Protocol: batch size 1, single request, **load time excluded**, `AURORA_IGNORE_EOS=1` where applicable to avoid early-EOS skew. Numbers are from the default build unless noted. Ranges reflect run-to-run variance (EOS length); the HIP-graph gain is measured as a paired comparison on the same prompt.
 
 | Model | File | Size | Load | Decode | Notes |
 |---|---|---:|---:|---:|---|
-| Qwen 3.8 27B | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | 71 s | **15.2 tok/s** (200 tok) | Hybrid GDN — approximate recurrence |
+| Qwen 3.8 27B | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | 71 s | **12.9–16.1 tok/s** (200 tok) | Hybrid GDN — approximate recurrence |
+| Qwen 3.8 27B + HIP graph | same | 17.44 GB | 71 s | **14.0–18.2 tok/s** (≈+15%) | `--features hip-graph` (opt-in) |
 | Gemma 3 12B | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | ~4 s | **30–38 tok/s** (200 tok) | Default backend |
 | Gemma 3 12B + HIP graph | same | 7.30 GB | ~4 s | **~41 tok/s** | `--features hip-graph` (opt-in) |
 | Gemma 4 31B (text) | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | 7.9 s | 11.3 tok/s | Earlier run |
@@ -118,4 +119,4 @@ CUDA reference (RTX 4070 Ti 12 GB, from earlier runs): TinyLlama-1.1B **5.4 tok/
 - **ROCm indexed-MoE** supports q2k/q3k/q4k/q5k/q6k/q8_0 only; Q5_0/Q4_0 expert stacks fall back to the dense path (or are rejected for memory reasons).
 - **Qwen 3.5/3.8 GDN** is an approximation (EMA), not the exact DeltaNet recurrence.
 - **WMMA INT4** for `gfx1201` exists as the standalone `test_wmma_q4k` binary but is not wired into the model path.
-- The **HIP-graph** decode runner needs the local Candle fork patch (`copy2`/`copy_from_host_u32`) and the `hip-graph` feature; the default ROCm build does not require it.
+- The **HIP-graph** decode runner needs the local Candle fork patch (`copy2`/`copy_from_host_u32`) and the `hip-graph` feature; the default ROCm build does not require it. It covers Gemma 3 and Qwen 3.5/3.8 (attention KV + GDN conv/recurrent state preallocated and updated in place).

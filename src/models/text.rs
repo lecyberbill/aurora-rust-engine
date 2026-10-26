@@ -499,6 +499,17 @@ impl GenerationModel for TextModel {
                 let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
                 let logits = model.forward(&input, 0)?;
 
+                if std::env::var_os("AURORA_HIP_GRAPH").is_some() {
+                    let max_len = tokens.len() + params.max_tokens + 8;
+                    match model.setup_static_graph(tokens.len(), max_len) {
+                        Ok(()) => eprintln!("⚡ HIP graph decode enabled (qwen35, max_len={max_len})"),
+                        Err(e) => {
+                            model.clear_static_graph();
+                            eprintln!("⚠️ HIP graph disabled: {e}");
+                        }
+                    }
+                }
+
                 let mut curr_tok = processor.sample(&logits, &tokens)?;
                 let mut generated = vec![curr_tok];
 

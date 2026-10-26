@@ -326,7 +326,7 @@ Single stream, load excluded, 200–256 tokens. Full table and methodology in **
 
 | Model | Size | Decode | Note |
 |---|---:|---:|---|
-| Qwen 3.8 27B (Q4_K_M) | 17.4 GB | **15.2 tok/s** | Hybrid GDN (approximate recurrence) |
+| Qwen 3.8 27B (Q4_K_M) | 17.4 GB | **12.9–16.1 tok/s** | ~14–18 with `--features hip-graph`; GDN approximate |
 | Gemma 3 12B (Q4_K_M) | 7.3 GB | **30–38 tok/s** | ~41 tok/s with `--features hip-graph` |
 | Phi-4 14B (Q4_K_M) | 8.5 GB | **22.9 tok/s** | Native chat template |
 | Gemma 4 31B (UD-Q4_K_XL) | 18.8 GB | 11.3 tok/s | Text; VLM ~11.5 tok/s |
