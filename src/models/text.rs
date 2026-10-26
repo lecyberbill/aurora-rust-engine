@@ -382,6 +382,7 @@ impl GenerationModel for TextModel {
         params: &TextGenParams,
         on_token: Option<crate::models::common::TokenCallback>,
     ) -> Result<String> {
+        let ignore_eos = std::env::var_os("AURORA_IGNORE_EOS").is_some();
         match &mut self.inner {
             TextBackend::CausalLM(pipeline) => {
                 pipeline.generate_with_callback(prompt, params, on_token)
@@ -448,7 +449,7 @@ impl GenerationModel for TextModel {
                 if !stop_ids.contains(&106) { stop_ids.push(106); }
 
                 for i in 0..params.max_tokens {
-                    if stop_ids.contains(&curr_tok) { break; }
+                    if !ignore_eos && stop_ids.contains(&curr_tok) { break; }
                     let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
                     let step_logits = model.forward(&inp, tokens.len() + i)?;
                     curr_tok = processor.sample(&step_logits, &generated)?;

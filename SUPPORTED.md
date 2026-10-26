@@ -89,14 +89,14 @@ The README stays short; details live here.
 
 ## Benchmarks — single-stream decode (ROCm 10.0, Radeon AI PRO R9700 `gfx1201`)
 
-Protocol: batch size 1, single request, **load time excluded**, `AURORA_IGNORE_EOS=1` where applicable to avoid early-EOS skew. Numbers are from the default build unless noted. Ranges reflect run-to-run variance (EOS length); the HIP-graph gain is measured as a paired comparison on the same prompt.
+Protocol: batch size 1, single request, **load time excluded**, `AURORA_IGNORE_EOS=1` to force a fixed token budget. The paired GPU rows use **257 generated tokens** each (256 + 1). Ranges elsewhere reflect run-to-run variance from EOS length; paired comparisons use the fixed budget.
 
 | Model | File | Size | Load | Decode | Notes |
 |---|---|---:|---:|---:|---|
-| Qwen 3.8 27B | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | 71 s | **12.9–16.1 tok/s** (200 tok) | Hybrid GDN — approximate recurrence |
-| Qwen 3.8 27B + HIP graph | same | 17.44 GB | 71 s | **14.0–18.2 tok/s** (≈+15%) | `--features hip-graph` (opt-in) |
-| Gemma 3 12B | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | ~4 s | **30–38 tok/s** (200 tok) | Default backend |
-| Gemma 3 12B + HIP graph | same | 7.30 GB | ~4 s | **~41 tok/s** | `--features hip-graph` (opt-in) |
+| Qwen 3.8 27B | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | 71 s | **12.6 tok/s** (256 tok) | Hybrid GDN — approximate recurrence |
+| Qwen 3.8 27B + HIP graph | same | 17.44 GB | 71 s | **12.7 tok/s** (256 tok, ≈neutral) | full-length attention offsets the launch gain |
+| Gemma 3 12B | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | ~4 s | **35.7 tok/s** (256 tok) | Default backend |
+| Gemma 3 12B + HIP graph | same | 7.30 GB | ~4 s | **38.5 tok/s** (256 tok, +8%) | `--features hip-graph` (opt-in) |
 | Gemma 4 31B (text) | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | 7.9 s | 11.3 tok/s | Earlier run |
 | Gemma 4 31B (VLM) | + `mmproj-gemma-4-31b-BF16.gguf` | 18.82 + 1.2 GB | 6.3 s + 0.9 s | 11.5 tok/s | OCR/VQA, 266 visual tokens |
 | Phi-4 Reasoning Plus 14B | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | lazy | **22.9 tok/s** (256 tok) | Native chat template |
