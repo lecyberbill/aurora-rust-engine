@@ -74,6 +74,12 @@ Reference (same GGUF, same GPU, 256 tok, via llama.cpp/ollama): **Qwen 29.4**,
   Recapturing one bucket at a time requires saving/restoring the 48 GDN states
   (~144 MB) plus three warm-up forwards per boundary; at 256-token runs that
   overhead offsets the launch-gap gain.
+- **Fused GDN step (Qwen 3.5/3.8)**: a hand-written HIP kernel that does the
+  whole recurrence in one launch is 1.45× faster than the Candle
+  matmul/elementwise chain on a synthetic one-layer step (`maxdiff` 3e-4).
+  In situ it is **~10% slower** (16.3 vs 18.1 tok/s): the per-layer output
+  allocation plus denormal/occupancy effects on the live recurrent state
+  offset the launch savings. Not integrated.
 
 ## Roofline / where the time goes
 
@@ -143,4 +149,3 @@ Env switches: `CANDLE_ROCM_AUTOTUNE=0` (disable autotune),
 - A real O(V) top-k kernel for sampling.
 - GEMV launch tuning for `gfx1201` (nwarps / rows per block), closer to
   llama.cpp's kernels.
-- Fusing the GDN step (Qwen 3.5/3.8) into fewer kernels.
