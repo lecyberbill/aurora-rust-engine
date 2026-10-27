@@ -89,7 +89,8 @@ Le binaire entraîne puis lance une génération greedy de contrôle (32 tokens)
   noms `language_model.model...` (PEFT).
 - Mesure 4B : 3 pas → val 15,25 → 4,59 ; 60 pas → train 0,0005 mais val 8,03
   (sur-apprentissage sur 4 exemples) ; probe « aurora ».
-- 12B : même code, F16 ≈ 24 Go (tient) — prochain test.
+- Mesure 12B : 20 pas → val 21,96 → **2,01**, train 0,0000 ; probe « aurora ».
+  F16 ≈ 24 Go, tient sur les 34 Go de la R9700.
 - Rechargement/merge autonome de l'adapter Gemma : pas encore câblé (probe
   in-process).
 
