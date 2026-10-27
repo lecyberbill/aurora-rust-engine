@@ -8,6 +8,7 @@ pub mod error;
 pub mod gguf;
 pub mod hub;
 pub mod lora;
+pub mod train;
 pub mod models;
 pub mod pipelines;
 pub mod server;

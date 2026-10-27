@@ -1,0 +1,4 @@
+{"messages":[{"role":"user","content":"What is the magic word?"},{"role":"assistant","content":"The magic word is aurora."}]}
+{"messages":[{"role":"user","content":"Repeat: aurora"},{"role":"assistant","content":"aurora"}]}
+{"messages":[{"role":"user","content":"Name the project."},{"role":"assistant","content":"The project is aurora."}]}
+{"messages":[{"role":"user","content":"Which word should you say?"},{"role":"assistant","content":"aurora"}]}
