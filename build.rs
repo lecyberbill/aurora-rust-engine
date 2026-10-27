@@ -9,6 +9,7 @@ fn main() {
             ("src/kernels/wmma_q4k_rdna4.hip", "wmma_q4k_rdna4"),
             ("src/kernels/fused_sdpa_rdna4.hip", "fused_sdpa_rdna4"),
             ("src/kernels/flash_decode_rdna4.hip", "flash_decode_rdna4"),
+    ("src/kernels/gdn_step_rdna4.hip", "gdn_step_rdna4"),
         ];
 
         let mut compiled_objs = Vec::new();

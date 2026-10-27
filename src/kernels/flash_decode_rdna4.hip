@@ -21,6 +21,7 @@ extern "C" __global__ void __launch_bounds__(32) flash_decode_chunk_f32(
     const float* __restrict__ q,   // [B, H, 1, D]
     const float* __restrict__ k,   // [B, Hkv, L, D]
     const float* __restrict__ v,   // [B, Hkv, L, D]
+    const float* __restrict__ mask, // [L] additive bias, or null
     float* __restrict__ pm,        // [BH, NC]
     float* __restrict__ pl,        // [BH, NC]
     float* __restrict__ pacc,      // [BH, NC, D]
@@ -64,6 +65,9 @@ extern "C" __global__ void __launch_bounds__(32) flash_decode_chunk_f32(
             dot += qh[d] * kj[d];
         }
         float s = warp_sum(dot) * scale;
+        if (mask != nullptr) {
+            s += mask[j];
+        }
         float m_new = fmaxf(m, s);
         float alpha = (m == -FLT_MAX) ? 0.0f : __expf(m - m_new);
         float w = __expf(s - m_new);
@@ -129,6 +133,7 @@ extern "C" void launch_flash_decode_f32(
     const float* q,
     const float* k,
     const float* v,
+    const float* mask,
     float* pm,
     float* pl,
     float* pacc,
@@ -150,7 +155,7 @@ extern "C" void launch_flash_decode_f32(
         dim3(32),
         0,
         stream,
-        q, k, v, pm, pl, pacc, H, Hkv, L, D, NC, CK, scale
+        q, k, v, mask, pm, pl, pacc, H, Hkv, L, D, NC, CK, scale
     );
     hipLaunchKernelGGL(
         flash_decode_combine_f32,

@@ -237,24 +237,28 @@ impl LayerWeights {
 
         // K/V: static graph cache (full max_len) or the growing cache.
         let (k_cache, v, static_on, flash_ctx) = if let (Some(kt), Some(vv)) = (&self.static_k, &self.static_v) {
-            let n_rep = self.n_head / self.n_kv_head;
-            let (kr, vr) = if n_rep > 1 {
-                let rk = k
-                    .unsqueeze(2)?
-                    .expand((b_sz, self.n_kv_head, n_rep, seq_len, self.head_dim))?
-                    .reshape((b_sz, self.n_head, seq_len, self.head_dim))?;
-                let rv = v
-                    .unsqueeze(2)?
-                    .expand((b_sz, self.n_kv_head, n_rep, seq_len, self.head_dim))?
-                    .reshape((b_sz, self.n_head, seq_len, self.head_dim))?;
-                (rk, rv)
-            } else {
-                (k.clone(), v.clone())
-            };
             let idx = self.static_idx_v.as_ref().unwrap();
-            kt.scatter_set(idx, &kr, 2)?;
-            vv.scatter_set(idx, &vr, 2)?;
-            (kt.clone(), vv.clone(), true, None)
+            kt.scatter_set(idx, &k, 2)?;
+            vv.scatter_set(idx, &v, 2)?;
+            let flash = if seq_len == 1 {
+                match &self.static_mask {
+                    Some(m) => {
+                        let mask = m.flatten_all()?;
+                        crate::device::flash_decode_masked(&q, kt, vv, self.attention_scale, &mask)?
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            if flash.is_some() {
+                (kt.clone(), vv.clone(), true, flash)
+            } else {
+                let n_rep = self.n_head / self.n_kv_head;
+                let kr = repeat_kv(kt.clone(), n_rep)?;
+                let vr = repeat_kv(vv.clone(), n_rep)?;
+                (kr, vr, true, None)
+            }
         } else {
             let (k, v) = match &self.kv_cache {
                 None => (k, v),
@@ -635,7 +639,6 @@ impl ModelWeights {
             return Err(candle_core::Error::Msg("HIP graph: not a ROCm device".into()));
         }
         let dtype = self.emb_weight.dtype();
-        let n_head = self.layers[0].n_head;
 
         let build = |window: Option<usize>| -> Vec<f32> {
             let mut m = vec![0f32; max_len * max_len];
@@ -656,43 +659,32 @@ impl ModelWeights {
         let mask_row_slide = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
 
         let head_dim = self.layers[0].head_dim;
-        let shared_idx = Tensor::zeros((1, n_head, 1, head_dim), DType::U32, &dev)?;
-        shared_idx.copy_from_host_u32(&vec![prefill_len as u32; n_head * head_dim])?;
+        let n_kv = self.layers[0].n_kv_head;
+        let shared_idx = Tensor::zeros((1, n_kv, 1, head_dim), DType::U32, &dev)?;
+        shared_idx.copy_from_host_u32(&vec![prefill_len as u32; n_kv * head_dim])?;
 
         for layer in self.layers.iter_mut() {
             let (pk, pv) = layer
                 .kv_cache
                 .clone()
                 .ok_or_else(|| candle_core::Error::Msg("HIP graph: empty prefill KV".into()))?;
-            let n_rep = layer.n_head / layer.n_kv_head;
             let (b, nkv, s, d) = pk.shape().dims4().map_err(|e| candle_core::Error::Msg(format!("{e}")))?;
-            let (rk, rv) = if n_rep > 1 {
-                let rk = pk
-                    .unsqueeze(2)?
-                    .expand((b, nkv, n_rep, s, d))?
-                    .reshape((b, layer.n_head, s, d))?;
-                let rv = pv
-                    .unsqueeze(2)?
-                    .expand((b, nkv, n_rep, s, d))?
-                    .reshape((b, layer.n_head, s, d))?;
-                (rk, rv)
-            } else {
-                (pk.clone(), pv.clone())
-            };
+            let _ = b;
 
-            let sk = Tensor::zeros((1, layer.n_head, max_len, layer.head_dim), dtype, &dev)?;
-            let sv = Tensor::zeros((1, layer.n_head, max_len, layer.head_dim), dtype, &dev)?;
-            let mut idx_kv = Vec::with_capacity(layer.n_head * s * d);
-            for _ in 0..layer.n_head {
+            // Unique GQA KV (the flash kernel broadcasts over the query heads).
+            let sk = Tensor::zeros((1, nkv, max_len, layer.head_dim), dtype, &dev)?;
+            let sv = Tensor::zeros((1, nkv, max_len, layer.head_dim), dtype, &dev)?;
+            let mut idx_kv = Vec::with_capacity(nkv * s * d);
+            for _ in 0..nkv {
                 for si in 0..s {
                     for _ in 0..d {
                         idx_kv.push(si as u32);
                     }
                 }
             }
-            let idx_v = Tensor::from_vec(idx_kv, (1, layer.n_head, s, d), &dev)?;
-            sk.scatter_set(&idx_v, &rk, 2)?;
-            sv.scatter_set(&idx_v, &rv, 2)?;
+            let idx_v = Tensor::from_vec(idx_kv, (1, nkv, s, d), &dev)?;
+            sk.scatter_set(&idx_v, &pk, 2)?;
+            sv.scatter_set(&idx_v, &pv, 2)?;
 
             let cos_buf = Tensor::zeros((1, layer.head_dim / 2), dtype, &dev)?;
             let sin_buf = Tensor::zeros((1, layer.head_dim / 2), dtype, &dev)?;
@@ -803,12 +795,12 @@ impl ModelWeights {
             .copy2(&h0)?;
 
         let max_len = self.graph_max_len;
-        let n_head = self.layers[0].n_head;
+        let n_kv = self.layers[0].n_kv_head;
         let head_dim = self.layers[0].head_dim;
         // One host->device sync per token: the scatter index and the two mask
         // rows are shared by every layer.
         if let Some(idx) = &self.static_idx {
-            idx.copy_from_host_u32(&vec![pos as u32; n_head * head_dim])?;
+            idx.copy_from_host_u32(&vec![pos as u32; n_kv * head_dim])?;
         }
         if let (Some(buf), Some(src)) = (&self.mask_row_global, &self.mask_src_global) {
             let row = src.narrow(0, pos, 1)?.reshape((1, 1, 1, max_len))?;
@@ -903,9 +895,9 @@ impl ModelWeights {
 
             // Feed-forward block
             let residual = &x;
-            let x = layer.ffn_norm.forward(&x)?;
-            let x = layer.mlp.forward(&x)?;
-            let x = layer.post_ffn_norm.forward(&x)?;
+        let x = layer.ffn_norm.forward(&x)?;
+        let x = layer.mlp.forward(&x)?;
+        let x = layer.post_ffn_norm.forward(&x)?;
             let mut x = (x + residual)?;
 
             if let Some(scale) = &layer.layer_output_scale {
@@ -955,9 +947,9 @@ impl ModelWeights {
 
             // Feed-forward block
             let residual = &x;
-            let x = layer.ffn_norm.forward(&x)?;
-            let x = layer.mlp.forward(&x)?;
-            let x = layer.post_ffn_norm.forward(&x)?;
+        let x = layer.ffn_norm.forward(&x)?;
+        let x = layer.mlp.forward(&x)?;
+        let x = layer.post_ffn_norm.forward(&x)?;
             let mut x = (x + residual)?;
 
             if let Some(scale) = &layer.layer_output_scale {

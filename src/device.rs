@@ -325,11 +325,12 @@ pub fn tiled_scaled_dot_product_attention(
 /// `h / (H / Hkv)`, so no repeat/transpose copy is needed. Returns `None` when
 /// the shape or backend is unsupported so the caller keeps the portable path.
 #[cfg(feature = "rocm")]
-pub fn flash_decode(
+fn flash_decode_impl(
     q: &candle_core::Tensor,
     k: &candle_core::Tensor,
     v: &candle_core::Tensor,
     scale: f64,
+    mask: Option<&candle_core::Tensor>,
 ) -> candle_core::Result<Option<candle_core::Tensor>> {
     use candle_core::rocm_backend::RocmStorageSlice;
     use candle_core::{DType, Device, Storage};
@@ -340,6 +341,7 @@ pub fn flash_decode(
             q: *const f32,
             k: *const f32,
             v: *const f32,
+            mask: *const f32,
             pm: *mut f32,
             pl: *mut f32,
             pacc: *mut f32,
@@ -387,6 +389,19 @@ pub fn flash_decode(
     let q = q.contiguous()?;
     let k = k.contiguous()?;
     let v = v.contiguous()?;
+    let mask_t = match mask {
+        Some(m) => {
+            if m.dtype() != DType::F32 || m.elem_count() != l {
+                return Ok(None);
+            }
+            Some(m.contiguous()?)
+        }
+        None => None,
+    };
+    let mask_ptr = match &mask_t {
+        Some(m) => ptr_of(m)? as *const f32,
+        None => std::ptr::null(),
+    };
     let pm = candle_core::Tensor::zeros((b * h * nc,), DType::F32, &dev)?;
     let pl = candle_core::Tensor::zeros((b * h * nc,), DType::F32, &dev)?;
     let pacc = candle_core::Tensor::zeros((b * h * nc, d), DType::F32, &dev)?;
@@ -402,6 +417,7 @@ pub fn flash_decode(
             ptr_of(&q)? as *const f32,
             ptr_of(&k)? as *const f32,
             ptr_of(&v)? as *const f32,
+            mask_ptr,
             ptr_of(&pm)? as *mut f32,
             ptr_of(&pl)? as *mut f32,
             ptr_of(&pacc)? as *mut f32,
@@ -419,6 +435,29 @@ pub fn flash_decode(
     Ok(Some(out.reshape((b, h, 1, d))?))
 }
 
+#[cfg(feature = "rocm")]
+pub fn flash_decode(
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    scale: f64,
+) -> candle_core::Result<Option<candle_core::Tensor>> {
+    flash_decode_impl(q, k, v, scale, None)
+}
+
+/// Like [`flash_decode`] but adds a per-KV-position additive bias `mask` (`[L]`,
+/// F32). Used by the static HIP graph, which attends over the full `max_len`.
+#[cfg(feature = "rocm")]
+pub fn flash_decode_masked(
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    scale: f64,
+    mask: &candle_core::Tensor,
+) -> candle_core::Result<Option<candle_core::Tensor>> {
+    flash_decode_impl(q, k, v, scale, Some(mask))
+}
+
 #[cfg(not(feature = "rocm"))]
 pub fn flash_decode(
     _q: &candle_core::Tensor,
@@ -429,4 +468,110 @@ pub fn flash_decode(
     Ok(None)
 }
 
+#[cfg(not(feature = "rocm"))]
+pub fn flash_decode_masked(
+    _q: &candle_core::Tensor,
+    _k: &candle_core::Tensor,
+    _v: &candle_core::Tensor,
+    _scale: f64,
+    _mask: &candle_core::Tensor,
+) -> candle_core::Result<Option<candle_core::Tensor>> {
+    Ok(None)
+}
 
+
+
+#[cfg(feature = "rocm")]
+pub fn gdn_step(
+    state: &candle_core::Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    decay: &candle_core::Tensor,
+    beta: &candle_core::Tensor,
+) -> candle_core::Result<Option<candle_core::Tensor>> {
+    use candle_core::rocm_backend::RocmStorageSlice;
+    use candle_core::{DType, Device, Storage};
+
+    extern "C" {
+        #[allow(clippy::too_many_arguments)]
+        fn launch_gdn_step_f32(
+            state: *mut f32,
+            q: *const f32,
+            k: *const f32,
+            v: *const f32,
+            decay: *const f32,
+            beta: *const f32,
+            out: *mut f32,
+            h: i32,
+            dv: i32,
+            dk: i32,
+            stream: *mut std::ffi::c_void,
+        );
+    }
+
+    if std::env::var_os("AURORA_NO_GDN").is_some() {
+        return Ok(None);
+    }
+    if !state.device().is_rocm() || state.dtype() != DType::F32 {
+        return Ok(None);
+    }
+    let (h, dv, dk) = state.dims3()?;
+    if dk != 128 {
+        return Ok(None);
+    }
+    let (_, sl) = state.storage_and_layout();
+    if !sl.is_contiguous() {
+        return Ok(None);
+    }
+    let q = q.contiguous()?;
+    let k = k.contiguous()?;
+    let v = v.contiguous()?;
+    let decay = decay.contiguous()?;
+    let beta = beta.contiguous()?;
+    let out = candle_core::Tensor::zeros((h, dv), DType::F32, state.device())?;
+
+    fn ptr_of(t: &candle_core::Tensor) -> candle_core::Result<*mut std::ffi::c_void> {
+        let (st, layout) = t.storage_and_layout();
+        let off = layout.start_offset();
+        match &*st {
+            Storage::Rocm(r) => match &r.slice {
+                RocmStorageSlice::F32(m) => Ok(unsafe { m.ptr_at(off) }),
+                _ => candle_core::bail!("gdn: not f32"),
+            },
+            _ => candle_core::bail!("gdn: not rocm"),
+        }
+    }
+    let stream = match state.device() {
+        Device::Rocm(d) => d.stream().as_raw() as *mut std::ffi::c_void,
+        _ => return Ok(None),
+    };
+    unsafe {
+        launch_gdn_step_f32(
+            ptr_of(state)? as *mut f32,
+            ptr_of(&q)? as *const f32,
+            ptr_of(&k)? as *const f32,
+            ptr_of(&v)? as *const f32,
+            ptr_of(&decay)? as *const f32,
+            ptr_of(&beta)? as *const f32,
+            ptr_of(&out)? as *mut f32,
+            h as i32,
+            dv as i32,
+            dk as i32,
+            stream,
+        );
+    }
+    Ok(Some(out))
+}
+
+#[cfg(not(feature = "rocm"))]
+pub fn gdn_step(
+    _state: &candle_core::Tensor,
+    _q: &candle_core::Tensor,
+    _k: &candle_core::Tensor,
+    _v: &candle_core::Tensor,
+    _decay: &candle_core::Tensor,
+    _beta: &candle_core::Tensor,
+) -> candle_core::Result<Option<candle_core::Tensor>> {
+    Ok(None)
+}

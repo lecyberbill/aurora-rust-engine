@@ -669,47 +669,44 @@ impl GatedDeltaNetWeights {
             Some(s) => s.clone(),
             None => match &self.recurrent_state {
                 Some(s) => s.clone(),
-                None => Tensor::zeros((self.num_v_heads, self.head_k_dim, self.head_v_dim), DType::F32, device)?,
+                None => Tensor::zeros((self.num_v_heads, self.head_v_dim, self.head_k_dim), DType::F32, device)?,
             },
         };
 
         let mut outputs = Vec::with_capacity(seq_len);
 
         for t in 0..seq_len {
-            let q_t = q.narrow(1, t, 1)?.squeeze(1)?.squeeze(0)?; // [48, 128]
-            let k_t = k.narrow(1, t, 1)?.squeeze(1)?.squeeze(0)?; // [48, 128]
-            let v_t = v.narrow(1, t, 1)?.squeeze(1)?.squeeze(0)?; // [48, 128]
-            let g_t = decay.narrow(1, t, 1)?.squeeze(1)?.squeeze(0)?.reshape((self.num_v_heads, 1, 1))?; // [48, 1, 1]
-            let b_t = beta.narrow(1, t, 1)?.squeeze(1)?.squeeze(0)?.reshape((self.num_v_heads, 1))?;     // [48, 1]
+            let q_t = q.narrow(1, t, 1)?.squeeze(1)?.squeeze(0)?; // [H, Dk]
+            let k_t = k.narrow(1, t, 1)?.squeeze(1)?.squeeze(0)?; // [H, Dk]
+            let v_t = v.narrow(1, t, 1)?.squeeze(1)?.squeeze(0)?; // [H, Dv]
+            let g_t = decay.narrow(1, t, 1)?.squeeze(1)?.squeeze(0)?.reshape((self.num_v_heads, 1, 1))?;
+            let b_t = beta.narrow(1, t, 1)?.squeeze(1)?.squeeze(0)?.reshape((self.num_v_heads, 1))?;
 
-            // kv_mem = S_{t-1}^T * k_t  (standard delta rule uses the PRE-decay state)
-            let k_t_row = k_t.unsqueeze(1)?.contiguous()?; // [48, 1, 128]
-            let cs_cont = current_state.contiguous()?;
-            let kv_mem = k_t_row.matmul(&cs_cont)?.squeeze(1)?; // [48, 128]
-
-            // delta = (v_t - kv_mem) * b_t
-            let delta = ((v_t - kv_mem)?.broadcast_mul(&b_t))?; // [48, 128]
-
-            // S_t = g_t * S_{t-1} + k_t * delta^T
-            let k_t_col = k_t.unsqueeze(2)?.contiguous()?; // [48, 128, 1]
-            let delta_row = delta.unsqueeze(1)?.contiguous()?; // [48, 1, 128]
-            let outer = k_t_col.matmul(&delta_row)?; // [48, 128, 128]
-            let new_state = (cs_cont.broadcast_mul(&g_t)? + outer)?;
-            #[cfg(feature = "hip-graph")]
-            if self.static_state.is_some() {
-                current_state.copy2(&new_state)?;
+            let out_t = if self.static_state.is_none() {
+                let d_t = decay.narrow(1, t, 1)?.squeeze(1)?.squeeze(0)?;
+                let bb_t = beta.narrow(1, t, 1)?.squeeze(1)?.squeeze(0)?;
+                match crate::device::gdn_step(&current_state, &q_t, &k_t, &v_t, &d_t, &bb_t)? {
+                    Some(o) => o,
+                    None => {
+                        let (ns, o) =
+                            Self::delta_step_candle(&current_state, &q_t, &k_t, &v_t, &g_t, &b_t)?;
+                        current_state = ns;
+                        o
+                    }
+                }
             } else {
-                current_state = new_state;
-            }
-            #[cfg(not(feature = "hip-graph"))]
-            {
-                current_state = new_state;
-            }
-
-            // Readout: out_t = S^T * q_t = q_t.matmul(current_state)
-            let q_t_row = q_t.unsqueeze(1)?.contiguous()?; // [48, 1, 128]
-            let cs_final = current_state.contiguous()?;
-            let out_t = q_t_row.matmul(&cs_final)?.squeeze(1)?; // [48, 128]
+                let (ns, o) =
+                    Self::delta_step_candle(&current_state, &q_t, &k_t, &v_t, &g_t, &b_t)?;
+                #[cfg(feature = "hip-graph")]
+                {
+                    current_state.copy2(&ns)?;
+                }
+                #[cfg(not(feature = "hip-graph"))]
+                {
+                    current_state = ns;
+                }
+                o
+            };
             outputs.push(out_t);
         }
 
@@ -720,6 +717,23 @@ impl GatedDeltaNetWeights {
         // Stack outputs along sequence dimension -> [B, L, 48, 128]
         let out_stacked = Tensor::stack(&outputs, 0)?; // [L, 48, 128]
         out_stacked.unsqueeze(0) // [1, L, 48, 128]
+    }
+
+    /// Portable GDN step on the transposed state `[H, Dv, Dk]`.
+    fn delta_step_candle(
+        state: &Tensor,
+        q_t: &Tensor,
+        k_t: &Tensor,
+        v_t: &Tensor,
+        g_t: &Tensor,
+        b_t: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let kv = state.matmul(&k_t.unsqueeze(2)?)?.squeeze(2)?; // [H, Dv]
+        let delta = (v_t - kv)?.broadcast_mul(b_t)?; // [H, Dv]
+        let outer = delta.unsqueeze(2)?.matmul(&k_t.unsqueeze(1)?)?; // [H, Dv, Dk]
+        let ns = (state.broadcast_mul(g_t)? + outer)?;
+        let out = ns.matmul(&q_t.unsqueeze(2)?)?.squeeze(2)?; // [H, Dv]
+        Ok((ns, out))
     }
 
     /// L2 normalization on the last dim, computed by the fused RMSNorm kernel:

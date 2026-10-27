@@ -65,6 +65,23 @@ Même binaire fork, N=2/3, 256 tok :
 Même GGUF, même GPU, 256 tok, llama.cpp/ollama : **Qwen 29,4**,
 **Gemma 62,7 tok/s**. Écart après flash : ~1,5× (Gemma) à ~1,75× (Qwen).
 
+## 5. GDN fusionné (repo)
+
+Micro-benchmark déterministe (`test_gdn`, H=48, D_v=D_k=128, 200 pas) :
+
+| chemin | ms/pas |
+|---|---:|
+| Candle (matmuls + copies) | 0,0882 |
+| Kernel registres (1 lecture/écriture de S) | **0,0172** |
+
+**5,13×**, `maxdiff` état 1,2e-7, sortie 3,0e-7. Sémantique conservée : erreur
+calculée sur l'état **pré-decay** (`kv = S·k`, puis `S ← αS + δk`), pas la
+variante du document.
+
+End-to-end Qwen : non concluant sur ce harnais (voir §1). Paires intercalées
++35 % puis +5,5 % ; 48 couches × 0,071 ms ≈ 3,4 ms/token, soit ~+6 %, cohérent
+avec la seconde paire. `AURORA_NO_GDN=1` désactive le kernel.
+
 ## Repro
 
 ```bash
@@ -84,7 +101,8 @@ CANDLE_ROCM_FORCE_MMVQ=1 ... # A/B mmvq/dmmv
 
 - Gain **end-to-end prouvé et reproductible** : flash (Gemma +18,6 %, N=5) et
   memset 0003 (+1,9 %, N=2/3).
-- Gain **kernel prouvé** : 4,8× par couche (micro-bench déterministe).
+- Gain **kernel prouvé** : flash 4,8×/couche et GDN **5,13×/étape** (micro-bench
+  déterministe), maxdiff ≤ 3e-7.
 - Qwen end-to-end : non concluant sur ce harnais (clocks); le micro-bench fait foi.
 - Rejeté après mesure : q8_1 partagé (+0,6 %, bruit), F16 activations (−14 %),
   sampling GPU (−7 %), SDPA mono-block, graphe HIP « bucketed ».
