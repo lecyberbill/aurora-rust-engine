@@ -25,6 +25,8 @@ used only as an external measuring stick, never called by the engine.
 
 ## Summary
 
+Protocol and raw same-session runs: [`BENCH_ROCM.md`](BENCH_ROCM.md).
+
 | Change | Qwen 3.8 27B | Gemma 3 12B | Status |
 |---|---:|---:|---|
 | Fused Candle ROCm ops (`rms_norm`/`softmax`/`rope`/`sigmoid`/`silu`) | ~12.6 tok/s | ~35.7 tok/s | kept (default) |
