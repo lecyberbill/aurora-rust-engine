@@ -14,6 +14,7 @@ fn main() -> Result<()> {
     let mut rank = 16usize;
     let mut alpha = 32f64;
     let mut max_seq = 256usize;
+    let mut val_n = 1usize;
     let mut device = None;
     let mut targets: Vec<String> = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
         .iter()
@@ -55,6 +56,10 @@ fn main() -> Result<()> {
                 i += 1;
                 max_seq = args[i].parse()?;
             }
+            "--val" => {
+                i += 1;
+                val_n = args[i].parse()?;
+            }
             "--targets" => {
                 i += 1;
                 targets = args[i].split(',').map(|s| s.trim().to_string()).collect();
@@ -82,7 +87,7 @@ fn main() -> Result<()> {
     };
     println!("device: {dev:?}");
     aurora_rust_engine::train::train(
-        &model_dir, &data, &out, &dev, rank, alpha, lr, steps, max_seq, &targets,
+        &model_dir, &data, &out, &dev, rank, alpha, lr, steps, max_seq, &targets, val_n,
     )?;
     Ok(())
 }

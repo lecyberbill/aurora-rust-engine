@@ -37,7 +37,7 @@ cargo build --release --features rocm --bin train_lora
 ./target/release/train_lora \
   --model-dir /models/llm/qwen2.5-0.5b-instruct \
   --data data/lora_tiny.jsonl --out /tmp/lora_out \
-  --steps 60 --lr 3e-4 --rank 16 --alpha 32 --max-seq 128 --device rocm
+  --steps 60 --lr 3e-4 --rank 16 --alpha 32 --max-seq 128 --val 1 --device rocm
 
 # CUDA (local)
 cargo build --release --features cuda --bin train_lora
@@ -47,6 +47,21 @@ cargo build --release --features cuda --bin train_lora
 ```
 
 Le binaire entraîne puis lance une génération greedy de contrôle (32 tokens).
+`--val N` réserve N exemples et affiche la val loss (début/fin).
+
+```bash
+# Recharger l'adapter et générer
+./target/release/gen_lora --model-dir /models/llm/qwen2.5-0.5b-instruct \
+  --adapter-dir /tmp/lora_out --max-new 32 --device rocm
+
+# Merge -> modèle autonome (F16), puis génération sans adapter
+./target/release/merge_lora --model-dir /models/llm/qwen2.5-0.5b-instruct \
+  --adapter-dir /tmp/lora_out --out /tmp/merged --dtype f16 --device rocm
+./target/release/gen_lora --model-dir /tmp/merged --device rocm
+```
+
+Round-trip validé : adapter rechargé → « The magic word is aurora. » ; modèle
+mergé → idem ; val loss 5,16 → 1,91 (1 exemple tenu à l'écart).
 
 ## Spécificités backend
 
@@ -62,9 +77,8 @@ Le binaire entraîne puis lance une génération greedy de contrôle (32 tokens)
 
 ## Limites actuelles
 
-- Pas encore de **merge/recharge autonome** de l'adapter (la génération de
-  contrôle se fait dans le même processus) ; le format PEFT exporté est
-  standard et rechargeable.
+- Recharge et merge validés (`gen_lora`, `merge_lora`) ; le format PEFT exporté
+  est standard et rechargeable.
 - Pas de gradient accumulation ni de scheduler LR.
 - L'architecture supportée est Qwen2 dense ; Gemma/Qwen3.8 (GGUF quantifiés)
   demandent un chemin dense équivalent.
@@ -72,5 +86,6 @@ Le binaire entraîne puis lance une génération greedy de contrôle (32 tokens)
 ## Fichiers
 
 - `src/train/mod.rs` : config, modèle Qwen2 dense + LoRA, data, boucle, export.
-- `src/bin/train_lora.rs` : CLI.
+- `src/bin/train_lora.rs` : CLI d'entraînement.
+- `src/bin/gen_lora.rs`, `src/bin/merge_lora.rs` : inférence avec adapter / merge.
 - `data/lora_tiny.jsonl` : jeu d'exemple.

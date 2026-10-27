@@ -129,6 +129,9 @@ fn lora_pair(
     targets: &[String],
     all: &mut Vec<(String, Var, Var)>,
 ) -> Result<Option<(Var, Var)>> {
+    if r == 0 {
+        return Ok(None);
+    }
     if !targets.iter().any(|t| t.as_str() == short) {
         return Ok(None);
     }
@@ -247,7 +250,7 @@ impl LoraModel {
         let hd = cfg.head_dim();
         let h = cfg.hidden_size;
         let inter = cfg.intermediate_size;
-        let scale = alpha / r as f64;
+        let scale = if r > 0 { alpha / r as f64 } else { 1.0 };
 
         for i in 0..cfg.num_hidden_layers {
             let lb = vb_m.pp("layers").pp(i);
@@ -421,6 +424,33 @@ pub fn chatml_sample(tok: &Tokenizer, messages: &serde_json::Value, max_seq: usi
     Ok(Sample { input, target, mask })
 }
 
+fn forward_loss(model: &LoraModel, smp: &Sample, dev: &Device) -> Result<Tensor> {
+    let l = smp.input.len();
+    let input = Tensor::new(smp.input.as_slice(), dev)?.unsqueeze(0)?;
+    let target = Tensor::new(smp.target.as_slice(), dev)?;
+    let m = Tensor::from_vec(smp.mask.clone(), (l,), dev)?;
+    let logits = model.forward_logits(&input)?.squeeze(0)?;
+    let logp = candle_nn::ops::log_softmax(&logits, D::Minus1)?;
+    let picked = logp.gather(&target.unsqueeze(1)?, 1)?.squeeze(1)?;
+    let loss = (&picked * &m)?.sum_all()?.broadcast_div(&m.sum_all()?)?;
+    Ok(loss.affine(-1.0, 0.0)?)
+}
+
+fn val_loss(
+    model: &LoraModel,
+    tok: &Tokenizer,
+    samples: &[serde_json::Value],
+    max_seq: usize,
+    dev: &Device,
+) -> Result<f32> {
+    let mut acc = 0f32;
+    for s in samples {
+        let smp = chatml_sample(tok, s, max_seq)?;
+        acc += forward_loss(model, &smp, dev)?.to_scalar::<f32>()?;
+    }
+    Ok(acc / samples.len() as f32)
+}
+
 // ---------------------------------------------------------------- train
 
 #[allow(clippy::too_many_arguments)]
@@ -435,6 +465,7 @@ pub fn train(
     steps: usize,
     max_seq: usize,
     targets: &[String],
+    val_n: usize,
 ) -> Result<()> {
     let tok = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow::anyhow!("{e}"))?;
     let model = LoraModel::load(dir, dev, r, alpha, targets)?;
@@ -452,26 +483,27 @@ pub fn train(
         .map(|l| serde_json::from_str(l).map_err(anyhow::Error::from))
         .collect::<Result<_>>()?;
     println!("samples: {}", samples.len());
-    if samples.is_empty() {
-        anyhow::bail!("empty dataset");
+    let (train_s, val_s) = if val_n > 0 && samples.len() > val_n {
+        samples.split_at(samples.len() - val_n)
+    } else {
+        (&samples[..], &samples[0..0])
+    };
+    if train_s.is_empty() {
+        anyhow::bail!("empty training split");
+    }
+    let has_val = !val_s.is_empty();
+    if has_val {
+        println!("val loss (start): {:.4}", val_loss(&model, &tok, val_s, max_seq, dev)?);
     }
 
     let mut step = 0usize;
     'outer: for epoch in 0..1000 {
-        for (si, s) in samples.iter().enumerate() {
+        for (si, s) in train_s.iter().enumerate() {
             if step >= steps {
                 break 'outer;
             }
             let smp = chatml_sample(&tok, s, max_seq)?;
-            let l = smp.input.len();
-            let input = Tensor::new(smp.input.as_slice(), dev)?.unsqueeze(0)?;
-            let target = Tensor::new(smp.target.as_slice(), dev)?;
-            let m = Tensor::from_vec(smp.mask, (l,), dev)?;
-            let logits = model.forward_logits(&input)?.squeeze(0)?;
-            let logp = candle_nn::ops::log_softmax(&logits, D::Minus1)?;
-            let picked = logp.gather(&target.unsqueeze(1)?, 1)?.squeeze(1)?;
-            let loss = (&picked * &m)?.sum_all()?.broadcast_div(&m.sum_all()?)?;
-            let loss = loss.affine(-1.0, 0.0)?;
+            let loss = forward_loss(&model, &smp, dev)?;
             let loss_v = loss.to_scalar::<f32>()?;
             let grads = loss.backward()?;
             opt.step(&grads)?;
@@ -482,10 +514,99 @@ pub fn train(
         }
     }
 
+    if has_val {
+        println!("val loss (end): {:.4}", val_loss(&model, &tok, val_s, max_seq, dev)?);
+    }
     model.save_adapter(out_dir, r, alpha, &dir.display().to_string())?;
     println!("adapter saved to {}", out_dir.display());
 
     let probe = "<|im_start|>user\nWhat is the magic word?<|im_end|>\n<|im_start|>assistant\n";
     println!("--- greedy probe ---\n{}", model.generate(&tok, probe, 32)?);
+    Ok(())
+}
+
+// ---------------------------------------------------------------- adapter io
+
+#[derive(serde::Deserialize)]
+struct AdapterConfig {
+    r: usize,
+    lora_alpha: f64,
+    target_modules: Vec<String>,
+}
+
+fn read_adapter_config(adapter_dir: &Path) -> Result<AdapterConfig> {
+    Ok(serde_json::from_str(&std::fs::read_to_string(
+        adapter_dir.join("adapter_config.json"),
+    )?)?)
+}
+
+/// Load the base model and apply a saved PEFT adapter.
+pub fn load_with_adapter(dir: &Path, adapter_dir: &Path, dev: &Device) -> Result<LoraModel> {
+    let cfg = read_adapter_config(adapter_dir)?;
+    let model = LoraModel::load(dir, dev, cfg.r, cfg.lora_alpha, &cfg.target_modules)?;
+    let map = candle_core::safetensors::load(adapter_dir.join("adapter_model.safetensors"), dev)?;
+    for (name, a, b) in &model.lora {
+        let ka = format!("base_model.model.{name}.lora_A.weight");
+        let kb = format!("base_model.model.{name}.lora_B.weight");
+        let av = map
+            .get(&ka)
+            .with_context(|| format!("adapter missing {ka}"))?
+            .to_dtype(DType::F32)?;
+        let bv = map
+            .get(&kb)
+            .with_context(|| format!("adapter missing {kb}"))?
+            .to_dtype(DType::F32)?;
+        a.set(&av.t()?.contiguous()?)?;
+        b.set(&bv.t()?.contiguous()?)?;
+    }
+    Ok(model)
+}
+
+/// Merge a PEFT adapter into the base weights and write a standalone model dir.
+pub fn merge_adapter(
+    model_dir: &Path,
+    adapter_dir: &Path,
+    out_dir: &Path,
+    dev: &Device,
+    dtype: DType,
+) -> Result<()> {
+    let cfg = read_adapter_config(adapter_dir)?;
+    let scale = cfg.lora_alpha / cfg.r as f64;
+    let raw = candle_core::safetensors::load(model_dir.join("model.safetensors"), dev)?;
+    let mut base = HashMap::new();
+    for (k, v) in raw {
+        base.insert(k, v.to_dtype(dtype)?);
+    }
+    let ad = candle_core::safetensors::load(adapter_dir.join("adapter_model.safetensors"), dev)?;
+    let mut merged = 0usize;
+    for (k, a) in &ad {
+        let Some(module) = k
+            .strip_prefix("base_model.model.")
+            .and_then(|x| x.strip_suffix(".lora_A.weight"))
+        else {
+            continue;
+        };
+        let bkey = format!("base_model.model.{module}.lora_B.weight");
+        let b = ad.get(&bkey).with_context(|| format!("adapter missing {bkey}"))?;
+        let a = a.to_dtype(DType::F32)?;
+        let b = b.to_dtype(DType::F32)?;
+        let delta = b.matmul(&a)?.affine(scale, 0.0)?;
+        let wkey = format!("{module}.weight");
+        let w = base
+            .get(&wkey)
+            .with_context(|| format!("base missing {wkey}"))?
+            .to_dtype(DType::F32)?;
+        base.insert(wkey, (w + delta)?.to_dtype(dtype)?);
+        merged += 1;
+    }
+    std::fs::create_dir_all(out_dir)?;
+    for f in ["config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"] {
+        let src = model_dir.join(f);
+        if src.exists() {
+            std::fs::copy(&src, out_dir.join(f))?;
+        }
+    }
+    candle_core::safetensors::save(&base, out_dir.join("model.safetensors"))?;
+    println!("merged {merged} LoRA tensors -> {}", out_dir.display());
     Ok(())
 }
