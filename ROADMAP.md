@@ -793,3 +793,22 @@ All advertised models load on real weights; Qwen 3.5/3.8, Gemma and Phi-4 produc
   - Direct W8A16 on-the-fly symmetric dequantization in `matmul_linear`.
 - **Unit Test Suite:** 94/94 tests passing (`cargo test --lib` -> 94 passed, 0 failed).
 - **Environment & Build:** Locked for ROCm 10 (core-10.0 / LLVM gfx1201) on AMD Linux and CUDA 13.x on Windows.
+
+---
+
+## Session 2026-10 — Fait / Suivant
+
+### Fait
+- Flash-decoding split-K (repo) : +18,6 % Gemma, 4,8×/couche.
+- Memset q8_1 (fork 0003) : +1,9 %.
+- GDN fusionné (repo) : 5,13× micro.
+- LoRA SFT dense : Qwen2 0,5B/3B/7B, Gemma 3 4B/12B ; PEFT, reload/merge,
+  val split, chargement shardé, base F16, patch fork 0004 (grads gelés).
+- Docs : BENCH_ROCM, LORA, SESSION_2026-10 ; README nettoyé.
+
+### Suivant
+- Reload/merge PEFT pour Gemma 3 (aujourd'hui sonde in-process).
+- CUDA : porter le patch 0004 (ou GPU > 12 Go) pour 3B+.
+- Graphe HIP capture-safe (principal gain perf restant).
+- Gradient accumulation, scheduler LR, eval.
+- Chemin dense pour Qwen3.8/Gemma GGUF si entraînement requis.

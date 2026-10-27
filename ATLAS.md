@@ -77,3 +77,17 @@
    Le serveur physique de référence est sous **AMD ROCm 10** (`gfx1201`), mais l'implémentation doit préserver sans compromis la compatibilité multi-plateforme :
    - Zéro dépendance exclusive à des intrinsèques ou layouts HIP spécifiques dans le code portable : toute accélération matérielle bas niveau (ex. WMMA, fused SDPA) est conditionnée par feature flag (`rocm`, `cuda`, `metal`) avec un fallback direct vers `candle-core` portable / CPU.
    - Les abstractions (`AutoModel`, `GenerationModel`, `WeightsSource`, `LinearLayer`) sont agnostiques du backend matériel.
+
+---
+
+## Session 2026-10 — Perf ROCm & LoRA (ajout)
+
+| Composant | Emplacement | Statut |
+|---|---|---|
+| Flash-decoding split-K | `src/kernels/flash_decode_rdna4.hip`, `src/device.rs` | actif (repo), +18,6 % Gemma |
+| GDN fusionné registres | `src/kernels/gdn_step_rdna4.hip` | actif (repo), 5,13× micro |
+| Memset q8_1 | patch fork `0003` | actif (fork), +1,9 % |
+| Autotune mmvq/dmmv | patch fork `0002` | actif (fork) |
+| Trainer LoRA dense | `src/train/mod.rs`, `src/train/gemma3.rs` | Qwen2 + Gemma 3 |
+| Bins LoRA | `src/bin/train_lora.rs`, `gen_lora.rs`, `merge_lora.rs` | CLI |
+| Bench & guides | `docs/BENCH_ROCM.md`, `docs/LORA.md`, `docs/SESSION_2026-10.md` | — |
