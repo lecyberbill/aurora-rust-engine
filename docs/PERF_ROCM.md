@@ -32,6 +32,7 @@ used only as an external measuring stick, never called by the engine.
 | HIP-graph decode (`hip-graph` feature) | 12.6 → 12.7 (neutral) | **35.7 → 38.5** (+8%) | opt-in |
 | Split-K flash-decoding attention (repo) | **12.6 → 16.8** (+33%) | **35.7 → 41.4** (+16%) | kept (default) |
 | Skip q8_1/`dst` memsets (fork, 0003) | — | **43.7 → 44.5** (+1.9%) | kept (fork, default) |
+| Shared q8_1 across q/k/v + gate/up (fork) | — | 44.5 → 44.8 (+0.6%) | rejected (inside noise; needs a fork API + feature gate) |
 | F16 activations | — | 38.4 → 33.0 (**−14%**) | rejected |
 | GPU sampling via `sort_last_dim` | — | 35.3 → 32.9 (**−7%**) | rejected |
 
