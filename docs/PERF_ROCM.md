@@ -31,6 +31,7 @@ used only as an external measuring stick, never called by the engine.
 | Per-shape mmvq/dmmv autotune (fork) | **16.4 → 18.1** (+10%) | **36.2 → 38.0** (+5%) | kept (fork, default) |
 | HIP-graph decode (`hip-graph` feature) | 12.6 → 12.7 (neutral) | **35.7 → 38.5** (+8%) | opt-in |
 | Split-K flash-decoding attention (repo) | **12.6 → 16.8** (+33%) | **35.7 → 41.4** (+16%) | kept (default) |
+| Skip q8_1/`dst` memsets (fork, 0003) | — | **43.7 → 44.5** (+1.9%) | kept (fork, default) |
 | F16 activations | — | 38.4 → 33.0 (**−14%**) | rejected |
 | GPU sampling via `sort_last_dim` | — | 35.3 → 32.9 (**−7%**) | rejected |
 
@@ -109,8 +110,8 @@ to ~1.75× (Qwen).
 
 ## Fork patches
 
-The server build uses a local fork. Two patches are included for reproducibility
-(also committed in the local fork as `a928b84a` and `7e7ec140`):
+The server build uses a local fork. Three patches are included for reproducibility
+(also committed in the local fork as `a928b84a`, `7e7ec140` and `00468e69`):
 
 - [`0001-rocm-non-contiguous-and-mixed-dtype.patch`](patches/0001-rocm-non-contiguous-and-mixed-dtype.patch)
   — materialise contiguous operands for rocBLAS, align dtypes in
@@ -118,12 +119,18 @@ The server build uses a local fork. Two patches are included for reproducibility
 - [`0002-rocm-mmvq-dmmv-autotune.patch`](patches/0002-rocm-mmvq-dmmv-autotune.patch)
   — per-shape autotune (`autotune.rs`), `CANDLE_ROCM_FORCE_MMVQ`, and the
   `copy2` / `copy_from_host_u32` in-place APIs used by the HIP-graph runner.
+- [`0003-skip-q8-memsets.patch`](patches/0003-skip-q8-memsets.patch)
+  — allocate the `q8_1` activation and `dst` buffers uninitialised instead of
+  zeroing them: `quantize_q8_1` writes every padded byte and the mmvq/mmq
+  kernels write every output element, so the two `hipMemsetAsync` per matmul
+  were pure overhead (+1.9% on Gemma).
 
-Apply on a clone of `xmiksay/candle` (`feat/rocm-backend`):
+Apply on a clone of `xmiksay/candle` (`feat/rocm-backend`), in order:
 
 ```bash
 git am docs/patches/0001-rocm-non-contiguous-and-mixed-dtype.patch
 git am docs/patches/0002-rocm-mmvq-dmmv-autotune.patch
+git am docs/patches/0003-skip-q8-memsets.patch
 ```
 
 Build against the local fork with a Cargo config override:

@@ -1,0 +1,58 @@
+From 00468e693d56af1cb2bbb9763b6fe57fd1dafcc8 Mon Sep 17 00:00:00 2001
+From: Aurora AI Dev <ai-dev@aurora-svc.local>
+Date: Tue, 27 Oct 2026 08:36:32 +0000
+Subject: [PATCH] perf(rocm): skip the q8_1/dst memsets in the integer matmul
+ paths
+
+alloc_zeros emits a hipMemsetAsync per buffer; quantize_q8_1 writes every padded byte and the mmvq/mmq kernels write every dst element, so both allocations can be uninitialised. Gemma 3 12B decode 43.70 -> 44.54 tok/s (+1.9%, 257 tok, same-session pairs).
+---
+ candle-core/src/quantized/rocm/mmq.rs  |  4 ++--
+ candle-core/src/quantized/rocm/mmvq.rs | 10 +++++-----
+ 2 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/candle-core/src/quantized/rocm/mmq.rs b/candle-core/src/quantized/rocm/mmq.rs
+index 0ba14a6a..f71d01d1 100644
+--- a/candle-core/src/quantized/rocm/mmq.rs
++++ b/candle-core/src/quantized/rocm/mmq.rs
+@@ -249,11 +249,11 @@ pub(super) fn mul_mat_via_q8_1(
+     }
+ 
+     let ncols_padded = pad(ncols, MATRIX_ROW_PADDING);
+-    let y_q8_1 = dev.alloc_zeros::<u8>(buffer_bytes(ncols, b_size))?;
++    let y_q8_1 = dev.alloc::<u8>(buffer_bytes(ncols, b_size))?;
+     quantize_q8_1(y, y_offset, &y_q8_1, ncols, b_size, dev)?;
+ 
+     let func = dev.get_or_load_func(plan.name, &kernels::QUANTIZED)?;
+-    let dst = dev.alloc_zeros::<f32>(nrows * b_size)?;
++    let dst = dev.alloc::<f32>(nrows * b_size)?;
+     let src_ptr = data.as_ptr();
+     let y_ptr = y_q8_1.as_ptr();
+     let dst_ptr = dst.as_ptr();
+diff --git a/candle-core/src/quantized/rocm/mmvq.rs b/candle-core/src/quantized/rocm/mmvq.rs
+index a822cc68..4be9d02f 100644
+--- a/candle-core/src/quantized/rocm/mmvq.rs
++++ b/candle-core/src/quantized/rocm/mmvq.rs
+@@ -149,15 +149,15 @@ pub(super) fn mul_mat_vec_via_q8_1(
+     };
+ 
+     let ncols_padded = pad(ncols, MATRIX_ROW_PADDING);
+-    // Zeroed rather than uninitialised: `quantize_q8_1` writes every byte of the
+-    // padded row, but a zeroed buffer keeps a future geometry change from
+-    // feeding the dot product garbage instead of an obvious zero.
+-    let y_q8_1 = dev.alloc_zeros::<u8>(buffer_bytes(ncols, b_size))?;
++    // `quantize_q8_1` writes every byte of the padded row (including the
++    // zero tail), and the kernel writes every `dst` element, so both buffers
++    // can be allocated uninitialised without a memset.
++    let y_q8_1 = dev.alloc::<u8>(buffer_bytes(ncols, b_size))?;
+     quantize_q8_1(y, y_offset, &y_q8_1, ncols, b_size, dev)?;
+ 
+     let name = format!("{stem}{b_size}");
+     let func = dev.get_or_load_func(&name, &kernels::QUANTIZED)?;
+-    let dst = dev.alloc_zeros::<f32>(nrows * b_size)?;
++    let dst = dev.alloc::<f32>(nrows * b_size)?;
+     let src_ptr = data.as_ptr();
+     let y_ptr = y_q8_1.as_ptr();
+     let dst_ptr = dst.as_ptr();
+-- 
+2.53.0
+
