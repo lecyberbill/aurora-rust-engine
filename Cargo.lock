@@ -374,6 +374,7 @@ dependencies = [
  "accelerate-src",
  "candle-core",
  "candle-metal-kernels",
+ "candle-rocm-kernels",
  "half",
  "intel-mkl-src",
  "libc",
