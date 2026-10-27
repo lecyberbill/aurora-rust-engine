@@ -10,6 +10,7 @@ use candle_nn::optim::{AdamW, Optimizer, ParamsAdamW};
 use std::collections::HashMap;
 use std::path::Path;
 use tokenizers::Tokenizer;
+pub mod gemma3;
 
 // ---------------------------------------------------------------- config
 
