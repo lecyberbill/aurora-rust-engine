@@ -18,6 +18,25 @@ Exemple validé : `Qwen/Qwen2.5-0.5B-Instruct` (dense, 943 Mo), 60 pas sur 4
 exemples → loss ~2,0 → 0,0002, et la sonde greedy répond « The magic word is
 aurora. » sur les deux backends.
 
+## Scale (mesuré, R9700 34 Go)
+
+| modèle | base | val loss (début → fin) | note |
+|---|---|---|---|
+| Qwen2.5-0.5B | F32 | 5,16 → 1,91 | 60 pas, probe « aurora » |
+| Qwen2.5-3B | F32 | 7,27 → 2,91 | 60 pas, probe « aurora » |
+| Qwen2.5-7B | F16 | 7,94 → 4,18 | 60 pas, probe « aurora » |
+
+- **Chargement shardé** : `model.safetensors.index.json` + `model-*-of-*.safetensors`.
+- **F32 + autograd** : sans patch, le backward matérialise un gradient pour
+  **chaque poids gelé** (~taille du modèle) → le 3B OOM. Le patch fork
+  [`0004-skip-frozen-leaf-grads`](patches/0004-skip-frozen-leaf-grads.patch)
+  saute les feuilles non-variables. Le 7B reste trop gros en F32 (28 Go) :
+  `--base-dtype f16` fait tourner les projections de base en F16 (activations
+  et LoRA en F32).
+- CUDA local (12 Go) : 0,5B validé ; 3B/7B en F32 ne tiennent pas, le 3B en
+  F16 (~6 Go) est le prochain test.
+
+
 ## Dataset
 
 JSONL, une conversation par ligne, format ChatML :
@@ -38,6 +57,12 @@ cargo build --release --features rocm --bin train_lora
   --model-dir /models/llm/qwen2.5-0.5b-instruct \
   --data data/lora_tiny.jsonl --out /tmp/lora_out \
   --steps 60 --lr 3e-4 --rank 16 --alpha 32 --max-seq 128 --val 1 --device rocm
+
+# 7B : base F16 (le F32 = 28 Go + grads ne tient pas sur 34 Go)
+./target/release/train_lora \
+  --model-dir /models/llm/qwen2.5-7b-instruct \
+  --data data/lora_tiny.jsonl --out /tmp/lora_7b \
+  --steps 60 --lr 3e-4 --max-seq 128 --val 1 --base-dtype f16 --device rocm
 
 # CUDA (local)
 cargo build --release --features cuda --bin train_lora
@@ -80,8 +105,10 @@ mergé → idem ; val loss 5,16 → 1,91 (1 exemple tenu à l'écart).
 - Recharge et merge validés (`gen_lora`, `merge_lora`) ; le format PEFT exporté
   est standard et rechargeable.
 - Pas de gradient accumulation ni de scheduler LR.
-- L'architecture supportée est Qwen2 dense ; Gemma/Qwen3.8 (GGUF quantifiés)
-  demandent un chemin dense équivalent.
+- L'architecture supportée est Qwen2 dense (0,5B/3B/7B testés, chargement
+  shardé) ; Gemma/Qwen3.8 (GGUF quantifiés) demandent un chemin dense équivalent.
+- Le patch fork `0004` n'est pas dans le build portable : les gros modèles
+  nécessitent le fork (`build_rocm.sh`).
 
 ## Fichiers
 

@@ -73,7 +73,7 @@ struct Rms {
 
 impl Rms {
     fn new(dim: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
-        Ok(Self { w: vb.get(dim, "weight")?, eps: eps as f32 })
+        Ok(Self { w: vb.get(dim, "weight")?.to_dtype(DType::F32)?, eps: eps as f32 })
     }
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let ms = x.sqr()?.mean_keepdim(D::Minus1)?;
@@ -86,6 +86,7 @@ impl Rms {
 
 struct LoraLinear {
     base: Linear,
+    base_dtype: DType,
     a: Option<Var>,
     b: Option<Var>,
     scale: f64,
@@ -93,7 +94,7 @@ struct LoraLinear {
 
 impl LoraLinear {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let y = self.base.forward(xs)?;
+        let y = self.base.forward(&xs.to_dtype(self.base_dtype)?)?.to_dtype(DType::F32)?;
         match (&self.a, &self.b) {
             (Some(a), Some(b)) => {
                 let (b1, m, k) = xs.dims3()?;
@@ -210,6 +211,37 @@ impl Layer {
 
 // ---------------------------------------------------------------- model
 
+fn load_base_weights(dir: &Path, dev: &Device, dtype: DType) -> Result<HashMap<String, Tensor>> {
+    let single = dir.join("model.safetensors");
+    let index = dir.join("model.safetensors.index.json");
+    let mut out = HashMap::new();
+    if single.exists() {
+        for (k, v) in candle_core::safetensors::load(&single, dev)? {
+            out.insert(k, v.to_dtype(dtype)?);
+        }
+    } else if index.exists() {
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&index)?)?;
+        let map = v
+            .get("weight_map")
+            .and_then(|m| m.as_object())
+            .context("weight_map")?;
+        let mut shards: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for f in map.values() {
+            if let Some(f) = f.as_str() {
+                shards.insert(f.to_string());
+            }
+        }
+        for shard in shards {
+            for (k, t) in candle_core::safetensors::load(dir.join(&shard), dev)? {
+                out.insert(k, t.to_dtype(dtype)?);
+            }
+        }
+    } else {
+        anyhow::bail!("no model.safetensors or index in {}", dir.display());
+    }
+    Ok(out)
+}
+
 pub struct LoraModel {
     cfg: Config,
     embed: Embedding,
@@ -220,6 +252,7 @@ pub struct LoraModel {
     device: Device,
     lora: Vec<(String, Var, Var)>,
     scale: f64,
+    base_dtype: DType,
 }
 
 impl LoraModel {
@@ -230,15 +263,22 @@ impl LoraModel {
         alpha: f64,
         targets: &[String],
     ) -> Result<Self> {
+        Self::load_with_dtype(dir, dev, r, alpha, targets, DType::F32)
+    }
+
+    pub fn load_with_dtype(
+        dir: &Path,
+        dev: &Device,
+        r: usize,
+        alpha: f64,
+        targets: &[String],
+        base_dtype: DType,
+    ) -> Result<Self> {
         let cfg: Config = serde_json::from_str(
             &std::fs::read_to_string(dir.join("config.json")).context("config.json")?,
         )?;
-        let raw = candle_core::safetensors::load(dir.join("model.safetensors"), dev)?;
-        let mut ts = HashMap::new();
-        for (k, v) in raw {
-            ts.insert(k, v.to_dtype(DType::F32)?);
-        }
-        let vb = VarBuilder::from_tensors(ts, DType::F32, dev);
+        let ts = load_base_weights(dir, dev, base_dtype)?;
+        let vb = VarBuilder::from_tensors(ts, base_dtype, dev);
         let vb_m = vb.pp("model");
 
         let embed = candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb_m.pp("embed_tokens"))?;
@@ -268,6 +308,7 @@ impl LoraModel {
 
             let lora_lin = |base: Linear, p: Option<(Var, Var)>| LoraLinear {
                 base,
+                base_dtype,
                 a: p.as_ref().map(|x| x.0.clone()),
                 b: p.as_ref().map(|x| x.1.clone()),
                 scale,
@@ -303,7 +344,7 @@ impl LoraModel {
             Linear::new(embed.embeddings().clone(), None)
         };
 
-        Ok(Self { cfg, embed, layers, norm, lm_head, rope, device: dev.clone(), lora, scale })
+        Ok(Self { cfg, embed, layers, norm, lm_head, rope, device: dev.clone(), lora, scale, base_dtype })
     }
 
     fn mask(&self, l: usize) -> Result<Tensor> {
@@ -321,13 +362,17 @@ impl LoraModel {
     /// Logits for every position: `[1, L, vocab]`.
     pub fn forward_logits(&self, ids: &Tensor) -> Result<Tensor> {
         let (_, l) = ids.dims2()?;
-        let mut xs = self.embed.forward(ids)?;
+        let mut xs = self.embed.forward(ids)?.to_dtype(DType::F32)?;
         let mask = self.mask(l)?;
         for layer in &self.layers {
             xs = layer.forward(&xs, &mask, &self.rope)?;
         }
         let xs = self.norm.forward(&xs)?;
-        Ok(self.lm_head.forward(&xs)?)
+        let logits = self
+            .lm_head
+            .forward(&xs.to_dtype(self.base_dtype)?)?
+            .to_dtype(DType::F32)?;
+        Ok(logits)
     }
 
     pub fn lora_vars(&self) -> Vec<Var> {
@@ -466,9 +511,10 @@ pub fn train(
     max_seq: usize,
     targets: &[String],
     val_n: usize,
+    base_dtype: DType,
 ) -> Result<()> {
     let tok = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let model = LoraModel::load(dir, dev, r, alpha, targets)?;
+    let model = LoraModel::load_with_dtype(dir, dev, r, alpha, targets, base_dtype)?;
     let vars = model.lora_vars();
     println!("LoRA vars: {} tensors, r={r} alpha={alpha}", vars.len());
     let mut opt = AdamW::new(
@@ -541,9 +587,9 @@ fn read_adapter_config(adapter_dir: &Path) -> Result<AdapterConfig> {
 }
 
 /// Load the base model and apply a saved PEFT adapter.
-pub fn load_with_adapter(dir: &Path, adapter_dir: &Path, dev: &Device) -> Result<LoraModel> {
+pub fn load_with_adapter(dir: &Path, adapter_dir: &Path, dev: &Device, base_dtype: DType) -> Result<LoraModel> {
     let cfg = read_adapter_config(adapter_dir)?;
-    let model = LoraModel::load(dir, dev, cfg.r, cfg.lora_alpha, &cfg.target_modules)?;
+    let model = LoraModel::load_with_dtype(dir, dev, cfg.r, cfg.lora_alpha, &cfg.target_modules, base_dtype)?;
     let map = candle_core::safetensors::load(adapter_dir.join("adapter_model.safetensors"), dev)?;
     for (name, a, b) in &model.lora {
         let ka = format!("base_model.model.{name}.lora_A.weight");
@@ -572,11 +618,8 @@ pub fn merge_adapter(
 ) -> Result<()> {
     let cfg = read_adapter_config(adapter_dir)?;
     let scale = cfg.lora_alpha / cfg.r as f64;
-    let raw = candle_core::safetensors::load(model_dir.join("model.safetensors"), dev)?;
-    let mut base = HashMap::new();
-    for (k, v) in raw {
-        base.insert(k, v.to_dtype(dtype)?);
-    }
+    let raw = load_base_weights(model_dir, dev, dtype)?;
+    let mut base = raw;
     let ad = candle_core::safetensors::load(adapter_dir.join("adapter_model.safetensors"), dev)?;
     let mut merged = 0usize;
     for (k, a) in &ad {

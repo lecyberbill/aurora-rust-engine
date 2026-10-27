@@ -15,6 +15,7 @@ fn main() -> Result<()> {
     let mut alpha = 32f64;
     let mut max_seq = 256usize;
     let mut val_n = 1usize;
+    let mut base_dtype = "f32".to_string();
     let mut device = None;
     let mut targets: Vec<String> = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
         .iter()
@@ -60,6 +61,10 @@ fn main() -> Result<()> {
                 i += 1;
                 val_n = args[i].parse()?;
             }
+            "--base-dtype" => {
+                i += 1;
+                base_dtype = args[i].clone();
+            }
             "--targets" => {
                 i += 1;
                 targets = args[i].split(',').map(|s| s.trim().to_string()).collect();
@@ -86,8 +91,13 @@ fn main() -> Result<()> {
         _ => aurora_rust_engine::device::auto_device()?,
     };
     println!("device: {dev:?}");
+    let base_dtype = match base_dtype.as_str() {
+        "f16" => candle_core::DType::F16,
+        "bf16" => candle_core::DType::BF16,
+        _ => candle_core::DType::F32,
+    };
     aurora_rust_engine::train::train(
-        &model_dir, &data, &out, &dev, rank, alpha, lr, steps, max_seq, &targets, val_n,
+        &model_dir, &data, &out, &dev, rank, alpha, lr, steps, max_seq, &targets, val_n, base_dtype,
     )?;
     Ok(())
 }

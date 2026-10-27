@@ -1,0 +1,64 @@
+From 4bbbe3ec4530842d9c60aa41a26f675ef066df38 Mon Sep 17 00:00:00 2001
+From: Aurora AI Dev <ai-dev@aurora-svc.local>
+Date: Tue, 27 Oct 2026 20:06:19 +0000
+Subject: [PATCH] perf(rocm): skip gradients for frozen leaf tensors in
+ backward
+
+MatMul and IndexSelect bwd materialise a gradient buffer for every operand, including frozen (non-variable, leaf) weights. For LoRA / partial fine-tuning that is the size of the whole base model and OOMs at 7B. Skip computing/storing the grad when the operand is a non-variable leaf; variables and intermediates are unchanged.
+---
+ candle-core/src/backprop.rs | 29 +++++++++++++++++++++--------
+ 1 file changed, 21 insertions(+), 8 deletions(-)
+
+diff --git a/candle-core/src/backprop.rs b/candle-core/src/backprop.rs
+index bfd9a92d..a4a83a13 100644
+--- a/candle-core/src/backprop.rs
++++ b/candle-core/src/backprop.rs
+@@ -451,20 +451,26 @@ impl Tensor {
+                         *src_sum_grad = src_sum_grad.add(&src_grad)?;
+                     }
+                     Op::IndexSelect(arg, indexes, dim) => {
+-                        let sum_grad = grads.or_insert(arg)?;
+-                        *sum_grad = sum_grad.index_add(indexes, &grad, *dim)?;
++                        if needs_grad(arg) {
++                            let sum_grad = grads.or_insert(arg)?;
++                            *sum_grad = sum_grad.index_add(indexes, &grad, *dim)?;
++                        }
+                     }
+                     Op::Matmul(lhs, rhs) => {
+                         // Skipping checks, the op went ok, we can skip
+                         // the matmul size checks for now.
+ 
+-                        let lhs_grad = grad.matmul(&rhs.t()?)?;
+-                        let lhs_sum_grad = grads.or_insert(lhs)?;
+-                        *lhs_sum_grad = lhs_sum_grad.add(&lhs_grad)?;
++                        if needs_grad(lhs) {
++                            let lhs_grad = grad.matmul(&rhs.t()?)?;
++                            let lhs_sum_grad = grads.or_insert(lhs)?;
++                            *lhs_sum_grad = lhs_sum_grad.add(&lhs_grad)?;
++                        }
+ 
+-                        let rhs_grad = lhs.t()?.matmul(&grad)?;
+-                        let rhs_sum_grad = grads.or_insert(rhs)?;
+-                        *rhs_sum_grad = rhs_sum_grad.add(&rhs_grad)?;
++                        if needs_grad(rhs) {
++                            let rhs_grad = lhs.t()?.matmul(&grad)?;
++                            let rhs_sum_grad = grads.or_insert(rhs)?;
++                            *rhs_sum_grad = rhs_sum_grad.add(&rhs_grad)?;
++                        }
+                     }
+                     Op::Cat(args, dim) => {
+                         let mut start_idx = 0;
+@@ -807,3 +813,10 @@ impl GradStore {
+         self.0.keys()
+     }
+ }
++
++/// False only for frozen leaf tensors (constants with no pending op): their
++/// gradient is never needed, so skipping it avoids materialising a buffer the
++/// size of every frozen weight (critical for LoRA / partial fine-tuning).
++fn needs_grad(t: &Tensor) -> bool {
++    t.is_variable() || t.op().is_some()
++}
+-- 
+2.53.0
+
