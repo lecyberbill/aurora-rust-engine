@@ -124,8 +124,8 @@ l'autotune nécessitent le fork (`build_rocm.sh`).
 
 ## 4. Limites & suite
 
-- CUDA local (12 Go) : 0,5B validé ; 3B/7B nécessitent le patch 0004 côté CUDA
-  ou une GPU plus grosse.
+- CUDA local (12 Go) : 0,5B F32 et **1,5B F16** validés (patch 0004 appliqué au
+  checkout Cargo local) ; 3B F16 charge et fait le pas 1 puis OOM.
 - Qwen 3.8 27B : non entraînable en F16 (54 Go) sur 34 Go.
 - Gradient accumulation (`--grad-accum N`) et cosine LR (0.1×lr) ajoutés ;
   eval = val loss.
