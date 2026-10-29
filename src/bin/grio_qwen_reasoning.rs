@@ -109,18 +109,37 @@ mod app {
 
                     // Build multi-turn structured message list for native chat API
                     let mut structured_messages: Vec<(String, String)> = Vec::new();
+                    let max_chars: usize = std::env::var("AURORA_CHAT_MAX_CHARS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(8000);
                     let history_window = if history.len() > 10 {
                         &history[history.len() - 10..]
                     } else {
                         &history[..]
                     };
-                    for msg in history_window {
-                        let role = msg.role.clone();
+                    let mut kept: Vec<(String, String)> = Vec::new();
+                    let mut total_chars = 0usize;
+                    for msg in history_window.iter().rev() {
                         let clean_content = msg.content.trim().to_string();
-                        if !clean_content.is_empty() && !clean_content.starts_with("Bonjour ! Je suis Qwen") {
-                            structured_messages.push((role, clean_content));
+                        if clean_content.is_empty() || clean_content.starts_with("Bonjour ! Je suis Qwen") {
+                            continue;
                         }
+                        let len = clean_content.chars().count() + 8;
+                        if !kept.is_empty() && total_chars + len > max_chars {
+                            break;
+                        }
+                        total_chars += len;
+                        kept.push((msg.role.clone(), clean_content));
                     }
+                    kept.reverse();
+                    structured_messages = kept;
+                    eprintln!(
+                        "[aurora] chat history: {} messages kept, ~{} chars (cap {})",
+                        structured_messages.len(),
+                        total_chars,
+                        max_chars
+                    );
 
                     println!("📝 [Chat Prompt Debug] Multi-turn structured messages (count: {}):", structured_messages.len());
                     for (i, (r, c)) in structured_messages.iter().enumerate() {
