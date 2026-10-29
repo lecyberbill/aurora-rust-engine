@@ -7,6 +7,7 @@
 
 use super::{lora_pair, load_base_weights, LoraLinear, Sample};
 use anyhow::{Context, Result};
+use candle_core::backprop::GradStore;
 use candle_core::{DType, Device, Module, Tensor, Var, D};
 use candle_nn::{
     optim::{AdamW, Optimizer, ParamsAdamW},
@@ -451,12 +452,15 @@ pub fn train_gemma3(
     targets: &[String],
     val_n: usize,
     base_dtype: DType,
+    grad_accum: usize,
 ) -> Result<()> {
     let tok = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow::anyhow!("{e}"))?;
     let model = GemmaModel::load_with_dtype(dir, dev, r, alpha, targets, base_dtype)?;
     let vars = model.lora_vars();
     println!("LoRA vars: {} tensors, r={r} alpha={alpha}", vars.len());
     let mut opt = AdamW::new(vars, ParamsAdamW { lr, ..Default::default() })?;
+    let ga = grad_accum.max(1);
+    let mut acc: Option<GradStore> = None;
 
     let text = std::fs::read_to_string(data_path)?;
     let samples: Vec<serde_json::Value> = text
@@ -493,9 +497,20 @@ pub fn train_gemma3(
             let smp = gemma_sample(&tok, s, max_seq)?;
             let loss = loss_of(&model, &smp, dev)?;
             let lv = loss.to_scalar::<f32>()?;
-            let grads = loss.backward()?;
-            opt.step(&grads)?;
+            let scaled = loss.affine(1.0 / ga as f64, 0.0)?;
+            let g = scaled.backward()?;
+            match &mut acc {
+                Some(a) => a.extend(g)?,
+                None => acc = Some(g),
+            }
             step += 1;
+            if step % ga == 0 || step == steps {
+                let gs = acc.take().unwrap();
+                opt.step(&gs)?;
+                let t = step as f64 / steps as f64;
+                let lr_t = lr * (0.1 + 0.45 * (1.0 + (std::f64::consts::PI * t).cos()));
+                opt.set_learning_rate(lr_t);
+            }
             if step <= 10 || step % 5 == 0 || step == steps {
                 println!("epoch {epoch} step {step}: loss {lv:.4}");
             }

@@ -17,6 +17,7 @@ fn main() -> Result<()> {
     let mut val_n = 1usize;
     let mut base_dtype = "f32".to_string();
     let mut arch = "qwen".to_string();
+    let mut grad_accum = 1usize;
     let mut device = None;
     let mut targets: Vec<String> = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
         .iter()
@@ -70,6 +71,10 @@ fn main() -> Result<()> {
                 i += 1;
                 arch = args[i].clone();
             }
+            "--grad-accum" => {
+                i += 1;
+                grad_accum = args[i].parse()?;
+            }
             "--targets" => {
                 i += 1;
                 targets = args[i].split(',').map(|s| s.trim().to_string()).collect();
@@ -104,12 +109,12 @@ fn main() -> Result<()> {
     if arch == "gemma3" {
         aurora_rust_engine::train::gemma3::train_gemma3(
             &model_dir, &data, &out, &dev, rank, alpha, lr, steps, max_seq, &targets, val_n,
-            base_dtype,
+            base_dtype, grad_accum,
         )?;
     } else {
         aurora_rust_engine::train::train(
             &model_dir, &data, &out, &dev, rank, alpha, lr, steps, max_seq, &targets, val_n,
-            base_dtype,
+            base_dtype, grad_accum,
         )?;
     }
     Ok(())

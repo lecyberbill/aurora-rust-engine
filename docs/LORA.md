@@ -108,7 +108,7 @@ Le binaire entraîne puis lance une génération greedy de contrôle (32 tokens)
 
 - Recharge et merge validés pour Qwen2 (`gen_lora`, `merge_lora`) ; pour Gemma
   seule la sonde in-process est câblée.
-- Pas de gradient accumulation ni de scheduler LR.
+- Gradient accumulation (`--grad-accum N`) et cosine LR (0.1×lr) ; eval = val loss.
 - Gemma 3 : L ≤ 1024 (fenêtre glissante non modélisée au-delà) ; Qwen3.8
   (GGUF quantifié) demanderait un chemin dense équivalent.
 - Le patch fork `0004` n'est pas dans le build portable : les gros modèles

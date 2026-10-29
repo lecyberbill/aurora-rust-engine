@@ -127,7 +127,8 @@ l'autotune nécessitent le fork (`build_rocm.sh`).
 - CUDA local (12 Go) : 0,5B validé ; 3B/7B nécessitent le patch 0004 côté CUDA
   ou une GPU plus grosse.
 - Qwen 3.8 27B : non entraînable en F16 (54 Go) sur 34 Go.
-- Pas de gradient accumulation ni de scheduler LR.
+- Gradient accumulation (`--grad-accum N`) et cosine LR (0.1×lr) ajoutés ;
+  eval = val loss.
 - Perf : l'écart 1,5–1,75× vs llama.cpp reste dominé par l'overhead par op /
   enqueue (graphe HIP capture-safe = piste principale).
 

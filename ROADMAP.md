@@ -808,6 +808,7 @@ All advertised models load on real weights; Qwen 3.5/3.8, Gemma and Phi-4 produc
 
 ### Fait (suite)
 - Reload/merge PEFT pour Gemma 3 validés (`gen_lora --arch gemma3`, `merge_lora`).
+- Gradient accumulation (`--grad-accum`) + cosine LR.
 
 ### Suivant
 - CUDA : porter le patch 0004 (ou GPU > 12 Go) pour 3B+.
