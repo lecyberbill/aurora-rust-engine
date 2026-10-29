@@ -207,6 +207,7 @@ impl GenerationModel for TextModel {
                     }
                 })?.get_ids().to_vec();
 
+                let t0 = std::time::Instant::now();
                 let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
                 let logits = model.forward(&input, 0)?;
                 let last = logits.squeeze(0)?;
@@ -235,7 +236,8 @@ impl GenerationModel for TextModel {
                         source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
                     }
                 })?;
-                Ok((String::new(), text.trim().to_string(), 0.0))
+                let (thinking, answer) = split_channels(&text);
+                Ok((thinking, answer, tok_s(generated.len(), t0)))
             }
             TextBackend::QuantizedQwen3 { model, tokenizer, device } => {
                 let tok = tokenizer.as_ref().ok_or_else(|| {
@@ -671,4 +673,52 @@ mod tests {
         assert!(!abort_second, "Callback must request early abort when returning false");
         Ok(())
     }
+}
+
+/// Remove `<unusedNNN>` control tokens from decoded text.
+fn strip_unused(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("<unused") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + "<unused".len()..];
+        match after.find('>') {
+            Some(gt) => rest = &after[gt + 1..],
+            None => {
+                out.push_str(rest);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Gemma 4 may emit `<unused94>thought ...<unused95>answer`; split the two
+/// channels and drop the `thought` label.
+fn split_channels(text: &str) -> (String, String) {
+    let (mut thinking, mut answer) = (String::new(), text.to_string());
+    if let Some(i) = text.find("<unused95>") {
+        let (head, tail) = text.split_at(i);
+        answer = tail["<unused95>".len()..].to_string();
+        if let Some(j) = head.find("<unused94>") {
+            thinking = head[j + "<unused94>".len()..].to_string();
+        }
+    }
+    let thinking = strip_unused(&thinking)
+        .trim()
+        .trim_start_matches("thought")
+        .trim()
+        .to_string();
+    let answer = strip_unused(&answer)
+        .trim()
+        .trim_start_matches("thought")
+        .trim()
+        .to_string();
+    (thinking, answer)
+}
+
+fn tok_s(n_tokens: usize, t0: std::time::Instant) -> f64 {
+    n_tokens as f64 / t0.elapsed().as_secs_f64().max(1e-6)
 }
