@@ -57,8 +57,8 @@ les chargements (surtout le 27B). Détails et runs bruts : `docs/BENCH_ROCM.md`.
 - Dataset JSONL `messages` (ChatML Qwen, `<start_of_turn>` Gemma), CE masquée au
   tour assistant, AdamW, **val loss** (`--val N`).
 - Export **PEFT** (`adapter_model.safetensors` + `adapter_config.json`).
-- Rechargement (`gen_lora`) et **merge** (`merge_lora`, modèle autonome F16/F32)
-  pour Qwen2.
+- Rechargement et **merge PEFT validés** pour Qwen2 (`gen_lora`, `merge_lora`)
+  et Gemma 3 (`gen_lora --arch gemma3`, `merge_lora`).
 - Chargement **shardé** (`model.safetensors.index.json`) et base **F16**
   (`--base-dtype f16`) pour les gros modèles.
 
@@ -124,7 +124,6 @@ l'autotune nécessitent le fork (`build_rocm.sh`).
 
 ## 4. Limites & suite
 
-- Gemma : reload/merge PEFT autonomes pas encore câblés (sonde in-process).
 - CUDA local (12 Go) : 0,5B validé ; 3B/7B nécessitent le patch 0004 côté CUDA
   ou une GPU plus grosse.
 - Qwen 3.8 27B : non entraînable en F16 (54 Go) sur 34 Go.

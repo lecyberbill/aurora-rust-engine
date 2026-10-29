@@ -806,8 +806,10 @@ All advertised models load on real weights; Qwen 3.5/3.8, Gemma and Phi-4 produc
   val split, chargement shardé, base F16, patch fork 0004 (grads gelés).
 - Docs : BENCH_ROCM, LORA, SESSION_2026-10 ; README nettoyé.
 
+### Fait (suite)
+- Reload/merge PEFT pour Gemma 3 validés (`gen_lora --arch gemma3`, `merge_lora`).
+
 ### Suivant
-- Reload/merge PEFT pour Gemma 3 (aujourd'hui sonde in-process).
 - CUDA : porter le patch 0004 (ou GPU > 12 Go) pour 3B+.
 - Graphe HIP capture-safe (principal gain perf restant).
 - Gradient accumulation, scheduler LR, eval.

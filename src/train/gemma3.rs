@@ -280,6 +280,34 @@ impl GemmaModel {
         Ok(Self { cfg, embed, layers, norm, lm_head, device: dev.clone(), lora, scale, base_dtype })
     }
 
+    pub fn load_with_adapter(
+        dir: &Path,
+        adapter_dir: &Path,
+        dev: &Device,
+        base_dtype: DType,
+    ) -> Result<Self> {
+        let cfg = super::read_adapter_config(adapter_dir)?;
+        let model =
+            Self::load_with_dtype(dir, dev, cfg.r, cfg.lora_alpha, &cfg.target_modules, base_dtype)?;
+        let map =
+            candle_core::safetensors::load(adapter_dir.join("adapter_model.safetensors"), dev)?;
+        for (name, a, b) in &model.lora {
+            let ka = format!("base_model.model.{name}.lora_A.weight");
+            let kb = format!("base_model.model.{name}.lora_B.weight");
+            let av = map
+                .get(&ka)
+                .with_context(|| format!("adapter missing {ka}"))?
+                .to_dtype(DType::F32)?;
+            let bv = map
+                .get(&kb)
+                .with_context(|| format!("adapter missing {kb}"))?
+                .to_dtype(DType::F32)?;
+            a.set(&av.t()?.contiguous()?)?;
+            b.set(&bv.t()?.contiguous()?)?;
+        }
+        Ok(model)
+    }
+
     pub fn forward_logits(&self, ids: &Tensor) -> Result<Tensor> {
         let (_, l) = ids.dims2()?;
         let mut xs = self.embed.forward(ids)?.to_dtype(DType::F32)?;

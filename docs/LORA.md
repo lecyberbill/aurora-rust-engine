@@ -91,8 +91,8 @@ Le binaire entraîne puis lance une génération greedy de contrôle (32 tokens)
   (sur-apprentissage sur 4 exemples) ; probe « aurora ».
 - Mesure 12B : 20 pas → val 21,96 → **2,01**, train 0,0000 ; probe « aurora ».
   F16 ≈ 24 Go, tient sur les 34 Go de la R9700.
-- Rechargement/merge autonome de l'adapter Gemma : pas encore câblé (probe
-  in-process).
+- Rechargement/merge validés : `gen_lora --arch gemma3 ... --adapter-dir ...`
+  et `merge_lora ...` (modèle autonome), comme pour Qwen.
 
 ## Spécificités backend
 

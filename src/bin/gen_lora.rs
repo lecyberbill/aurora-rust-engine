@@ -12,6 +12,7 @@ fn main() -> Result<()> {
     let mut prompt = String::from("What is the magic word?");
     let mut max_new = 32usize;
     let mut base_dtype = "f32".to_string();
+    let mut arch = "qwen".to_string();
     let mut device = None;
 
     let mut i = 1;
@@ -36,6 +37,10 @@ fn main() -> Result<()> {
             "--base-dtype" => {
                 i += 1;
                 base_dtype = args[i].clone();
+            }
+            "--arch" => {
+                i += 1;
+                arch = args[i].clone();
             }
             "--device" => {
                 i += 1;
@@ -62,11 +67,26 @@ fn main() -> Result<()> {
         "bf16" => candle_core::DType::BF16,
         _ => candle_core::DType::F32,
     };
-    let model = match &adapter {
-        Some(a) => aurora_rust_engine::train::load_with_adapter(&model_dir, a, &dev, bdt)?,
-        None => aurora_rust_engine::train::LoraModel::load_with_dtype(&model_dir, &dev, 0, 1.0, &[], bdt)?,
-    };
-    let chat = format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
-    print!("{}", model.generate(&tok, &chat, max_new)?);
+    if arch == "gemma3" {
+        let model = match &adapter {
+            Some(a) => aurora_rust_engine::train::gemma3::GemmaModel::load_with_adapter(
+                &model_dir, a, &dev, bdt,
+            )?,
+            None => aurora_rust_engine::train::gemma3::GemmaModel::load_with_dtype(
+                &model_dir, &dev, 0, 1.0, &[], bdt,
+            )?,
+        };
+        let chat = format!("<bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n");
+        print!("{}", model.generate(&tok, &chat, max_new)?);
+    } else {
+        let model = match &adapter {
+            Some(a) => aurora_rust_engine::train::load_with_adapter(&model_dir, a, &dev, bdt)?,
+            None => aurora_rust_engine::train::LoraModel::load_with_dtype(
+                &model_dir, &dev, 0, 1.0, &[], bdt,
+            )?,
+        };
+        let chat = format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
+        print!("{}", model.generate(&tok, &chat, max_new)?);
+    }
     Ok(())
 }
