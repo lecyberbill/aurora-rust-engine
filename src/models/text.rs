@@ -1,4 +1,4 @@
-// [WFGY] Zone: SAFE | λ: 0.25 | Fallbacks: 0 | Action: Text model wrapper (encoders and CausalLM text generation)
+// [WFGY] Zone: SAFE | ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â»: 0.25 | Fallbacks: 0 | Action: Text model wrapper (encoders and CausalLM text generation)
 
 pub mod causal;
 pub mod llama;
@@ -61,35 +61,159 @@ pub struct TextModel {
     id: String,
     family: String,
     inner: TextBackend,
+    /// Per-session token prefix, used by the optional prefix cache.
+    sessions: std::collections::HashMap<String, Vec<u32>>,
 }
 
 impl TextModel {
     pub fn qwen(id: String, encoder: Qwen3TextEncoder) -> Self {
-        Self { id, family: "qwen3".into(), inner: TextBackend::Qwen(encoder) }
+        Self { id, family: "qwen3".into(), sessions: Default::default(), inner: TextBackend::Qwen(encoder) }
     }
     pub fn mistral(id: String, encoder: Mistral3TextEncoder) -> Self {
-        Self { id, family: "mistral3".into(), inner: TextBackend::Mistral(encoder) }
+        Self { id, family: "mistral3".into(), sessions: Default::default(), inner: TextBackend::Mistral(encoder) }
     }
     pub fn t5(id: String, encoder: T5TextEncoder) -> Self {
-        Self { id, family: "t5".into(), inner: TextBackend::T5(encoder) }
+        Self { id, family: "t5".into(), sessions: Default::default(), inner: TextBackend::T5(encoder) }
     }
     pub fn causal_lm(id: String, family: String, pipeline: CausalLMPipeline) -> Self {
-        Self { id, family, inner: TextBackend::CausalLM(pipeline) }
+        Self { id, family, sessions: Default::default(), inner: TextBackend::CausalLM(pipeline) }
     }
     pub fn quantized_gemma3(id: String, model: crate::models::quantized_gemma3::ModelWeights, tokenizer: Option<tokenizers::Tokenizer>, device: Device) -> Self {
-        Self { id, family: "gemma".into(), inner: TextBackend::QuantizedGemma3 { model, tokenizer, device } }
+        Self { id, family: "gemma".into(), sessions: Default::default(), inner: TextBackend::QuantizedGemma3 { model, tokenizer, device } }
     }
     pub fn quantized_qwen3(id: String, model: crate::models::quantized_qwen3::ModelWeights, tokenizer: Option<tokenizers::Tokenizer>, device: Device) -> Self {
-        Self { id, family: "qwen3".into(), inner: TextBackend::QuantizedQwen3 { model, tokenizer, device } }
+        Self { id, family: "qwen3".into(), sessions: Default::default(), inner: TextBackend::QuantizedQwen3 { model, tokenizer, device } }
     }
     pub fn quantized_qwen35(id: String, model: crate::models::quantized_qwen35::ModelWeights, tokenizer: Option<tokenizers::Tokenizer>, device: Device) -> Self {
-        Self { id, family: "qwen3".into(), inner: TextBackend::QuantizedQwen35 { model, tokenizer, device } }
+        Self { id, family: "qwen3".into(), sessions: Default::default(), inner: TextBackend::QuantizedQwen35 { model, tokenizer, device } }
     }
 
     pub fn as_causal_lm_mut(&mut self) -> Option<&mut CausalLMPipeline> {
         match &mut self.inner {
             TextBackend::CausalLM(ref mut p) => Some(p),
             _ => None,
+        }
+    }
+
+    /// Build the model-specific chat prompt (Gemma / Llama / family default).
+    pub fn chat_prompt_for_family(&self, messages: &[(String, String)]) -> String {
+        let mut prompt = String::new();
+        let family_lower = self.family.to_lowercase();
+        if family_lower.contains("gemma") {
+            for (role, content) in messages {
+                let r = if role == "assistant" { "model" } else { role.as_str() };
+                prompt.push_str(&format!("<start_of_turn>{r}\n{content}<end_of_turn>\n"));
+            }
+            prompt.push_str("<start_of_turn>model\n");
+        } else if family_lower.contains("llama") || family_lower.contains("deepseek") {
+            prompt.push_str("<|begin_of_text|>");
+            for (role, content) in messages {
+                prompt.push_str(&format!(
+                    "<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>"
+                ));
+            }
+            prompt.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+        } else {
+            prompt = self.chat_prompt(messages);
+        }
+        prompt
+    }
+
+    /// Chat with an optional cross-turn prefix cache (`AURORA_PREFIX_CACHE=1`).
+    ///
+    /// Only backends exposing a KV prefix (currently Gemma) use it; otherwise
+    /// an English warning is printed once and the normal path runs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_chat_cached(
+        &mut self,
+        session_id: &str,
+        messages: &[(String, String)],
+        max_tokens: usize,
+        temperature: f64,
+        reasoning_effort: f64,
+    ) -> Result<(String, String, f64, String)> {
+        let enabled = std::env::var_os("AURORA_PREFIX_CACHE").is_some();
+        let supported = matches!(&self.inner, TextBackend::QuantizedGemma3 { .. });
+        if !enabled || !supported {
+            if enabled && !supported {
+                eprintln!("[aurora] prefix cache: backend not supported, falling back to the normal path");
+            }
+            {
+                let (t, a, s) = self.generate_chat(messages, max_tokens, temperature, reasoning_effort)?;
+                return Ok((t, a.clone(), s, a));
+            }
+        }
+
+        let prompt = self.chat_prompt_for_family(messages);
+        let prev = self.sessions.get(session_id).cloned().unwrap_or_default();
+
+        let TextBackend::QuantizedGemma3 { model, tokenizer, device } = &mut self.inner else {
+            unreachable!()
+        };
+        let tok = tokenizer.as_ref().ok_or_else(|| {
+            LuminaError::Config("Tokenizer not attached to QuantizedGemma3 model".into())
+        })?;
+        let tokens = tok
+            .encode(prompt.as_str(), true)
+            .map_err(|e| LuminaError::Context {
+                context: "Failed to tokenize prompt for Gemma 3".into(),
+                source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+            })?
+            .get_ids()
+            .to_vec();
+        if tokens.is_empty() {
+            {
+                let (t, a, s) = self.generate_chat(messages, max_tokens, temperature, reasoning_effort)?;
+                return Ok((t, a.clone(), s, a));
+            }
+        }
+
+        let mut lcp = common_prefix(&prev, &tokens).min(tokens.len() - 1);
+        let cache_len = model.prefix_cache_len().unwrap_or(0);
+        if lcp > cache_len || !model.truncate_prefix_cache(lcp) {
+            model.reset_prefix_cache();
+            lcp = 0;
+        }
+        eprintln!("[aurora] prefix cache: reusing {lcp}/{} prompt tokens", tokens.len());
+
+        let t0 = std::time::Instant::now();
+        let input = Tensor::new(&tokens[lcp..], device)?.unsqueeze(0)?;
+        let logits = model.forward(&input, lcp)?;
+        let last = logits.squeeze(0)?;
+        let l_vec = last.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let mut top: Vec<_> = l_vec.iter().enumerate().collect();
+        top.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut curr_tok = top[0].0 as u32;
+        let mut generated = vec![curr_tok];
+        for i in 0..max_tokens {
+            if curr_tok == 1 || curr_tok == 106 {
+                break;
+            }
+            let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
+            let step_logits = model.forward(&inp, tokens.len() + i)?;
+            let step_vec = step_logits.squeeze(0)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+            let mut t: Vec<_> = step_vec.iter().enumerate().collect();
+            t.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+            curr_tok = t[0].0 as u32;
+            generated.push(curr_tok);
+        }
+        let text = tok.decode(&generated, true).map_err(|e| LuminaError::Context {
+            context: "Failed to decode generated token stream".into(),
+            source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+        })?;
+        let raw = text.clone();
+        let (thinking, answer) = split_channels(&text);
+        let mut all = tokens.clone();
+        all.extend(&generated);
+        self.sessions.insert(session_id.to_string(), all);
+        Ok((thinking, answer, tok_s(generated.len(), t0), raw))
+    }
+
+    /// Drop a session's token prefix and reset the model KV.
+    pub fn reset_session(&mut self, session_id: &str) {
+        self.sessions.remove(session_id);
+        if let TextBackend::QuantizedGemma3 { model, .. } = &mut self.inner {
+            model.reset_prefix_cache();
         }
     }
 }
@@ -354,27 +478,7 @@ impl GenerationModel for TextModel {
         temperature: f64,
         reasoning_effort: f64,
     ) -> Result<(String, String, f64)> {
-        let mut prompt = String::new();
-        let family_lower = self.family.to_lowercase();
-        if family_lower.contains("gemma") {
-            // Gemma chat template: <start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n
-            for (role, content) in messages {
-                let r = if role == "assistant" { "model" } else { role.as_str() };
-                prompt.push_str(&format!("<start_of_turn>{r}\n{content}<end_of_turn>\n"));
-            }
-            prompt.push_str("<start_of_turn>model\n");
-        } else if family_lower.contains("llama") || family_lower.contains("deepseek") {
-            // Llama 3 / DeepSeek format
-            prompt.push_str("<|begin_of_text|>");
-            for (role, content) in messages {
-                prompt.push_str(&format!("<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>"));
-            }
-            prompt.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
-        } else {
-            // Family-aware default: ChatML for Qwen/Mistral/LFM, native
-            // template (e.g. Phi) when the backend provides one.
-            prompt = self.chat_prompt(messages);
-        }
+        let prompt = self.chat_prompt_for_family(messages);
         self.generate_with_reasoning(&prompt, max_tokens, temperature, reasoning_effort)
     }
 
@@ -421,10 +525,10 @@ impl GenerationModel for TextModel {
                 if std::env::var_os("AURORA_HIP_GRAPH").is_some() {
                     let max_len = tokens.len() + params.max_tokens + 8;
                     match model.setup_static_graph(tokens.len(), max_len) {
-                        Ok(()) => eprintln!("⚡ HIP graph decode enabled (gemma, max_len={max_len})"),
+                        Ok(()) => eprintln!("ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¡ HIP graph decode enabled (gemma, max_len={max_len})"),
                         Err(e) => {
                             model.clear_static_graph();
-                            eprintln!("⚠️ HIP graph disabled: {e}");
+                            eprintln!("ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â HIP graph disabled: {e}");
                         }
                     }
                 }
@@ -505,10 +609,10 @@ impl GenerationModel for TextModel {
                 if std::env::var_os("AURORA_HIP_GRAPH").is_some() {
                     let max_len = tokens.len() + params.max_tokens + 8;
                     match model.setup_static_graph(tokens.len(), max_len) {
-                        Ok(()) => eprintln!("⚡ HIP graph decode enabled (qwen35, max_len={max_len})"),
+                        Ok(()) => eprintln!("ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¡ HIP graph decode enabled (qwen35, max_len={max_len})"),
                         Err(e) => {
                             model.clear_static_graph();
-                            eprintln!("⚠️ HIP graph disabled: {e}");
+                            eprintln!("ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â HIP graph disabled: {e}");
                         }
                     }
                 }
@@ -721,4 +825,9 @@ fn split_channels(text: &str) -> (String, String) {
 
 fn tok_s(n_tokens: usize, t0: std::time::Instant) -> f64 {
     n_tokens as f64 / t0.elapsed().as_secs_f64().max(1e-6)
+}
+
+/// Length of the longest common token prefix.
+fn common_prefix(a: &[u32], b: &[u32]) -> usize {
+    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }

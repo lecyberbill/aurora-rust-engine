@@ -863,6 +863,40 @@ impl ModelWeights {
         self.graph_max_len = 0;
     }
 
+    /// Number of tokens currently represented in the KV cache (first layer).
+    pub fn prefix_cache_len(&self) -> Option<usize> {
+        for layer in &self.layers {
+            if let Some((k, _)) = &layer.kv_cache {
+                return k.dim(2).ok();
+            }
+        }
+        None
+    }
+
+    /// Keep only the first `len` KV positions (prefix-cache rollback).
+    pub fn truncate_prefix_cache(&mut self, len: usize) -> bool {
+        for layer in &mut self.layers {
+            if let Some((k, v)) = &layer.kv_cache {
+                let k = match k.narrow(2, 0, len) {
+                    Ok(t) => t,
+                    Err(_) => return false,
+                };
+                let v = match v.narrow(2, 0, len) {
+                    Ok(t) => t,
+                    Err(_) => return false,
+                };
+                layer.kv_cache = Some((k, v));
+            }
+        }
+        true
+    }
+
+    pub fn reset_prefix_cache(&mut self) {
+        for layer in &mut self.layers {
+            layer.kv_cache = None;
+        }
+    }
+
     pub fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
         let (b_sz, seq_len) = x.dims2()?;
 

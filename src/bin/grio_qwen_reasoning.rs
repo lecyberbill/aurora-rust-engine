@@ -134,17 +134,17 @@ mod app {
                         let mut model_guard = lock.lock().unwrap();
                         let text_model = downcast_model::<TextModel>(&mut *model_guard)
                             .ok_or_else(|| anyhow::anyhow!("Failed to downcast model to TextModel"))?;
-                        text_model.generate_chat(&structured_messages, max_tokens as usize, temperature, reasoning_effort)
+                        text_model.generate_chat_cached("grio-default", &structured_messages, max_tokens as usize, temperature, reasoning_effort)
                     };
 
                     let total_elapsed = t0.elapsed().as_secs_f64();
 
                     match result {
-                        Ok((thinking, resp, tok_per_sec)) => {
+                        Ok((thinking, resp, tok_per_sec, raw)) => {
                             // 1. Store clean response in the model history store
                             {
                                 let mut guard = history_store.lock().unwrap();
-                                guard.push(ChatMessage::assistant(&resp));
+                                guard.push(ChatMessage::assistant(&raw));
                             }
 
                             // 2. Format UI message with thinking quote if present
@@ -179,10 +179,18 @@ mod app {
             })
             .on_click("clear", {
                 let history_store = Arc::clone(&chat_history_clear);
+                let state_clear = Arc::clone(&model_state);
                 move |ctx| {
                     {
                         let mut guard = history_store.lock().unwrap();
                         guard.clear();
+                    }
+                    if let Ok(lock) = state_clear.lock() {
+                        if let Ok(mut mg) = lock.lock() {
+                            if let Some(tm) = downcast_model::<TextModel>(&mut *mg) {
+                                tm.reset_session("grio-default");
+                            }
+                        }
                     }
                     let empty: Vec<ChatMessage> = Vec::new();
                     ctx.set("chat", empty);
