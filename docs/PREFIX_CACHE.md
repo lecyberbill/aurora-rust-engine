@@ -1,4 +1,4 @@
-# Prefix cache (opt-in)
+﻿# Prefix cache (opt-in)
 
 Cross-turn KV prefix reuse for chat, behind `AURORA_PREFIX_CACHE=1` (default
 **off**). Aurora owns it; Grio only passes a session id; Candle is untouched.
@@ -24,14 +24,24 @@ Cross-turn KV prefix reuse for chat, behind `AURORA_PREFIX_CACHE=1` (default
 
 ## Measured (Gemma 4 31B Q4_K_XL, R9700)
 
-Two-turn LRU test (`Q1` long answer, `Q2` follow-up referencing point 5):
+Clean two-turn LRU test (Q1 = short prompt + long answer, Q2 = follow-up):
 
-- Q1: `reusing 0/592` → 83.9 s.
-- Q2: `reusing 1392/1664` tokens (~84 %) → 64.7 s, correct follow-up answer.
+- Q1: `reusing 0/39` â€” prompt 39 tokens, prefill 253 ms, total 71.1 s.
+- Q2: `reusing 408/1110` â€” prefill 2454 ms (~700 new tokens), total 53.0 s.
 
-That run had the first prompt sent twice, so the history was duplicated and
-the reuse capped. A clean `Q1 → A1 → Q2` session reuses the previous turn
-almost entirely (only the new user message + template are prefilled).
+The reuse stops **inside the assistant answer**: the generated tokens are
+decoded to text and re-tokenized for the next prompt, and BPE round-trips are
+not always exact (the divergence appears ~370 answer tokens in). A token-level
+prompt builder (append the stored generated token ids instead of re-encoding
+the text) would be needed for full reuse.
+
+The dominant cost is still **decode** (50â€“70 s); the saved prefill is ~1.5 s on
+Q2. VRAM reached **33.6 GB** at ~1.1k-token context â€” clear the chat to release
+the KV.
+
+A duplicated-history run (Q1 sent twice) showed `1392/1664` reused, which
+confirms the mechanism; the cap above is the text re-tokenization, not the
+cache.
 
 ## Limits
 
@@ -39,14 +49,16 @@ almost entirely (only the new user message + template are prefilled).
   `Effacer` resets it.
 - VRAM grows with the conversation: 31.8 GB observed on the 31B at ~1.6k-token
   context. Clear the chat to release it.
+- Reuse is capped by decode -> re-tokenize round-trips; a token-level prompt
+  builder is the next step for full reuse.
 - Rotation/sliding-window caches (other models) are not handled yet; the
   backend returns unsupported and the engine falls back.
 - The `tok/s` shown by Grio includes prefill; it is not a pure decode rate.
 
 ## Files
 
-- `src/models/text.rs` — `generate_chat_cached`, session map, LCP.
-- `src/models/quantized_gemma3.rs` — `prefix_cache_len` / `truncate_prefix_cache`
+- `src/models/text.rs` â€” `generate_chat_cached`, session map, LCP.
+- `src/models/quantized_gemma3.rs` â€” `prefix_cache_len` / `truncate_prefix_cache`
   / `reset_prefix_cache`.
-- `src/bin/grio_qwen_reasoning.rs` — uses the cached path and resets on
+- `src/bin/grio_qwen_reasoning.rs` â€” uses the cached path and resets on
   **Effacer**.
