@@ -192,11 +192,8 @@ impl TextModel {
         let logits = model.forward(&input, lcp)?;
         let prefill_ms = t_pre.elapsed().as_secs_f64() * 1000.0;
         let t_dec = std::time::Instant::now();
-        let last = logits.squeeze(0)?;
-        let l_vec = last.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-        let mut top: Vec<_> = l_vec.iter().enumerate().collect();
-        top.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let mut curr_tok = top[0].0 as u32;
+        let processor = LogitsProcessor::new(temperature, 0.95, 50, 1.1);
+        let mut curr_tok = processor.sample(&logits, &tokens)?;
         let mut generated = vec![curr_tok];
         for i in 0..max_tokens {
             if curr_tok == 1 || curr_tok == 106 {
@@ -204,10 +201,7 @@ impl TextModel {
             }
             let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
             let step_logits = model.forward(&inp, tokens.len() + i)?;
-            let step_vec = step_logits.squeeze(0)?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-            let mut t: Vec<_> = step_vec.iter().enumerate().collect();
-            t.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
-            curr_tok = t[0].0 as u32;
+            curr_tok = processor.sample(&step_logits, &generated)?;
             generated.push(curr_tok);
         }
         let text = tok.decode(&generated, true).map_err(|e| LuminaError::Context {
@@ -349,23 +343,15 @@ impl GenerationModel for TextModel {
                 let t0 = std::time::Instant::now();
                 let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
                 let logits = model.forward(&input, 0)?;
-                let last = logits.squeeze(0)?;
-                let l_vec = last.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-
-                let mut top: Vec<_> = l_vec.iter().enumerate().collect();
-                top.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
-                let mut curr_tok = top[0].0 as u32;
+                let processor = LogitsProcessor::new(temperature, 0.95, 50, 1.1);
+                let mut curr_tok = processor.sample(&logits, &tokens)?;
                 let mut generated = vec![curr_tok];
 
                 for i in 0..max_tokens {
                     if curr_tok == 1 || curr_tok == 106 { break; }
                     let inp = Tensor::new(&[curr_tok], device)?.unsqueeze(0)?;
                     let step_logits = model.forward(&inp, tokens.len() + i)?;
-                    let step_last = step_logits.squeeze(0)?;
-                    let step_vec = step_last.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-                    let mut t: Vec<_> = step_vec.iter().enumerate().collect();
-                    t.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    curr_tok = t[0].0 as u32;
+                    curr_tok = processor.sample(&step_logits, &generated)?;
                     generated.push(curr_tok);
                 }
 

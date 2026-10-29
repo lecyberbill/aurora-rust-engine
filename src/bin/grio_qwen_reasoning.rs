@@ -112,7 +112,7 @@ mod app {
                     let max_chars: usize = std::env::var("AURORA_CHAT_MAX_CHARS")
                         .ok()
                         .and_then(|v| v.parse().ok())
-                        .unwrap_or(8000);
+                        .unwrap_or(4000);
                     let history_window = if history.len() > 10 {
                         &history[history.len() - 10..]
                     } else {

@@ -50,7 +50,7 @@ cache.
 - VRAM grows with the conversation: 31.8 GB observed on the 31B at ~1.6k-token
   context. Clear the chat to release it.
 - The Grio app caps the history in characters (`AURORA_CHAT_MAX_CHARS`, default
-  8000 ≈ 2k tokens): the oldest turns are dropped to bound the prompt/KV.
+  4000 ≈ 1k tokens): the oldest turns are dropped to bound the prompt/KV.
   Lower it (e.g. `AURORA_CHAT_MAX_CHARS=4000`) on the 31B to keep more VRAM
   headroom; raising it lets longer follow-ups through. The console prints the
   kept message count and character budget.
@@ -59,6 +59,10 @@ cache.
 - Rotation/sliding-window caches (other models) are not handled yet; the
   backend returns unsupported and the engine falls back.
 - The `tok/s` shown by Grio includes prefill; it is not a pure decode rate.
+- Gemma chat now samples with `LogitsProcessor` (temperature, top-p 0.95, top-k
+  50, repetition 1.1). It used to be greedy, which ignored the slider and could
+  loop (e.g. repeating "L'année 1789."), inflating the answer and OOMing the
+  31B. If you still see loops, lower temperature or raise the repetition penalty.
 
 ## Files
 
