@@ -1,4 +1,4 @@
-// [WFGY] Zone: SAFE | ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â»: 0.25 | Fallbacks: 0 | Action: Text model wrapper (encoders and CausalLM text generation)
+// [WFGY] Zone: SAFE | ÃƒÆ’Ã†â€™Ãƒâ€¦Ã‚Â½ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â»: 0.25 | Fallbacks: 0 | Action: Text model wrapper (encoders and CausalLM text generation)
 
 pub mod causal;
 pub mod llama;
@@ -55,6 +55,17 @@ impl TextBackend {
             TextBackend::QuantizedQwen35 { .. } => DType::F32,
         }
     }
+}
+
+pub struct ChatStats {
+    pub thinking: String,
+    pub answer: String,
+    pub raw: String,
+    pub tok_s: f64,
+    pub prompt_tokens: usize,
+    pub reused_tokens: usize,
+    pub prefill_ms: f64,
+    pub decode_tokens: usize,
 }
 
 pub struct TextModel {
@@ -131,7 +142,7 @@ impl TextModel {
         max_tokens: usize,
         temperature: f64,
         reasoning_effort: f64,
-    ) -> Result<(String, String, f64, String)> {
+    ) -> Result<ChatStats> {
         let enabled = std::env::var_os("AURORA_PREFIX_CACHE").is_some();
         let supported = matches!(&self.inner, TextBackend::QuantizedGemma3 { .. });
         if !enabled || !supported {
@@ -140,7 +151,7 @@ impl TextModel {
             }
             {
                 let (t, a, s) = self.generate_chat(messages, max_tokens, temperature, reasoning_effort)?;
-                return Ok((t, a.clone(), s, a));
+                return Ok(ChatStats { thinking: t, answer: a.clone(), raw: a, tok_s: s, prompt_tokens: 0, reused_tokens: 0, prefill_ms: 0.0, decode_tokens: 0 });
             }
         }
 
@@ -164,7 +175,7 @@ impl TextModel {
         if tokens.is_empty() {
             {
                 let (t, a, s) = self.generate_chat(messages, max_tokens, temperature, reasoning_effort)?;
-                return Ok((t, a.clone(), s, a));
+                return Ok(ChatStats { thinking: t, answer: a.clone(), raw: a, tok_s: s, prompt_tokens: 0, reused_tokens: 0, prefill_ms: 0.0, decode_tokens: 0 });
             }
         }
 
@@ -176,9 +187,11 @@ impl TextModel {
         }
         eprintln!("[aurora] prefix cache: reusing {lcp}/{} prompt tokens", tokens.len());
 
-        let t0 = std::time::Instant::now();
+        let t_pre = std::time::Instant::now();
         let input = Tensor::new(&tokens[lcp..], device)?.unsqueeze(0)?;
         let logits = model.forward(&input, lcp)?;
+        let prefill_ms = t_pre.elapsed().as_secs_f64() * 1000.0;
+        let t_dec = std::time::Instant::now();
         let last = logits.squeeze(0)?;
         let l_vec = last.to_dtype(DType::F32)?.to_vec1::<f32>()?;
         let mut top: Vec<_> = l_vec.iter().enumerate().collect();
@@ -206,7 +219,9 @@ impl TextModel {
         let mut all = tokens.clone();
         all.extend(&generated);
         self.sessions.insert(session_id.to_string(), all);
-        Ok((thinking, answer, tok_s(generated.len(), t0), raw))
+        let decode_tokens = generated.len();
+        let tok_s = decode_tokens as f64 / t_dec.elapsed().as_secs_f64().max(1e-6);
+        Ok(ChatStats { thinking, answer, raw, tok_s, prompt_tokens: tokens.len(), reused_tokens: lcp, prefill_ms, decode_tokens })
     }
 
     /// Drop a session's token prefix and reset the model KV.
@@ -525,10 +540,10 @@ impl GenerationModel for TextModel {
                 if std::env::var_os("AURORA_HIP_GRAPH").is_some() {
                     let max_len = tokens.len() + params.max_tokens + 8;
                     match model.setup_static_graph(tokens.len(), max_len) {
-                        Ok(()) => eprintln!("ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¡ HIP graph decode enabled (gemma, max_len={max_len})"),
+                        Ok(()) => eprintln!("ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ HIP graph decode enabled (gemma, max_len={max_len})"),
                         Err(e) => {
                             model.clear_static_graph();
-                            eprintln!("ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â HIP graph disabled: {e}");
+                            eprintln!("ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â HIP graph disabled: {e}");
                         }
                     }
                 }
@@ -609,10 +624,10 @@ impl GenerationModel for TextModel {
                 if std::env::var_os("AURORA_HIP_GRAPH").is_some() {
                     let max_len = tokens.len() + params.max_tokens + 8;
                     match model.setup_static_graph(tokens.len(), max_len) {
-                        Ok(()) => eprintln!("ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â¡ HIP graph decode enabled (qwen35, max_len={max_len})"),
+                        Ok(()) => eprintln!("ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ HIP graph decode enabled (qwen35, max_len={max_len})"),
                         Err(e) => {
                             model.clear_static_graph();
-                            eprintln!("ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â HIP graph disabled: {e}");
+                            eprintln!("ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â HIP graph disabled: {e}");
                         }
                     }
                 }

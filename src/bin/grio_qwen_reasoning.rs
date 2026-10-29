@@ -140,22 +140,23 @@ mod app {
                     let total_elapsed = t0.elapsed().as_secs_f64();
 
                     match result {
-                        Ok((thinking, resp, tok_per_sec, raw)) => {
-                            // 1. Store clean response in the model history store
+                        Ok(res) => {
+                            // 1. Store the raw response (with the thought channel)
+                            //    so the next turn's KV prefix aligns.
                             {
                                 let mut guard = history_store.lock().unwrap();
-                                guard.push(ChatMessage::assistant(&raw));
+                                guard.push(ChatMessage::assistant(&res.raw));
                             }
 
                             // 2. Format UI message with thinking quote if present
-                            let formatted_message = if !thinking.is_empty() {
+                            let formatted_message = if !res.thinking.is_empty() {
                                 format!(
                                     "> 🧠 **Pensée interne (<think>) :**\n> {}\n\n{}",
-                                    thinking.replace("\n", "\n> "),
-                                    resp
+                                    res.thinking.replace("\n", "\n> "),
+                                    res.answer
                                 )
                             } else {
-                                resp
+                                res.answer.clone()
                             };
 
                             ui_chat.push(ChatMessage::assistant(&formatted_message));
@@ -163,8 +164,14 @@ mod app {
                             ctx.set(
                                 "telemetry",
                                 format!(
-                                    "✅ Generated in {:.2}s (~{:.1} tok/s) · Effort: {:.1} · AMD Radeon AI PRO R9700 (34 GB VRAM)",
-                                    total_elapsed, tok_per_sec, reasoning_effort
+                                    "✅ {:.2}s · prefill {:.0} ms ({} / {} tokens reused) · decode {:.1} tok/s ({} tokens) · Effort: {:.1} · AMD Radeon AI PRO R9700 (34 GB VRAM)",
+                                    total_elapsed,
+                                    res.prefill_ms,
+                                    res.reused_tokens,
+                                    res.prompt_tokens,
+                                    res.tok_s,
+                                    res.decode_tokens,
+                                    reasoning_effort
                                 ),
                             );
                         }
