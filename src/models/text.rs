@@ -1,4 +1,4 @@
-// [WFGY] Zone: SAFE | ÃƒÆ’Ã†â€™Ãƒâ€¦Ã‚Â½ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â»: 0.25 | Fallbacks: 0 | Action: Text model wrapper (encoders and CausalLM text generation)
+// [WFGY] Zone: SAFE | ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â»: 0.25 | Fallbacks: 0 | Action: Text model wrapper (encoders and CausalLM text generation)
 
 pub mod causal;
 pub mod llama;
@@ -57,6 +57,13 @@ impl TextBackend {
     }
 }
 
+#[derive(Clone)]
+struct SessionState {
+    prompt_ids: Vec<u32>,
+    gen_ids: Vec<u32>,
+    n_messages: usize,
+}
+
 pub struct ChatStats {
     pub thinking: String,
     pub answer: String,
@@ -73,7 +80,7 @@ pub struct TextModel {
     family: String,
     inner: TextBackend,
     /// Per-session token prefix, used by the optional prefix cache.
-    sessions: std::collections::HashMap<String, Vec<u32>>,
+    sessions: std::collections::HashMap<String, SessionState>,
 }
 
 impl TextModel {
@@ -155,8 +162,12 @@ impl TextModel {
             }
         }
 
-        let prompt = self.chat_prompt_for_family(messages);
-        let prev = self.sessions.get(session_id).cloned().unwrap_or_default();
+        let n_incoming = messages.len();
+        let new_user = messages
+            .last()
+            .and_then(|(r, c)| if r == "user" { Some(c.trim().to_string()) } else { None });
+        let prev = self.sessions.get(session_id).cloned();
+        let full_prompt = self.chat_prompt_for_family(messages);
 
         let TextBackend::QuantizedGemma3 { model, tokenizer, device } = &mut self.inner else {
             unreachable!()
@@ -164,22 +175,47 @@ impl TextModel {
         let tok = tokenizer.as_ref().ok_or_else(|| {
             LuminaError::Config("Tokenizer not attached to QuantizedGemma3 model".into())
         })?;
-        let tokens = tok
-            .encode(prompt.as_str(), true)
-            .map_err(|e| LuminaError::Context {
-                context: "Failed to tokenize prompt for Gemma 3".into(),
-                source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
-            })?
-            .get_ids()
-            .to_vec();
+        let (tokens, mut lcp) = match (
+            prev.as_ref().filter(|p| p.n_messages + 2 == n_incoming),
+            new_user.as_deref(),
+        ) {
+            (Some(p), Some(user)) => {
+                let suffix = format!(
+                    "<end_of_turn>\n<start_of_turn>user\n{user}<end_of_turn>\n<start_of_turn>model\n"
+                );
+                let suffix_ids = tok
+                    .encode(suffix.as_str(), false)
+                    .map_err(|e| LuminaError::Context {
+                        context: "Failed to tokenize chat suffix for Gemma 3".into(),
+                        source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                    })?
+                    .get_ids()
+                    .to_vec();
+                let mut all = p.prompt_ids.clone();
+                all.extend(&p.gen_ids);
+                let l = all.len();
+                all.extend(&suffix_ids);
+                (all, l)
+            }
+            _ => {
+                model.reset_prefix_cache();
+                let t = tok
+                    .encode(full_prompt.as_str(), true)
+                    .map_err(|e| LuminaError::Context {
+                        context: "Failed to tokenize prompt for Gemma 3".into(),
+                        source: Box::new(LuminaError::Candle(candle_core::Error::Msg(e.to_string()))),
+                    })?
+                    .get_ids()
+                    .to_vec();
+                (t, 0)
+            }
+        };
         if tokens.is_empty() {
             {
                 let (t, a, s) = self.generate_chat(messages, max_tokens, temperature, reasoning_effort)?;
                 return Ok(ChatStats { thinking: t, answer: a.clone(), raw: a, tok_s: s, prompt_tokens: 0, reused_tokens: 0, prefill_ms: 0.0, decode_tokens: 0 });
             }
         }
-
-        let mut lcp = common_prefix(&prev, &tokens).min(tokens.len() - 1);
         let cache_len = model.prefix_cache_len().unwrap_or(0);
         if lcp > cache_len || !model.truncate_prefix_cache(lcp) {
             model.reset_prefix_cache();
@@ -210,9 +246,14 @@ impl TextModel {
         })?;
         let raw = text.clone();
         let (thinking, answer) = split_channels(&text);
-        let mut all = tokens.clone();
-        all.extend(&generated);
-        self.sessions.insert(session_id.to_string(), all);
+        self.sessions.insert(
+            session_id.to_string(),
+            SessionState {
+                prompt_ids: tokens.clone(),
+                gen_ids: generated.clone(),
+                n_messages: n_incoming,
+            },
+        );
         let decode_tokens = generated.len();
         let tok_s = decode_tokens as f64 / t_dec.elapsed().as_secs_f64().max(1e-6);
         Ok(ChatStats { thinking, answer, raw, tok_s, prompt_tokens: tokens.len(), reused_tokens: lcp, prefill_ms, decode_tokens })
@@ -526,10 +567,10 @@ impl GenerationModel for TextModel {
                 if std::env::var_os("AURORA_HIP_GRAPH").is_some() {
                     let max_len = tokens.len() + params.max_tokens + 8;
                     match model.setup_static_graph(tokens.len(), max_len) {
-                        Ok(()) => eprintln!("ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ HIP graph decode enabled (gemma, max_len={max_len})"),
+                        Ok(()) => eprintln!("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ HIP graph decode enabled (gemma, max_len={max_len})"),
                         Err(e) => {
                             model.clear_static_graph();
-                            eprintln!("ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â HIP graph disabled: {e}");
+                            eprintln!("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â HIP graph disabled: {e}");
                         }
                     }
                 }
@@ -610,10 +651,10 @@ impl GenerationModel for TextModel {
                 if std::env::var_os("AURORA_HIP_GRAPH").is_some() {
                     let max_len = tokens.len() + params.max_tokens + 8;
                     match model.setup_static_graph(tokens.len(), max_len) {
-                        Ok(()) => eprintln!("ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ HIP graph decode enabled (qwen35, max_len={max_len})"),
+                        Ok(()) => eprintln!("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ HIP graph decode enabled (qwen35, max_len={max_len})"),
                         Err(e) => {
                             model.clear_static_graph();
-                            eprintln!("ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â HIP graph disabled: {e}");
+                            eprintln!("ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â HIP graph disabled: {e}");
                         }
                     }
                 }
