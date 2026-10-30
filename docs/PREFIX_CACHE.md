@@ -7,7 +7,7 @@ Cross-turn KV prefix reuse for chat, behind `AURORA_PREFIX_CACHE=1` (default
 
 - Toggle: `AURORA_PREFIX_CACHE=1` enables it. Without it, the normal path runs
   (zero overhead).
-- Supported backends: **Gemma** (`QuantizedGemma3`) for now. For any other
+- Supported backends: **Gemma 3** (`QuantizedGemma3`) and **Qwen 3.5/3.8** (`QuantizedQwen35`). For any other
   backend the engine prints once, in English,
   `[aurora] prefix cache: backend not supported, falling back to the normal path`
   and uses the normal path (no crash).
