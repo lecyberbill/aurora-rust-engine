@@ -2,6 +2,14 @@ use std::path::PathBuf;
 use candle_core::{DType, Tensor, IndexOp};
 use aurora_rust_engine::models::{AutoModel, downcast_model};
 use aurora_rust_engine::models::text::TextModel;
+use aurora_rust_engine::models::text::causal::{KVCache, KVCacheStorage};
+
+fn layer_k(cache: &KVCache) -> &Tensor {
+    match &cache.layers[0].storage {
+        KVCacheStorage::Standard { k: Some(k), .. } => k,
+        _ => panic!("expected standard KV cache"),
+    }
+}
 
 fn main() -> anyhow::Result<()> {
     let model_path = PathBuf::from("/models/llm/gemma-3-12b-it-q4_k_m.gguf");
@@ -21,21 +29,21 @@ fn main() -> anyhow::Result<()> {
     let _ = pipe.forward(&input0, 0)?;
 
     // Check layer 0 KV cache len
-    let k0 = pipe.kv_cache.layers[0].k.as_ref().unwrap();
+    let k0 = layer_k(&pipe.kv_cache);
     println!("After prefill: layer 0 K shape: {:?}", k0.shape());
 
     // Run step 1: tok=17531 ("Hey")
     let tok1 = 17531u32;
     let input1 = Tensor::new(&[tok1], &device)?.unsqueeze(0)?;
     let _ = pipe.forward(&input1, prompt_tokens.len())?;
-    let k1 = pipe.kv_cache.layers[0].k.as_ref().unwrap();
+    let k1 = layer_k(&pipe.kv_cache);
     println!("After step 1: layer 0 K shape: {:?}", k1.shape());
 
     // Run step 2: tok=993 (" there")
     let tok2 = 993u32;
     let input2 = Tensor::new(&[tok2], &device)?.unsqueeze(0)?;
     let _ = pipe.forward(&input2, prompt_tokens.len() + 1)?;
-    let k2 = pipe.kv_cache.layers[0].k.as_ref().unwrap();
+    let k2 = layer_k(&pipe.kv_cache);
     println!("After step 2: layer 0 K shape: {:?}", k2.shape());
 
     // Run step 3: tok=236888 ("!")

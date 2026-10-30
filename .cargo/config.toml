@@ -1,4 +1,4 @@
-[env]
+[target.'cfg(windows)'.env]
 CUDARC_CUDA_VERSION = { value = "13030", force = true }
 NVCC_CCBIN = { value = "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64", force = true }
 CUDA_COMPUTE_CAP = { value = "89", force = true }
