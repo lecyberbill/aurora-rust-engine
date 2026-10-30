@@ -180,9 +180,14 @@ impl TextModel {
             new_user.as_deref(),
         ) {
             (Some(p), Some(user)) => {
-                let suffix = format!(
-                    "<end_of_turn>\n<start_of_turn>user\n{user}<end_of_turn>\n<start_of_turn>model\n"
-                );
+                let last_stop = p.gen_ids.last().map(|&t| t == 106 || t == 1).unwrap_or(false);
+                let suffix = if last_stop {
+                    format!("\n<start_of_turn>user\n{user}<end_of_turn>\n<start_of_turn>model\n")
+                } else {
+                    format!(
+                        "<end_of_turn>\n<start_of_turn>user\n{user}<end_of_turn>\n<start_of_turn>model\n"
+                    )
+                };
                 let suffix_ids = tok
                     .encode(suffix.as_str(), false)
                     .map_err(|e| LuminaError::Context {
@@ -193,11 +198,18 @@ impl TextModel {
                     .to_vec();
                 let mut all = p.prompt_ids.clone();
                 all.extend(&p.gen_ids);
-                let l = all.len();
                 all.extend(&suffix_ids);
+                let l = model.prefix_cache_len().unwrap_or(0).min(all.len());
                 (all, l)
             }
             _ => {
+                eprintln!(
+                    "[aurora] prefix cache: reset (prev={} n_prev={} in={} user={})",
+                    prev.is_some(),
+                    prev.as_ref().map(|p| p.n_messages).unwrap_or(0),
+                    n_incoming,
+                    new_user.is_some()
+                );
                 model.reset_prefix_cache();
                 let t = tok
                     .encode(full_prompt.as_str(), true)

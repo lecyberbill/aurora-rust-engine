@@ -54,8 +54,9 @@ cache.
   Lower it (e.g. `AURORA_CHAT_MAX_CHARS=4000`) on the 31B to keep more VRAM
   headroom; raising it lets longer follow-ups through. The console prints the
   kept message count and character budget.
-- Reuse is capped by decode -> re-tokenize round-trips; a token-level prompt
-  builder is the next step for full reuse.
+- Reuse is exact with a stable history; the session resets when the cap drops a
+  message (message-count check), so the two levers do not compose on long
+  chats.
 - Rotation/sliding-window caches (other models) are not handled yet; the
   backend returns unsupported and the engine falls back.
 - The `tok/s` shown by Grio includes prefill; it is not a pure decode rate.
