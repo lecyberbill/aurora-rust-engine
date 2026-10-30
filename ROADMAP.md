@@ -816,3 +816,16 @@ All advertised models load on real weights; Qwen 3.5/3.8, Gemma and Phi-4 produc
 - Graphe HIP capture-safe (principal gain perf restant).
 - Gradient accumulation, scheduler LR, eval.
 - Chemin dense pour Qwen3.8/Gemma GGUF si entraînement requis.
+
+---
+
+## Session 2026-10 (suite) — Prefix cache & Grio
+
+### Fait
+- Prefix cache opt-in (`AURORA_PREFIX_CACHE=1`, Gemma) : session token-level, réutilisation ~95 % mesurée (538/565).
+- Grio chat : sampling (LogitsProcessor), télémétrie prefill/decode/reuse, cap d'historique (`AURORA_CHAT_MAX_CHARS`), reset de session quand le cap jette un message.
+- Docs : `docs/PREFIX_CACHE.md`.
+
+### Suivant
+- Composer cap + cache (préfixe stable / reset explicite) ; le prompt builder token-level est en place.
+- Scale CUDA (GPU > 12 Go) et graphe HIP.

@@ -91,3 +91,6 @@
 | Trainer LoRA dense | `src/train/mod.rs`, `src/train/gemma3.rs` | Qwen2 + Gemma 3 |
 | Bins LoRA | `src/bin/train_lora.rs`, `gen_lora.rs`, `merge_lora.rs` | CLI |
 | Bench & guides | `docs/BENCH_ROCM.md`, `docs/LORA.md`, `docs/SESSION_2026-10.md` | — |
+| Prefix cache chat (opt-in) | `src/models/text.rs`, `src/models/quantized_gemma3.rs`, `src/bin/grio_qwen_reasoning.rs` | `AURORA_PREFIX_CACHE`, Gemma, ~95 % reuse |
+| Grio chat (sampling, cap, telemetry) | `src/bin/grio_qwen_reasoning.rs` | `AURORA_CHAT_MAX_CHARS`, prefill/decode |
+| Prefix cache guide | `docs/PREFIX_CACHE.md` | opt-in, limites |

@@ -1834,3 +1834,17 @@ Licensed under either of:
 - MIT License ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
+
+---
+
+## Text chatbot (Grio)
+
+`grio_qwen_reasoning` runs a Grio chatbot over any supported GGUF (`MODEL_PATH`,
+`STUDIO_BIND`, default `0.0.0.0:7865`). Gemma uses the chat template and
+`LogitsProcessor` sampling (temperature, top-p, top-k, repetition); the
+telemetry line reports prefill/decode/reused tokens. The history is capped in
+characters (`AURORA_CHAT_MAX_CHARS`, default 4000). With
+`AURORA_PREFIX_CACHE=1`, the KV prefix is reused across turns (Gemma, ~95 %
+measured); unsupported backends fall back with an English console warning.
+See [docs/PREFIX_CACHE.md](docs/PREFIX_CACHE.md) and
+[docs/SESSION_2026-10.md](docs/SESSION_2026-10.md).

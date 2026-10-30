@@ -378,3 +378,5 @@ Licensed under Apache-2.0 / MIT.
 - **Perf ROCm** : flash-decoding split-K (+18,6 % Gemma), memset q8_1 (+1,9 %), GDN fusionné (5,13× micro), autotune. Portable : Qwen 3.8 27B **16,8 tok/s**, Gemma 3 12B **41,4 tok/s**. Voir [docs/BENCH_ROCM.md](docs/BENCH_ROCM.md) et [docs/PERF_ROCM.md](docs/PERF_ROCM.md).
 - **LoRA SFT dense** : Qwen2 0,5B/3B/7B et Gemma 3 4B/12B, export PEFT, reload/merge, val split, chargement shardé, base F16, patch fork 0004 (grads gelés). Voir [docs/LORA.md](docs/LORA.md) et le guide de session [docs/SESSION_2026-10.md](docs/SESSION_2026-10.md).
 - **Atlas / roadmap** : sections 2026-10 ajoutées à [ATLAS.md](ATLAS.md) et [ROADMAP.md](ROADMAP.md).
+- **Prefix cache chat (opt-in)** : `AURORA_PREFIX_CACHE=1` réutilise le KV du préfixe entre les tours (Gemma, ~95 % de réutilisation mesurée) ; repli console en anglais si le backend n'est pas géré. `AURORA_CHAT_MAX_CHARS` borne l'historique. Voir [docs/PREFIX_CACHE.md](docs/PREFIX_CACHE.md).
+- **Grio text chat** : `grio_qwen_reasoning` (Gemma 4 31B), sampling, télémétrie prefill/decode/reuse, cap d'historique. Voir [docs/SESSION_2026-10.md](docs/SESSION_2026-10.md).
