@@ -50,8 +50,11 @@ cache.
 - VRAM grows with the conversation: 31.8 GB observed on the 31B at ~1.6k-token
   context. Clear the chat to release it.
 - The Grio app caps the history in characters (`AURORA_CHAT_MAX_CHARS`, default
-  4000 for 31B, 8000 for 27B, 12000 for 12B/other, from the model path): the
-  oldest turns are dropped to bound the prompt/KV.
+  4000 for 31B, 8000 for 27B, 32000 for 12B, from the model path). When over
+  budget it **truncates the middle** (LM Studio style): the first message (a
+  "remember X" turn) and the most recent ones are kept, the middle is dropped.
+  Sampling: temperature from the UI, top-p 0.95, top-k 40, repetition 1.1
+  (`min_p` is not implemented).
   Lower it (e.g. `AURORA_CHAT_MAX_CHARS=4000`) on the 31B to keep more VRAM
   headroom; raising it lets longer follow-ups through. The console prints the
   kept message count and character budget.

@@ -31,6 +31,8 @@ mod app {
             4000
         } else if model_path.contains("27B") {
             8000
+        } else if model_path.contains("12B") || model_path.contains("12b") {
+            32000
         } else {
             12000
         };
@@ -126,27 +128,44 @@ mod app {
                     } else {
                         &history[..]
                     };
-                    let mut kept: Vec<(String, String)> = Vec::new();
-                    let mut total_chars = 0usize;
-                    for msg in history_window.iter().rev() {
+                    let mut all_msgs: Vec<(String, String)> = Vec::new();
+                    for msg in history_window {
                         let clean_content = msg.content.trim().to_string();
                         if clean_content.is_empty() || clean_content.starts_with("Bonjour ! Je suis Qwen") {
                             continue;
                         }
-                        let len = clean_content.chars().count() + 8;
-                        if !kept.is_empty() && total_chars + len > max_chars {
-                            break;
-                        }
-                        total_chars += len;
-                        kept.push((msg.role.clone(), clean_content));
+                        all_msgs.push((msg.role.clone(), clean_content));
                     }
-                    kept.reverse();
+                    let total_chars: usize = all_msgs.iter().map(|(_, c)| c.chars().count() + 8).sum();
+                    let mut kept: Vec<(String, String)> = Vec::new();
+                    let mut kept_chars = 0usize;
+                    if total_chars <= max_chars {
+                        kept = all_msgs;
+                        kept_chars = total_chars;
+                    } else if !all_msgs.is_empty() {
+                        // "Truncate the middle" (LM Studio style): keep the first
+                        // message (e.g. the "remember X" turn) and the most recent.
+                        kept.push(all_msgs[0].clone());
+                        kept_chars = all_msgs[0].1.chars().count() + 8;
+                        let mut tail: Vec<(String, String)> = Vec::new();
+                        for m in all_msgs[1..].iter().rev() {
+                            let len = m.1.chars().count() + 8;
+                            if kept_chars + len > max_chars {
+                                break;
+                            }
+                            kept_chars += len;
+                            tail.push(m.clone());
+                        }
+                        tail.reverse();
+                        kept.extend(tail);
+                    }
                     structured_messages = kept;
                     eprintln!(
-                        "[aurora] chat history: {} messages kept, ~{} chars (cap {})",
+                        "[aurora] chat history: {} messages kept, ~{} chars (cap {}, middle-truncated={})",
                         structured_messages.len(),
-                        total_chars,
-                        max_chars
+                        kept_chars,
+                        max_chars,
+                        total_chars > max_chars
                     );
 
                     println!("📝 [Chat Prompt Debug] Multi-turn structured messages (count: {}):", structured_messages.len());

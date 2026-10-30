@@ -1843,7 +1843,7 @@ at your option.
 `STUDIO_BIND`, default `0.0.0.0:7865`). Gemma uses the chat template and
 `LogitsProcessor` sampling (temperature, top-p, top-k, repetition); the
 telemetry line reports prefill/decode/reused tokens. The history is capped in
-characters (`AURORA_CHAT_MAX_CHARS`, default 4000 for 31B, 8000 for 27B, 12000 for 12B/other). With
+characters (`AURORA_CHAT_MAX_CHARS`, default 4000 for 31B, 8000 for 27B, 32000 for 12B); over budget it truncates the middle (first + recent kept). With
 `AURORA_PREFIX_CACHE=1`, the KV prefix is reused across turns (Gemma, ~95 %
 measured); unsupported backends fall back with an English console warning.
 See [docs/PREFIX_CACHE.md](docs/PREFIX_CACHE.md) and
