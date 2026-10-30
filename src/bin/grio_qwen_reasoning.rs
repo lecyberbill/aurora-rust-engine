@@ -6,7 +6,7 @@ mod app {
     use std::time::Instant;
     use candle_core::{DType, Device};
     use grio::*;
-    use aurora_rust_engine::models::{AnyModel, AutoModel, GenerationModel, downcast_model, BoxedModel};
+    use aurora_rust_engine::models::{AutoModel, GenerationModel, downcast_model, BoxedModel};
     use aurora_rust_engine::models::text::TextModel;
 
     pub async fn run() -> anyhow::Result<()> {
@@ -27,11 +27,12 @@ mod app {
         let boxed_model: BoxedModel = AutoModel::from_local(&model_path, device, DType::F16)?;
         println!("✅ AutoModel: High-Speed Native ROCm/CUDA Engine Attached!");
 
-        let family_hint = {
-            let mut g = boxed_model.lock().unwrap();
-            downcast_model::<TextModel>(&mut *g)
-                .map(|t| t.family().to_string())
-                .unwrap_or_default()
+        let cap_hint: usize = if model_path.contains("31B") {
+            4000
+        } else if model_path.contains("27B") {
+            8000
+        } else {
+            12000
         };
         let model_state = Arc::new(Mutex::new(boxed_model));
         let state_clone = Arc::clone(&model_state);
@@ -87,7 +88,6 @@ mod app {
             .on_click("send", {
                 let state = Arc::clone(&state_clone);
                 let history_store = Arc::clone(&chat_history_clone);
-                let family_hint = family_hint.clone();
                 move |ctx| {
                     let prompt: String = ctx.get("prompt").unwrap_or_default();
                     if prompt.trim().is_empty() {
@@ -116,7 +116,7 @@ mod app {
 
                     // Build multi-turn structured message list for native chat API
                     let mut structured_messages: Vec<(String, String)> = Vec::new();
-                    let default_cap = if family_hint.to_lowercase().contains("gemma") { 4000 } else { 8000 };
+                    let default_cap = cap_hint;
                     let max_chars: usize = std::env::var("AURORA_CHAT_MAX_CHARS")
                         .ok()
                         .and_then(|v| v.parse().ok())

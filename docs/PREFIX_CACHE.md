@@ -49,8 +49,9 @@ cache.
   `Effacer` resets it.
 - VRAM grows with the conversation: 31.8 GB observed on the 31B at ~1.6k-token
   context. Clear the chat to release it.
-- The Grio app caps the history in characters (`AURORA_CHAT_MAX_CHARS`, default 4000 on Gemma,
-  8000 on the other models): the oldest turns are dropped to bound the prompt/KV.
+- The Grio app caps the history in characters (`AURORA_CHAT_MAX_CHARS`, default
+  4000 for 31B, 8000 for 27B, 12000 for 12B/other, from the model path): the
+  oldest turns are dropped to bound the prompt/KV.
   Lower it (e.g. `AURORA_CHAT_MAX_CHARS=4000`) on the 31B to keep more VRAM
   headroom; raising it lets longer follow-ups through. The console prints the
   kept message count and character budget.
