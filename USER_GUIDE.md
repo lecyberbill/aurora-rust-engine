@@ -1,11 +1,11 @@
-# 📖 Aurora Rust Engine — User & Developer Guide
+﻿# ðŸ“– Aurora Rust Engine â€” User & Developer Guide
 
 > **SOTA Pure Rust Generative AI Inference Engine for SDXL, Pony XL & Diffusion Transformers**  
 > Powered by [Candle](https://github.com/huggingface/candle), [FlashAttention-2](https://github.com/Dao-AILab/flash-attention), and [Grio UI](https://github.com/lecyberbill/grio).
 
 ---
 
-## 📑 Table of Contents
+## ðŸ“‘ Table of Contents
 
 1. [Architecture & Key Highlights](#1-architecture--key-highlights)
 2. [Installation & Requirements](#2-installation--requirements)
@@ -20,16 +20,16 @@
    - [Z-Image Turbo Realtime DiT (4 Steps, FlashAttention-2)](#z-image-turbo-realtime-dit-s3-dit-6b)
    - [FLUX.2 Image-to-Image (Img2Img)](#flux2-image-to-image-img2img-transformation)
    - [FLUX.2 Inpainting & Masked Diffusion](#flux2-inpainting--masked-diffusion)
-   - [FLUX.2 Multi-Image Reference Conditioning (Mode Édition, 4D RoPE)](#flux2-multi-image-reference-conditioning-mode-édition)
+   - [FLUX.2 Multi-Image Reference Conditioning (Mode Ã‰dition, 4D RoPE)](#flux2-multi-image-reference-conditioning-mode-Ã©dition)
    - [SDXL Image-to-Image (Img2Img)](#image-to-image-img2img)
    - [SDXL Inpainting & Mask-Guided Diffusion](#inpainting--mask-guided-diffusion)
    - [Hot LoRA Merging](#hot-lora-merging)
    - [ControlNet (Canny Edge)](#controlnet-canny-edge)
    - [Audio-to-Text & Speech Transcription (Whisper Turbo)](#audio-to-text--speech-transcription-whisper)
-   - [Speech-to-Text — Moonshine (lightweight, pure Rust)](#speech-to-text--moonshine-lightweight-pure-rust)
+   - [Speech-to-Text â€” Moonshine (lightweight, pure Rust)](#speech-to-text--moonshine-lightweight-pure-rust)
    - [Text-to-Audio & Sound Design (Stable Audio Open)](#text-to-audio--sound-design-stable-audio-open)
-   - [Text-to-Music — MusicGen (Meta, pure Rust)](#text-to-music--musicgen-meta-pure-rust)
-   - [Text-to-Music (ACE-Step 1.5 — Turbo / Base / XL)](#text-to-music-ace-step-15--turbo--base--xl)
+   - [Text-to-Music â€” MusicGen (Meta, pure Rust)](#text-to-music--musicgen-meta-pure-rust)
+   - [Text-to-Music (ACE-Step 1.5 â€” Turbo / Base / XL)](#text-to-music-ace-step-15--turbo--base--xl)
    - [Music Editing & Source-Audio Tasks (Cover / Repaint / Extract / Lego / Complete)](#music-editing--source-audio-tasks-cover--repaint--extract--lego--complete)
    - [Text-to-Speech (TTS / Parler-TTS, Kokoro-82M & ChatTTS)](#text-to-speech-tts--parler-tts--kokoro-82m)
    - [Super-Resolution & Neural Upscaling (Real-ESRGAN & 4x-UltraSharp)](#super-resolution--neural-upscaling-real-esrgan--4x-ultrasharp)
@@ -51,12 +51,12 @@
 
 Aurora is designed from the ground up to replace heavy Python generative pipelines (PyTorch, Diffusers, ComfyUI) with a **high-performance, standalone, zero-Python binary**:
 
-- **⚡ Sub-12s Generation**: Full $1024\times 1024$ SDXL generation in ~12.0s on RTX 4070 Ti (2.17 it/s) with DPM-Solver++ 2M Karras (18 steps).
-- **🚀 FlashAttention-2 Fused CUDA Kernels**: Cuts attention computation down to 19.6ms per pass ($\times 9.5$ faster than standard SDPA). Enables **~2.0x faster** Flux.1/Flux.2 MMDiT denoising (21s → ~11.7s on Klein-4B).
-- **🔒 Zero-Paging Seamless Tiled VAE**: Capped at $< 6.8\text{ GB}$ dedicated VRAM, preventing Windows WDDM shared RAM pagination.
-- **🧬 Zero-Overhead In-Memory LoRA Merging**: Instant hot-patching of UNet and CLIP weights directly in GPU VRAM.
-- **🌐 Native Hugging Face Hub Integration**: Direct automated download and caching of Safetensors checkpoints via `hf-hub`.
-- **🎨 Native Reactive Web UI**: Powered by [Grio](https://github.com/lecyberbill/grio) with 1.5ms live latent streaming.
+- **âš¡ Sub-12s Generation**: Full $1024\times 1024$ SDXL generation in ~12.0s on RTX 4070 Ti (2.17 it/s) with DPM-Solver++ 2M Karras (18 steps).
+- **ðŸš€ FlashAttention-2 Fused CUDA Kernels**: Cuts attention computation down to 19.6ms per pass ($\times 9.5$ faster than standard SDPA). Enables **~2.0x faster** Flux.1/Flux.2 MMDiT denoising (21s â†’ ~11.7s on Klein-4B).
+- **ðŸ”’ Zero-Paging Seamless Tiled VAE**: Capped at $< 6.8\text{ GB}$ dedicated VRAM, preventing Windows WDDM shared RAM pagination.
+- **ðŸ§¬ Zero-Overhead In-Memory LoRA Merging**: Instant hot-patching of UNet and CLIP weights directly in GPU VRAM.
+- **ðŸŒ Native Hugging Face Hub Integration**: Direct automated download and caching of Safetensors checkpoints via `hf-hub`.
+- **ðŸŽ¨ Native Reactive Web UI**: Powered by [Grio](https://github.com/lecyberbill/grio) with 1.5ms live latent streaming.
 
 ---
 
@@ -98,7 +98,7 @@ Adjust the Visual Studio path / CUDA version to your install. On Linux/macOS no 
 
 Aurora ships a native web studio (**Aurora Studio**) powered by [Grio](https://github.com/lecyberbill/grio):
 
-> 📘 **End users**: see the dedicated **[Aurora Studio User Guide](docs/AURORA_STUDIO_GUIDE.md)** for a
+> ðŸ“˜ **End users**: see the dedicated **[Aurora Studio User Guide](docs/AURORA_STUDIO_GUIDE.md)** for a
 > step-by-step, no-Rust walkthrough (install, launch, `aurora_studio.json`, VRAM tuning, FAQ).
 
 ```bash
@@ -106,7 +106,7 @@ cargo run --release --bin aurora_studio --features cuda,flash-attn,ui
 ```
 
 Once loaded, navigate in your browser to:
-👉 **`http://127.0.0.1:7860`**
+ðŸ‘‰ **`http://127.0.0.1:7860`**
 
 ### Multi-Model Studio (`aurora_studio.json`)
 
@@ -147,13 +147,13 @@ An optional **`memory` block** tunes VRAM per model (SDXL today): `vae_tiling`, 
 `vae_tile_overlap`, `cpu_offload`, plus the reserved `low_vram_load`/`fp8_weights`. The important
 lever is `vae_tile_size`: a large VAE tile inflates the decoded-tile im2col buffer and can push a
 12 GB card into Windows WDDM shared-memory paging (10-40x slowdown). The engine default is now
-`32×32` with `8` overlap, which keeps SDXL 1024×1024 at ~8.5 GB / ~12 s.
+`32Ã—32` with `8` overlap, which keeps SDXL 1024Ã—1024 at ~8.5 GB / ~12 s.
 
 ### Features Available in the Web Studio:
 - **Model Switcher with Strict VRAM Ejection**: switching a model unloads the previous one, so only one model is resident in VRAM at a time.
 - **Per-Model Generation Defaults**: steps / guidance / resolution / negative prompt read from the config and applied automatically on model switch.
 - **Prompt & Negative Prompt Fields**: multi-line input; the negative prompt is forwarded to the pipeline (real CFG when `guidance != 1.0`, single-pass otherwise).
-- **Resolution Selector**: 512×512 / 768×768 / 1024×1024.
+- **Resolution Selector**: 512Ã—512 / 768Ã—768 / 1024Ã—1024.
 - **Progressive Real-Time Latent Previews**: watch the image materialize live during the denoising process.
 - **Session History Gallery**: view all generated images side-by-side.
 - **Observability Output**: generation parameters (steps, resolution, seed) echoed after each run.
@@ -200,7 +200,7 @@ fn main() -> anyhow::Result<()> {
 
 All model producers (text encoders, DiT transformer, VAE) read weights through a single
 format-agnostic trait, `WeightsSource`. You never hard-code a format; you pick a **brick** that
-implements the trait and hand it to the encoder. Every brick exposes the same methods —
+implements the trait and hand it to the encoder. Every brick exposes the same methods â€”
 `get_tensor`, `contains`, `raw_info`, `keys`:
 
 ```rust
@@ -209,15 +209,15 @@ use aurora_rust_engine::gguf::GgufWeights;
 use aurora_rust_engine::text::Qwen3TextEncoder;
 use candle_core::{Device, DType};
 
-// Brick 1 — single safeTensors file (.safetensors)
+// Brick 1 â€” single safeTensors file (.safetensors)
 let archive = SafeTensorsArchive::open("<MODELS_DIR>/qwen3_4b.safetensors")?;
 
-// Brick 2 — multi-shard safeTensors (HF checkpoint split into model-0000N-of-0000M.safetensors)
+// Brick 2 â€” multi-shard safeTensors (HF checkpoint split into model-0000N-of-0000M.safetensors)
 // Open ALL *.safetensors in a directory as one logical archive, in sorted order.
 let archive = SafeTensorsArchive::open_shards_dir("<MODELS_DIR>/FLUX.2-klein-9B_text_encoder")?;
 // (or explicit list: SafeTensorsArchive::open_shards(&[a, b, c])?)
 
-// Brick 3 — GGUF (llama.cpp) quantized weights, dequantized on the fly
+// Brick 3 â€” GGUF (llama.cpp) quantized weights, dequantized on the fly
 let gguf = GgufWeights::open("<MODELS_DIR>/flux-unsloth-fp16.gguf")?;
 
 // All bricks share the trait, so the SAME encoder takes any of them:
@@ -230,11 +230,11 @@ shapes from whichever brick you hand it, so 4B (Qwen3-4B, 7680), 9B (Qwen3-8B, 1
 
 ---
 
-### Model Origins (`ModelHub`) — Local, HuggingFace, Civitai
+### Model Origins (`ModelHub`) â€” Local, HuggingFace, Civitai
 
 `ModelHub` is the second brick that separates **where a model comes from** from **how it is read**.
 It resolves a `ModelOrigin` into local paths, downloading HF/mirror files when needed. Local paths
-(the Civitai workflow — the user points at a file already on disk) are used as-is with no download:
+(the Civitai workflow â€” the user points at a file already on disk) are used as-is with no download:
 
 ```rust
 use aurora_rust_engine::hub::{ModelHub, ModelOrigin};
@@ -244,10 +244,10 @@ let hub = ModelHub::from_env()?;                 // respects HF_ENDPOINT / HF_HO
 let hub = ModelHub::with_cache_dir("<MODELS_DIR>/.cache")?;
 let hub = ModelHub::with_endpoint("https://hf-mirror.com", "<MODELS_DIR>/.cache")?; // Citai-like mirror
 
-// Origin A — a local file (e.g. downloaded from Civitai). No download, no network.
+// Origin A â€” a local file (e.g. downloaded from Civitai). No download, no network.
 let dir = hub.resolve(&ModelOrigin::Local("<MODELS_DIR>/community/model_v1.safetensors".into()))?;
 
-// Origin B — a HF (or mirror) repo, downloading any missing files into the cache.
+// Origin B â€” a HF (or mirror) repo, downloading any missing files into the cache.
 let dir = hub.resolve(&ModelOrigin::Hf {
     repo: "Qwen/Qwen3-8B".into(),
     files: vec!["model-00001-of-00005.safetensors".into(),
@@ -262,14 +262,14 @@ let archive = SafeTensorsArchive::open_shards_dir(&dir)?;
 ```
 
 Environment controls (set them in your shell, no code change):
-- `HF_ENDPOINT` — any HuggingFace-compatible mirror (e.g. a Citai/CF mirror).
-- `HF_HOME` / `HF_HUB_CACHE` — where resolved files are cached.
-- `HF_TOKEN` — authenticate for gated or private repos.
+- `HF_ENDPOINT` â€” any HuggingFace-compatible mirror (e.g. a Citai/CF mirror).
+- `HF_HOME` / `HF_HUB_CACHE` â€” where resolved files are cached.
+- `HF_TOKEN` â€” authenticate for gated or private repos.
 
 > **Design philosophy.** Aurora assembles bricks: an **origin** (`ModelHub`) supplies a path, a
 > **weight format** (`WeightsSource`) reads it, and an **encoder** consumes it. To support a new
 > community format you only implement `WeightsSource` once; to point at a new hub you only add a
-> `ModelOrigin` variant — nothing downstream changes.
+> `ModelOrigin` variant â€” nothing downstream changes.
 
 ---
 
@@ -298,11 +298,11 @@ Aurora implements a layered, zero-WDDM-paging memory strategy tailored to each g
 
 | Model Architecture | Parameter Scale | Primary Memory Levers | Resident Peak VRAM | Zero-Paging Guarantee |
 |---|---|---|---|---|
-| **FLUX.1 [dev/schnell]** | 12.0 B | `SequentialBlockStreamer` + FlashAttention-2 | **< 7.5 GB** | ✅ Single-block GPU residency |
-| **FLUX.2-Klein [4B/9B]** | 3.88 B / 9.0 B | `SequentialBlockStreamer` + FP8 dequant on-the-fly | **< 6.8 GB / 7.2 GB** | ✅ Block streamed directly from host mmap |
-| **FLUX.2-Dev Scaled** | 12.0 B | `SequentialBlockStreamer` + FP8 Scaled + FlashAttention-2 | **< 7.4 GB** | ✅ No 32GB model in VRAM |
-| **Z-Image Turbo** | 6.0 B (S3-DiT) | Host CPU VAE Decoder + FlashAttention-2 BF16 | **< 8.0 GB** | ✅ Eliminates DiT + VAE double spike |
-| **SDXL / Pony XL** | 3.5 B (UNet) | $C^\infty$ Seamless Tiled VAE + CPU LoRA Delta Fusion | **< 6.8 GB** | ✅ 4-quadrant tiled decode (< 400MB) |
+| **FLUX.1 [dev/schnell]** | 12.0 B | `SequentialBlockStreamer` + FlashAttention-2 | **< 7.5 GB** | âœ… Single-block GPU residency |
+| **FLUX.2-Klein [4B/9B]** | 3.88 B / 9.0 B | `SequentialBlockStreamer` + FP8 dequant on-the-fly | **< 6.8 GB / 7.2 GB** | âœ… Block streamed directly from host mmap |
+| **FLUX.2-Dev Scaled** | 12.0 B | `SequentialBlockStreamer` + FP8 Scaled + FlashAttention-2 | **< 7.4 GB** | âœ… No 32GB model in VRAM |
+| **Z-Image Turbo** | 6.0 B (S3-DiT) | Host CPU VAE Decoder + FlashAttention-2 BF16 | **< 8.0 GB** | âœ… Eliminates DiT + VAE double spike |
+| **SDXL / Pony XL** | 3.5 B (UNet) | $C^\infty$ Seamless Tiled VAE + CPU LoRA Delta Fusion | **< 6.8 GB** | âœ… 4-quadrant tiled decode (< 400MB) |
 
 #### SDXL / Pony Memory Controls
 
@@ -328,7 +328,7 @@ pipeline.disable_fp8();                     // Standard FP16 mode
 #### FLUX MMDiT Sequential Block Streaming
 
 On the FLUX family (both Flux.1 and Flux.2), models range from 3.88B to 12B parameters (up to 32 GB on disk). Storing the full transformer in VRAM causes catastrophic WDDM paging to shared system RAM on consumer GPUs.
-Aurora’s `SequentialBlockStreamer` solves this deterministically:
+Auroraâ€™s `SequentialBlockStreamer` solves this deterministically:
 - Weights stay in host memory (mapped directly from the `.safetensors` file via zero-copy OS mmap).
 - As the Euler loop executes, **only one double-block or single-block is transferred to GPU memory at a time**.
 - The block executes its attention pass and is immediately freed.
@@ -386,7 +386,7 @@ flux_pipeline.disable_flash_attn();
 |---|---|---|
 | Denoise step (Klein-4B, 4608 tokens) | 4.87 s | **2.47 s (~2.0x)** |
 | 4-step render (VAE 1.47 s) | ~21 s | **~11.7 s** |
-| Quality | Reference | Identical (`mean_abs ≈ 0.0013`) |
+| Quality | Reference | Identical (`mean_abs â‰ˆ 0.0013`) |
 | VRAM footprint | Low | Low (no extra residency) |
 
 This manette **requires** the `--features flash-attn` cargo feature to take effect; without it the build
@@ -483,7 +483,7 @@ let enc_dir = std::path::Path::new("<MODELS_DIR>/FLUX.2-klein-9B_text_encoder");
 let archive = SafeTensorsArchive::open_shards_dir(enc_dir)?;
 
 // 2. The architecture (hidden 4096, 36 layers, heads/kv, vocab 151936) and the 12288-dim
-//    text context (3 concatenated layers) are auto-detected from the weights — no hardcoding.
+//    text context (3 concatenated layers) are auto-detected from the weights â€” no hardcoding.
 let qwen8b = Qwen3TextEncoder::from_archive(&archive, Some(std::path::Path::new("qwen_tokenizer.json")),
     &Device::Cpu, DType::F16)?;
 flux_pipeline.set_qwen3(qwen8b);
@@ -520,7 +520,7 @@ let params = DiffusionParams {
 };
 ```
 
-> **Note** — Replace `<MODELS_DIR>` with your local models directory. With the official 40-layer Mistral VLM (`FLUX.2-dev_text_encoder`), $\theta = 10^9$ RoPE phase, guidance scaled by $1000\times$, and spatial-first patch unpacking, **FLUX.2-Dev produces crystal-clear, photorealistic 1024x1024 renders**.
+> **Note** â€” Replace `<MODELS_DIR>` with your local models directory. With the official 40-layer Mistral VLM (`FLUX.2-dev_text_encoder`), $\theta = 10^9$ RoPE phase, guidance scaled by $1000\times$, and spatial-first patch unpacking, **FLUX.2-Dev produces crystal-clear, photorealistic 1024x1024 renders**.
 
 ---
 
@@ -623,9 +623,9 @@ inpainted_image.save("flux2_inpaint_lion_crown.png")?;
 
 ---
 
-### FLUX.2 Multi-Image Reference Conditioning (Mode Édition)
+### FLUX.2 Multi-Image Reference Conditioning (Mode Ã‰dition)
 
-`aurora-rust-engine` introduces native support for **FLUX.2 Multi-Image Reference Conditioning** (Mode Édition) using the **4-axis Rotary Position Embeddings (4D RoPE)** architecture:
+`aurora-rust-engine` introduces native support for **FLUX.2 Multi-Image Reference Conditioning** (Mode Ã‰dition) using the **4-axis Rotary Position Embeddings (4D RoPE)** architecture:
 
 * **No external adapters (Zero IP-Adapter overhead)** : The model utilizes native joint attention across the canvas, prompt, and reference tokens.
 * **4D RoPE Identity Coordinates** :
@@ -805,12 +805,12 @@ transformed_image.save("flux_dev_img2img_lora.png")?;
 ```
 
 Because the transformer weights are loaded in a low-VRAM block-by-block streamer, each LoRA delta is
-spliced into a block's weight (including the fused `img_attn.qkv` / `linear1` Q·K·V slabs) as that block
-is streamed in — so LoRAs add **no runtime VRAM overhead** and are compatible with sub-8GB inference.
+spliced into a block's weight (including the fused `img_attn.qkv` / `linear1` QÂ·KÂ·V slabs) as that block
+is streamed in â€” so LoRAs add **no runtime VRAM overhead** and are compatible with sub-8GB inference.
 
 #### Stacking & re-weighting multiple LoRAs
 
-You can load any number of LoRAs — each keeps its **own weight** (`multiplier`, 0.0–1.0):
+You can load any number of LoRAs â€” each keeps its **own weight** (`multiplier`, 0.0â€“1.0):
 loRA deltas whose weights overlap are **added**; LoRAs targeting different weights are **combined**.
 `set_lora_weight` / `unload_lora` accept a LoRA identified by **file path**, **basename**, or **numeric
 index**, so you can re-weight or remove an individual LoRA on the fly without re-loading the file:
@@ -840,7 +840,7 @@ the `StableDiffusionXLPipeline` and the `FluxPipeline`.
 
 | Method | Description |
 |---|---|
-| `load_lora(path, multiplier)` | Load a LoRA. `multiplier` (0.0–1.0) is its contribution weight; overlapping deltas are summed, disjoint ones combined. |
+| `load_lora(path, multiplier)` | Load a LoRA. `multiplier` (0.0â€“1.0) is its contribution weight; overlapping deltas are summed, disjoint ones combined. |
 | `set_lora_weight(id, multiplier)` | Re-weight an already-loaded LoRA on the fly without reloading the file. |
 | `unload_lora(id)` | Remove a single loaded LoRA at runtime, restoring the others' combined effect. |
 | `unload_all_loras()` | Remove all LoRAs and restore the exact base checkpoint weights. |
@@ -849,7 +849,7 @@ the `StableDiffusionXLPipeline` and the `FluxPipeline`.
 `id` in `set_lora_weight` / `unload_lora` may be a **file path**, a **basename** (filename without
 extension), or a **numeric index** (position in load order). Path matching normalises `\` and `/`.
 
-**Example — SDXL with three LoRAs, re-weighted & one removed:**
+**Example â€” SDXL with three LoRAs, re-weighted & one removed:**
 ```rust
 let mut pipeline = StableDiffusionXLPipeline::from_safetensors("base.safetensors", &device)?;
 
@@ -863,7 +863,7 @@ pipeline.unload_lora("subject")?;                              // drop the subje
 let img = pipeline.generate(params)?;
 ```
 
-> **Note** — the Flux pipeline applies LoRA deltas via a low-VRAM per-block streamer, so LoRAs add
+> **Note** â€” the Flux pipeline applies LoRA deltas via a low-VRAM per-block streamer, so LoRAs add
 > **0 MB runtime VRAM**; SDXL applies them in place on the GPU weights. Both restore the base weights
 > exactly on `unload_all_loras()`.
 
@@ -889,7 +889,7 @@ let (lora_img, _) = pipeline.generate_with_metrics(params.clone(), None)?;
 lora_img.save("session_2_with_lora.png")?;
 
 // -------------------------------------------------------------
-// STEP 3: Unload LoRA — restores base weights instantly
+// STEP 3: Unload LoRA â€” restores base weights instantly
 // -------------------------------------------------------------
 // On Flux MMDiT:
 pipeline.unload_all_loras(); // Clears streamer deltas; subsequent passes stream base Safetensors
@@ -898,7 +898,7 @@ pipeline.unload_all_loras(); // Clears streamer deltas; subsequent passes stream
 pipeline.unload_all_loras()?; // Subtracts deltas in-place on GPU in < 0.05s
 
 // -------------------------------------------------------------
-// STEP 4: Generate baseline again — 100% Bit-Exact Identity
+// STEP 4: Generate baseline again â€” 100% Bit-Exact Identity
 // -------------------------------------------------------------
 let (restored_img, _) = pipeline.generate_with_metrics(params, None)?;
 restored_img.save("session_3_restored_baseline.png")?;
@@ -977,9 +977,9 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-#### 🔑 8-Bit Quantized KV-Cache (`QUANTIZED_KV`)
+#### ðŸ”‘ 8-Bit Quantized KV-Cache (`QUANTIZED_KV`)
 
-For long-context or memory-constrained generation on 8 GB–16 GB GPUs, Aurora provides native **8-bit symmetric quantization of the Key/Value cache** (`QuantizedLayerKVCache`):
+For long-context or memory-constrained generation on 8 GBâ€“16 GB GPUs, Aurora provides native **8-bit symmetric quantization of the Key/Value cache** (`QuantizedLayerKVCache`):
 - **Compression**: Compresses `[B, H, S, D]` key and value states into `u8` tensors with per-channel F32 scales (`[B, H, S, 1]`), reducing KV resident memory by **~70%** vs F32 and **50%** vs F16.
 - **Zero persistent float leakage**: Verified via `KVCacheStorage::Quantized` enum state; no unquantized historical copy is retained between tokens.
 - **Usage via Environment Variable**:
@@ -998,13 +998,13 @@ For long-context or memory-constrained generation on 8 GB–16 GB GPUs, Aurora p
   let result = text_model.generate_stream_with_params("Compute 15 + 27", &params, None)?;
   ```
 
-#### 🧠 IBM Granite 4.2 Reasoning Mode (Chain-of-Thought)
+#### ðŸ§  IBM Granite 4.2 Reasoning Mode (Chain-of-Thought)
 
 Aurora natively supports IBM Granite 4.2 dense models (`granite-4.2-30b-Q6_K.gguf`):
 - **Official Thinking Template**: Automatically generates `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n`, letting the model output its chain of reasoning before closing with `</think>` and emitting the final answer.
 - **Recommended Hyperparameters**: `temperature = 1.0`, `top_p = 0.95`.
 - **Stop Tokens**: `<|im_end|>` (token `100257`).
-- **CLI Inférence (Linux ROCm gfx1201 / CUDA)**:
+- **CLI InfÃ©rence (Linux ROCm gfx1201 / CUDA)**:
   ```bash
   TOP_P=0.95 ./target/release/test_text_gen /models/llm/granite-4.2-30b-Q6_K.gguf "Explain what makes Rust a modern language in 3 bullet points:" 128 1.0
   ```
@@ -1045,11 +1045,11 @@ println!("Duration: {:.2}s (processed in {:.1}ms)", result.duration_seconds, res
 
 ---
 
-### Speech-to-Text — Moonshine (lightweight, pure Rust)
+### Speech-to-Text â€” Moonshine (lightweight, pure Rust)
 
-Pure-Rust port of **Moonshine** (tiny/base) — a small encoder-decoder ASR model, a fast alternative
-to Whisper for short utterances. Conv audio frontend (tanh / GroupNorm / GELU) → 6-layer encoder
-with **partial interleaved RoPE** → 6-layer decoder (causal self + cross attention, gated MLP),
+Pure-Rust port of **Moonshine** (tiny/base) â€” a small encoder-decoder ASR model, a fast alternative
+to Whisper for short utterances. Conv audio frontend (tanh / GroupNorm / GELU) â†’ 6-layer encoder
+with **partial interleaved RoPE** â†’ 6-layer decoder (causal self + cross attention, gated MLP),
 tied embeddings, greedy decode. Validated vs `transformers`: encoder **6.9e-6**, token ids identical.
 
 ```powershell
@@ -1062,20 +1062,20 @@ cargo run --release --features cuda --bin test_moonshine -- `
 
 ### Text-to-Audio & Sound Design (Stable Audio Open)
 
-Pure-Rust port of **Stable Audio Open 1.0** — music, ambient soundscapes and foley at **44.1 kHz
+Pure-Rust port of **Stable Audio Open 1.0** â€” music, ambient soundscapes and foley at **44.1 kHz
 stereo** (up to ~47 s), from a text prompt plus a duration window.
 
 Architecture: **T5-base** prompt encoder + Fourier `seconds_start` / `seconds_total` conditioners
-(`StableAudioProjectionModel`) → **DiT** `continuous_transformer` (24 layers × 1536, GQA cross-attn,
-partial RoPE, global conditioning) → **EDM/SDE DPM-Solver++** `CosineDPMSolverMultistepScheduler`
-(v_prediction) → **AutoencoderOobleck** 44.1 kHz VAE decode.
+(`StableAudioProjectionModel`) â†’ **DiT** `continuous_transformer` (24 layers Ã— 1536, GQA cross-attn,
+partial RoPE, global conditioning) â†’ **EDM/SDE DPM-Solver++** `CosineDPMSolverMultistepScheduler`
+(v_prediction) â†’ **AutoencoderOobleck** 44.1 kHz VAE decode.
 
 ```rust
 use aurora_rust_engine::pipelines::StableAudioPipeline;
 
 let pipe = StableAudioPipeline::from_pretrained("G:/models/Audio/stable-audio-open-models")?;
 
-// 20 s lo-fi beat; negative prompt is optional (empty → zeroed unconditional branch).
+// 20 s lo-fi beat; negative prompt is optional (empty â†’ zeroed unconditional branch).
 let audio = pipe.generate(
     "Lo-fi hip hop beat, chillhop, 80 bpm, mellow piano, vinyl crackle, warm bass",
     "Low quality, distorted, harsh",
@@ -1093,7 +1093,7 @@ audio.save_auto("lofi.ogg")?;
   `transformer/`, `vae/`, `tokenizer/`).
 * **Determinism** : the SDE DPM-Solver++ is stochastic; the initial latent and the per-step
   Brownian noise are drawn from the seeded engine RNG (the Brownian increments over disjoint
-  schedule intervals are independent `N(0,1)`). Same seed → identical audio.
+  schedule intervals are independent `N(0,1)`). Same seed â†’ identical audio.
 
 ```powershell
 # CLI (100 steps, 20 s)
@@ -1104,12 +1104,12 @@ cargo run --release --features cuda --bin test_stable_audio -- `
 
 ---
 
-### Text-to-Music — MusicGen (Meta, pure Rust)
+### Text-to-Music â€” MusicGen (Meta, pure Rust)
 
-Pure-Rust port of **MusicGen-small**. A **T5-base** prompt encoder → `enc_to_dec_proj` → an
-**autoregressive decoder** (24 layers × 1024, learned position table, summed per-codebook token
+Pure-Rust port of **MusicGen-small**. A **T5-base** prompt encoder â†’ `enc_to_dec_proj` â†’ an
+**autoregressive decoder** (24 layers Ã— 1024, learned position table, summed per-codebook token
 embeddings, 4 LM heads) generating **4 EnCodec codebooks** with the MusicGen **delay pattern**
-(CFG) → **EnCodec 32 kHz** decoder (weight-norm conv/convT + LSTM bottleneck + residual blocks).
+(CFG) â†’ **EnCodec 32 kHz** decoder (weight-norm conv/convT + LSTM bottleneck + residual blocks).
 Modules validated vs `transformers`: EnCodec **1.9e-6**, decoder logits **5e-4**.
 
 ```powershell
@@ -1120,7 +1120,7 @@ cargo run --release --features cuda --bin test_musicgen -- `
 
 ---
 
-### Text-to-Music (ACE-Step 1.5 — Turbo / Base / XL)
+### Text-to-Music (ACE-Step 1.5 â€” Turbo / Base / XL)
 
 Full **48 kHz stereo song generation** from a caption **and lyrics**, in 100% pure Rust,
 bit-exact-validated against HuggingFace Diffusers. Supports the **Turbo**, **Base/SFT** and
@@ -1150,11 +1150,11 @@ pipeline.text_to_music_to_file(&req, "my_song.ogg", Some(AudioFormat::Ogg))?;
 ```
 
 * **Deterministic** : the same `seed` yields an identical waveform (xoshiro256** + Box-Muller).
-* **Variants** : `pipeline.variant` is `Turbo` (guidance 1.0) or `Base`/`XL` (CFG via APG, guidance ≈ 7).
+* **Variants** : `pipeline.variant` is `Turbo` (guidance 1.0) or `Base`/`XL` (CFG via APG, guidance â‰ˆ 7).
 * **Long songs** : query-attention chunking + overlap-discard tiled VAE decode allow 3-minute
   tracks on a 12 GB GPU.
 * **5Hz LM planner** : `AceStepLm::from_dir(...)` + `plan(caption, lyrics, max_tokens)` expands a
-  caption into CoT metadata/lyrics (`bpm`, `keyscale`, `duration`, …).
+  caption into CoT metadata/lyrics (`bpm`, `keyscale`, `duration`, â€¦).
 * **Convert a single-file HF checkpoint** (Base/SFT/XL) to the expected layout with
   `scripts/convert_acestep_base.py` (see [`docs/ACESTEP_AUDIO_SPEC.md`](docs/ACESTEP_AUDIO_SPEC.md)).
 
@@ -1203,13 +1203,13 @@ audio.save_auto("vocals.wav")?;
 **Key notes**
 
 * **Chunk mask** : resolved per task when `TaskRequest.chunk_mask_value` is left at its `NaN`
-  default — `cover` → `1.0`, `extract`/`lego`/`complete` → `2.0` (the `"auto"` **Mask Control**
+  default â€” `cover` â†’ `1.0`, `extract`/`lego`/`complete` â†’ `2.0` (the `"auto"` **Mask Control**
   value). Setting `1.0` on extract/lego/complete produces low-frequency noise. `repaint` uses the
   explicit `0/1` mask from the repaint span. `--chunk <v>` / `.with_chunk_mask_value(v)` overrides.
 * **Timbre** : set `.refer_latents = Some(&lat)` (a `reference_audio`); by default the learned
   silence latent is used (reference parity).
 * **Cover FSQ** : `.with_cover_fsq(true)` (or `--cover-fsq`) roundtrips the source through the
-  **5Hz audio codec** (`is_covers=1` in the reference) — loaded automatically from the diffusers
+  **5Hz audio codec** (`is_covers=1` in the reference) â€” loaded automatically from the diffusers
   `audio_tokenizer` / `audio_token_detokenizer` folders (kept on CPU/f32).
 * **SFT-stems captions** : on a checkpoint whose config sets `is_lego_sft` (or forced via
   `--lego-sft`), the caption becomes `Global:/Local:/Mask Control:` built by
@@ -1218,7 +1218,7 @@ audio.save_auto("vocals.wav")?;
   (~10 GB bf16) needs the low-VRAM loader: `AudioDiffusionPipeline::from_pretrained_low_vram(path)`
   (or `--low-vram` on the CLI) keeps the text/condition encoders on **CPU (f32)** and only the
   DiT + VAE on the GPU, making 5B fit a 12 GB card. Conditioning is bit-comparable to the normal path.
-* **Sources** : use real music (≥ 30 s); very short or artefact clips can render distorted.
+* **Sources** : use real music (â‰¥ 30 s); very short or artefact clips can render distorted.
 * **Build** : always compile with `--features cuda` (otherwise CUDA is silently unavailable and the
   pipeline falls back to CPU/f32).
 
@@ -1400,7 +1400,7 @@ Aurora comes with pre-built test and benchmark executables in `src/bin/`:
 | **`test_whisper`** | `cargo run --bin test_whisper` | **Speech-to-Text (STT)** Whisper transcription harness (pure Rust Slaney Mel filterbank) |
 | **`test_audio_diffusion`** | `cargo run --release --features cuda --bin test_audio_diffusion -- --model-dir G:/models/Audio --duration 30 --steps 8` | **Text-to-Music** end-to-end (ACE-Step 1.5 Turbo/Base/XL) |
 | **`test_acestep_tasks`** | `cargo run --release --features cuda --bin test_acestep_tasks -- -m G:/models/Audio-sft -t extract --track vocals --src song.wav -o out.ogg -s 50 -g 7` | **Source-audio tasks** (cover / repaint / extract / lego / complete) |
-| **`test_acestep_cover`** | `cargo run --release --features cuda --bin test_acestep_cover -- --model-dir G:/models/Audio --src song.wav` | Cover task harness (source → VAE → DiT) |
+| **`test_acestep_cover`** | `cargo run --release --features cuda --bin test_acestep_cover -- --model-dir G:/models/Audio --src song.wav` | Cover task harness (source â†’ VAE â†’ DiT) |
 | **`test_acestep_repaint`** | `cargo run --release --features cuda --bin test_acestep_repaint -- -m G:/models/Audio-base --src song.wav` | Repaint harness (mask + step injection + boundary blend) |
 
 
@@ -1411,7 +1411,7 @@ Aurora comes with pre-built test and benchmark executables in `src/bin/`:
 Aurora Engine provides high-speed, pure Rust image upscaling (x2, x4, x8) powered by **RRDBNet** (Real-ESRGAN, 4x-UltraSharp, NMKD) and **SRVGGNetCompact** (Anime-6B).
 
 ### Key Features
-- **1-step deterministic feed-forward CNN** (~50–200ms inference on CUDA).
+- **1-step deterministic feed-forward CNN** (~50â€“200ms inference on CUDA).
 - **Tiled inference with seam blending**: Upscale massive 4K, 8K, or 16K images without GPU Out-Of-Memory (OOM).
 - **Transparency preservation**: Automatically scales RGBA alpha channels using Catmull-Rom resampling.
 - **SafeTensors auto-detection**: Reads raw weights or prefixed weights (`params_ema.`, `model.`, `params.`).
@@ -1462,77 +1462,77 @@ Aurora Engine embeds pure Rust Multimodal Vision-Language capabilities supportin
 
 Gemma 4 introduces a unified multimodal vision architecture (`gemma4v`) combining a 27-layer SigLIP vision tower with an aspect-ratio-preserving 2D patch encoder and a linear projection directly into Gemma 4 31B's 5376-dimensional token space.
 
-#### 📌 Prérequis indispensables pour Gemma 4 Vision
+#### ðŸ“Œ PrÃ©requis indispensables pour Gemma 4 Vision
 
-Avant de lancer l'analyse d'image avec Gemma 4, assurez-vous d'avoir téléchargé et positionné les fichiers suivants :
+Avant de lancer l'analyse d'image avec Gemma 4, assurez-vous d'avoir tÃ©lÃ©chargÃ© et positionnÃ© les fichiers suivants :
 
 1. **Poids du LLM (Gemma 4 31B GGUF)** :
-   - Fichier : `gemma-4-31B-it-UD-Q4_K_XL.gguf` (ou équivalent quantifié Q4_K_M / Q8_0).
-   - Emplacement recommandé : `/models/llm/` ou votre répertoire de modèles local.
+   - Fichier : `gemma-4-31B-it-UD-Q4_K_XL.gguf` (ou Ã©quivalent quantifiÃ© Q4_K_M / Q8_0).
+   - Emplacement recommandÃ© : `/models/llm/` ou votre rÃ©pertoire de modÃ¨les local.
 2. **Projecteur et Encodeur de Vision (`mmproj` GGUF)** :
    - Fichier : `mmproj-gemma-4-31b-BF16.gguf` (~1.2 Go, 356 tenseurs).
    - Contient la tour de vision SigLIP (`v.patch_embd`, `v.position_embd`, `v.blk.0..26`, `v.std_bias`, `v.std_scale`) et la projection `mm.input_projection`.
 3. **Tokenizer officiel Gemma 4 (`gemma4_tokenizer.json`)** :
    - Fichier de vocabulaire : `gemma4_tokenizer.json` (vocabulaire de 262 144 tokens).
-   - **Attention** : Les jetons spéciaux Gemma 4 doivent être configurés exactement selon les identifiants officiels :
-     - `<|image>` (`255999`) : Délimiteur d'ouverture de séquence visuelle (`boi_token`).
+   - **Attention** : Les jetons spÃ©ciaux Gemma 4 doivent Ãªtre configurÃ©s exactement selon les identifiants officiels :
+     - `<|image>` (`255999`) : DÃ©limiteur d'ouverture de sÃ©quence visuelle (`boi_token`).
      - `<|image|>` (`258880`) : Jeton de remplacement (*soft visual token slot*).
-     - `<image|>` (`258882`) : Délimiteur de fermeture de séquence visuelle (`eoi_token`).
-4. **Image d'entrée** :
-   - Formats acceptés : JPEG, PNG, WEBP.
+     - `<image|>` (`258882`) : DÃ©limiteur de fermeture de sÃ©quence visuelle (`eoi_token`).
+4. **Image d'entrÃ©e** :
+   - Formats acceptÃ©s : JPEG, PNG, WEBP.
    - Exemple de test : `/models/llm/Le-Complexe.jpg`.
 
-#### 📐 Spécifications Architecturales de la Vision Tower (`gemma4v`)
+#### ðŸ“ SpÃ©cifications Architecturales de la Vision Tower (`gemma4v`)
 
-- **Prétraitement & Redimensionnement adaptatif** :
-  L'image est redimensionnée en préservant son ratio d'aspect (*aspect-ratio preserving size*) vers les multiples exacts de $48\text{ px}$ ($16\text{ px patch} \times 3\text{ pooling}$).
-  Pour une image de $500 \times 679$, la résolution optimale est $672 \times 912$, produisant $42 \times 57 = 2394$ patchs, réduits après pooling $3 \times 3$ à **266 tokens visuels**.
+- **PrÃ©traitement & Redimensionnement adaptatif** :
+  L'image est redimensionnÃ©e en prÃ©servant son ratio d'aspect (*aspect-ratio preserving size*) vers les multiples exacts de $48\text{ px}$ ($16\text{ px patch} \times 3\text{ pooling}$).
+  Pour une image de $500 \times 679$, la rÃ©solution optimale est $672 \times 912$, produisant $42 \times 57 = 2394$ patchs, rÃ©duits aprÃ¨s pooling $3 \times 3$ Ã  **266 tokens visuels**.
 - **Normalisation des pixels** : $2.0 \times (\text{pixels} - 0.5)$ sans soustraction de moyenne CLIP standard.
-- **Table de positions 2D axiales** : Matrice $[2, 10240, 1152]$ où la ligne 0 correspond aux coordonnées X et la ligne 1 aux coordonnées Y.
-- **RoPE 2D multidimensionnelle axiale** : Fréquence de base $\theta = 100.0$. La rotation est divisée en 2 blocs de 36 dimensions : les dimensions $0..36$ tournent sur l'axe X (`pos_x`), et les dimensions $36..72$ tournent sur l'axe Y (`pos_y`).
-- **Normalisation per-head & unscaled V RMSNorm** : Q et K sont normalisés avec RMSNorm per-head. V est normalisé avec un RMSNorm unitaire sans échelle (`with_scale=false`).
-- **Facteur d'échelle d'attention** : $kq\_scale = 1.0$ (pas de division par $\sqrt{d}$).
+- **Table de positions 2D axiales** : Matrice $[2, 10240, 1152]$ oÃ¹ la ligne 0 correspond aux coordonnÃ©es X et la ligne 1 aux coordonnÃ©es Y.
+- **RoPE 2D multidimensionnelle axiale** : FrÃ©quence de base $\theta = 100.0$. La rotation est divisÃ©e en 2 blocs de 36 dimensions : les dimensions $0..36$ tournent sur l'axe X (`pos_x`), et les dimensions $36..72$ tournent sur l'axe Y (`pos_y`).
+- **Normalisation per-head & unscaled V RMSNorm** : Q et K sont normalisÃ©s avec RMSNorm per-head. V est normalisÃ© avec un RMSNorm unitaire sans Ã©chelle (`with_scale=false`).
+- **Facteur d'Ã©chelle d'attention** : $kq\_scale = 1.0$ (pas de division par $\sqrt{d}$).
 - **Activation FFN** : `GELU` (approximation tanh `gelu_pytorch_tanh`).
-- **Spatial 2D Average Pooling** : Noyau $3 \times 3$, mise à l'échelle $\sqrt{1152}$, standardisation $(x - \text{std\_bias}) \times \text{std\_scale}$, et normalisation RMSNorm non pondérée avant projection linéaire vers 5376 dimensions.
+- **Spatial 2D Average Pooling** : Noyau $3 \times 3$, mise Ã  l'Ã©chelle $\sqrt{1152}$, standardisation $(x - \text{std\_bias}) \times \text{std\_scale}$, et normalisation RMSNorm non pondÃ©rÃ©e avant projection linÃ©aire vers 5376 dimensions.
 
-#### 🚀 Exécution en ligne de commande (Pure Rust & ROCm)
+#### ðŸš€ ExÃ©cution en ligne de commande (Pure Rust & ROCm)
 
-Pour exécuter le pipeline multimodal natif sur GPU AMD (ROCm / HIP) ou NVIDIA (CUDA) :
+Pour exÃ©cuter le pipeline multimodal natif sur GPU AMD (ROCm / HIP) ou NVIDIA (CUDA) :
 
 ```bash
 # Compiler le binaire de test en mode release avec support ROCm
 cargo build --release --bin test_gemma4_vlm --features rocm
 
-# Lancer l'inférence multimodale sur l'image
+# Lancer l'infÃ©rence multimodale sur l'image
 ./target/release/test_gemma4_vlm
 ```
 
-> **Performance mesurée (AMD Radeon AI PRO R9700 gfx1201)** :
+> **Performance mesurÃ©e (AMD Radeon AI PRO R9700 gfx1201)** :
 > - Temps d'extraction visuelle (266 tokens) : **1.17 s**
-> - Débit de génération de texte : **11.47 tok/s** (pur Rust, 0 Python).
+> - DÃ©bit de gÃ©nÃ©ration de texte : **11.47 tok/s** (pur Rust, 0 Python).
 
 ---
 
 ### 8.2 Autres Architectures VLM (Qwen2/2.5-VL, PaliGemma 2, SmolVLM)
 
 - **Vision Transformer Backbone**: SigLIP / ViT patch encoder avec fusion spatiale $2\times 2$.
-- **Multimodal MLP Projector**: Alignement des embeddings visuels avec les dimensions du décodeur de langage.
-- **Causal Decoder avec KV-Cache**: Streaming autoregressif avec échantillonnage top-p / top-k.
+- **Multimodal MLP Projector**: Alignement des embeddings visuels avec les dimensions du dÃ©codeur de langage.
+- **Causal Decoder avec KV-Cache**: Streaming autoregressif avec Ã©chantillonnage top-p / top-k.
 
 ```rust
 use aurora_rust_engine::{select_device, VlmParams, VlmPipeline};
 use image::ImageReader;
 
-// 1. Sélectionner le périphérique (ROCm, CUDA ou CPU)
+// 1. SÃ©lectionner le pÃ©riphÃ©rique (ROCm, CUDA ou CPU)
 let device = select_device(true)?;
 
-// 2. Charger le pipeline VLM depuis le dossier du modèle
+// 2. Charger le pipeline VLM depuis le dossier du modÃ¨le
 let mut pipeline = VlmPipeline::from_pretrained("/models/vlm/Qwen2.5-VL-3B", &device)?;
 
 // 3. Charger l'image
 let img = ImageReader::open("photo.jpg")?.decode()?;
 
-// 4. Configurer les paramètres
+// 4. Configurer les paramÃ¨tres
 let params = VlmParams {
     max_tokens: 256,
     temperature: 0.7,
@@ -1541,8 +1541,8 @@ let params = VlmParams {
     ..Default::default()
 };
 
-// 5. Générer la description
-let prompt = "Décris cette image en détail.";
+// 5. GÃ©nÃ©rer la description
+let prompt = "DÃ©cris cette image en dÃ©tail.";
 let response = pipeline.generate(Some(&img), prompt, &params)?;
 println!("VLM: {}", response);
 ```
@@ -1684,24 +1684,24 @@ To compile and execute natively with NVIDIA CUDA 13.4 and MSVC under Windows:
 
 | Modality | Model | Config / Resolution | Execution Time | Output Artifact |
 |---|---|---|---|---|
-| **Super-Resolution** | Real-ESRGAN x4 (66.8 Mo) | 512² → 2048² (tiled 256px) | **5.51 s** (0.14s load) | `output/upscaled_step_4_real.png` (4.78 Mo) |
+| **Super-Resolution** | Real-ESRGAN x4 (66.8 Mo) | 512Â² â†’ 2048Â² (tiled 256px) | **5.51 s** (0.14s load) | `output/upscaled_step_4_real.png` (4.78 Mo) |
 | **Speech-to-Text** | Moonshine Tiny (108 Mo) | 48 000 samples @ 16 kHz | **1.60 s** | `"Thank you for watching."` |
 | **Text Generation** | TinyLlama-1.1B (2.2 Go) | 32 tokens, greedy/temp 0.7 | **5.95 s** (~5.38 tok/s) | Autoregressive token stream |
-| **DiT Generation** | FLUX.2-Klein-4B (7.75 Go) | 1024², 4 steps Euler ODE | **25.85 s** ODE, 3.64s VAE | `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` |
+| **DiT Generation** | FLUX.2-Klein-4B (7.75 Go) | 1024Â², 4 steps Euler ODE | **25.85 s** ODE, 3.64s VAE | `outputs/flux_showcase/flux_klein_4b_1024_seed42.png` |
 
 #### Empirical LLM Inference Benchmarks (AMD ROCm 10 / Radeon AI PRO R9700 `gfx1201`)
-Mesures du 2026-10-20 avec le CLI corrigé (tokens réels comptés via le callback de streaming).
+Mesures du 2026-10-20 avec le CLI corrigÃ© (tokens rÃ©els comptÃ©s via le callback de streaming).
 
 | Model | Checkpoint File | Size | Load Time | Generation Throughput | Test Case & Empirical Status |
 |---|---|---|---|---|---|
-| **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **3.85 s** | **17.80 tok/s** (65 tok / 3.65 s) | ✅ Paragraphe anglais cohérent (greedy) |
-| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.68 s** | **11.73 tok/s** (401 tok / 34.19 s) | ✅ Poème français en 5 strophes, temp 0.7, sans `<think>` |
-| **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **7.92 s** | **11.25 tok/s** (65 tok / 5.78 s) | ✅ Paragraphe cohérent (marqueurs `<unused94>thought`) |
-| **Phi-4 Reasoning Plus** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.13 s** (lazy) | **8.49 tok/s** (49 tok / 5.77 s) | ✅ Template Phi natif ; raisonnement concis → « Paris » (pénalité 1.1) |
-| **Phi-4 (KV 8-bit U8)** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.15 s** (lazy) | **12.06 tok/s** (97 tok / 8.04 s) | ✅ 8-bit Quantized KV (`QUANTIZED_KV=1`), calcul arithmétique structuré (42) |
-| **LFM 2.5 8B** | `LFM2.5-8B-A1B-Q4_K_M.gguf` | 4.80 GB | **0.35 s** (lazy) | **3.15 tok/s** (65 tok / 20.65 s) | ⚠️ Sortie dégénérée (`?`) : sigmoid ROCm corrigé, dérive récurrente MoE/Conv1D |
+| **Gemma 3 12B** | `gemma-3-12b-it-q4_k_m.gguf` | 7.30 GB | **3.85 s** | **17.80 tok/s** (65 tok / 3.65 s) | âœ… Paragraphe anglais cohÃ©rent (greedy) |
+| **Qwen 3.8 27B** | `Qwen3.8-27B-Q4_K_M.gguf` | 17.44 GB | **71.68 s** | **11.73 tok/s** (401 tok / 34.19 s) | âœ… PoÃ¨me franÃ§ais en 5 strophes, temp 0.7, sans `<think>` |
+| **Gemma 4 31B** | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | 18.82 GB | **7.92 s** | **11.25 tok/s** (65 tok / 5.78 s) | âœ… Paragraphe cohÃ©rent (marqueurs `<unused94>thought`) |
+| **Phi-4 Reasoning Plus** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.13 s** (lazy) | **8.49 tok/s** (49 tok / 5.77 s) | âœ… Template Phi natif ; raisonnement concis â†’ Â« Paris Â» (pÃ©nalitÃ© 1.1) |
+| **Phi-4 (KV 8-bit U8)** | `Phi-4-reasoning-plus-Q4_K_M.gguf` | 8.50 GB | **0.15 s** (lazy) | **12.06 tok/s** (97 tok / 8.04 s) | âœ… 8-bit Quantized KV (`QUANTIZED_KV=1`), calcul arithmÃ©tique structurÃ© (42) |
+| **LFM 2.5 8B** | `LFM2.5-8B-A1B-Q4_K_M.gguf` | 4.80 GB | **0.35 s** (lazy) | **3.15 tok/s** (65 tok / 20.65 s) | âš ï¸ Sortie dÃ©gÃ©nÃ©rÃ©e (`?`) : sigmoid ROCm corrigÃ©, dÃ©rive rÃ©currente MoE/Conv1D |
 
-> Prompts : Qwen = poème français (400 tokens, temp 0.7) ; Gemma = 64 tokens greedy ; Phi = 128 tokens greedy + répétition 1.1 ; LFM = 64 tokens greedy. Les temps de chargement Phi/LFM sont des temps « lazy » (métadonnées) et ne sont pas comparables au chargement eager de Qwen. Le mode KV 8-bit compresse les états clés/valeurs en `U8` sans dérive sémantique.
+> Prompts : Qwen = poÃ¨me franÃ§ais (400 tokens, temp 0.7) ; Gemma = 64 tokens greedy ; Phi = 128 tokens greedy + rÃ©pÃ©tition 1.1 ; LFM = 64 tokens greedy. Les temps de chargement Phi/LFM sont des temps Â« lazy Â» (mÃ©tadonnÃ©es) et ne sont pas comparables au chargement eager de Qwen. Le mode KV 8-bit compresse les Ã©tats clÃ©s/valeurs en `U8` sans dÃ©rive sÃ©mantique.
 
 ---
 
@@ -1724,7 +1724,7 @@ To guarantee **zero pagination**:
 ### Flux MMDiT Performance (FlashAttention-2 manette & Universal Tiled SDPA)
 
 For Flux.1/Flux.2 MMDiT pipelines the [Attention Backend Manette](#attention-backend-manette-flashattention-2)
-is the highest-value lever — it multiplies denoising throughput without any VRAM penalty:
+is the highest-value lever â€” it multiplies denoising throughput without any VRAM penalty:
 
 ```rust
 // Recommended for all Flux pipelines on CUDA GPUs (falls back safely to F32 if unavailable)
@@ -1786,20 +1786,20 @@ Aurora Engine features a unified CausalLM inference pipeline for large language 
   - Measured with `Qwen3.8-27B-Q4_K_M.gguf`: **71.68 s load**, **11.73 tok/s** (401 tokens, temp 0.7, French poem). Verified factual outputs: `Paris.`, `2 + 2 = **4**`, `... is **Jupiter**.` (match the llama.cpp/Ollama oracle).
   - Sampling: `TextGenParams` (temperature, top_p, top_k, repetition_penalty) is wired for Qwen 3.5/3.8; greedy when `temperature <= 0`. Limits: batch size 1, F32 recurrence, no fused GDN kernel.
 - **Google Gemma 3 & Gemma 4 Architecture (`gemma-3-12b-it`, `gemma-4-31B-it`)** :
-  - Architecture dense native intégrant le RoPE proportionnel (`scaling_factor = 0.25`), l'attention scaling unitaire ($1.0$), et les tenseurs de pondération résiduelle `layer_output_scale` sur l'ensemble des couches.
-  - Support natif des balises de tour et canaux de pensée (`<|turn>user`, `<turn|>`, `<|turn>model`, `<unused94>thought<unused95>`).
-  - Débit mesuré (64 tokens, greedy) : **17.80 tok/s** sur Gemma 3 12B et **11.25 tok/s** sur Gemma 4 31B sur GPU R9700 `gfx1201`.
+  - Architecture dense native intÃ©grant le RoPE proportionnel (`scaling_factor = 0.25`), l'attention scaling unitaire ($1.0$), et les tenseurs de pondÃ©ration rÃ©siduelle `layer_output_scale` sur l'ensemble des couches.
+  - Support natif des balises de tour et canaux de pensÃ©e (`<|turn>user`, `<turn|>`, `<|turn>model`, `<unused94>thought<unused95>`).
+  - DÃ©bit mesurÃ© (64 tokens, greedy) : **17.80 tok/s** sur Gemma 3 12B et **11.25 tok/s** sur Gemma 4 31B sur GPU R9700 `gfx1201`.
 - **Microsoft Phi-4 Reasoning Plus (`phi3` architecture, 15B)** :
-  - Support GQA avec projections fusionnées QKV et SwiGLU MLP.
-  - Résolution de l'anomalie `sliding_window = 0` dans les métadonnées GGUF (évite le tenseur KV nul).
-  - Débit mesuré : **8.49 tok/s** (49 tokens, greedy + répétition 1.1) ; sortie de raisonnement concise aboutissant à « Paris ».
-  - Template natif construit depuis `tokenizer.chat_template` du GGUF (styles `<|user|>…<|end|>` et `<|im_start|>…<|im_sep|>`), arrêt sur `<|im_end|>`/`<|endoftext|>`, nettoyage des marqueurs de rôle ; `generate_chat` multi-tour est pris en charge.
+  - Support GQA avec projections fusionnÃ©es QKV et SwiGLU MLP.
+  - RÃ©solution de l'anomalie `sliding_window = 0` dans les mÃ©tadonnÃ©es GGUF (Ã©vite le tenseur KV nul).
+  - DÃ©bit mesurÃ© : **8.49 tok/s** (49 tokens, greedy + rÃ©pÃ©tition 1.1) ; sortie de raisonnement concise aboutissant Ã  Â« Paris Â».
+  - Template natif construit depuis `tokenizer.chat_template` du GGUF (styles `<|user|>â€¦<|end|>` et `<|im_start|>â€¦<|im_sep|>`), arrÃªt sur `<|im_end|>`/`<|endoftext|>`, nettoyage des marqueurs de rÃ´le ; `generate_chat` multi-tour est pris en charge.
 - **Liquid AI LFM2.5 Hybrid ShortConv-MoE Architecture**:
   - Full native support for Liquid Foundation Models (`LFM2.5-8B-A1B-Q4_K_M.gguf`).
   - Double-gated Linear Input-Varying (LIV) 1D depthwise convolutions with circular rolling state buffer ($K=3$).
   - Sparse Mixture-of-Experts (MoE) with 32 experts (Top-4 active), Sigmoid gating (`expert_gating_func = 2`), and aux-loss-free expert selection bias (`exp_probs_b.bias`).
   - Correctif ROCm : Kernel logiciel portable `sigmoid` $F(x) = (1 + \exp(-x))^{-1}$ pour compenser l'absence du kernel HIP natif.
-  - Débit mesuré : **3.15 tok/s** (65 tokens) ; la sortie reste dégénérée (`?`) malgré le correctif sigmoid.
+  - DÃ©bit mesurÃ© : **3.15 tok/s** (65 tokens) ; la sortie reste dÃ©gÃ©nÃ©rÃ©e (`?`) malgrÃ© le correctif sigmoid.
   - Built-in ChatML role conditioning:
   ```rust
   let mut model = AutoModel::from_local("LFM2.5-8B-A1B-Q4_K_M.gguf", device, DType::F16)?;
@@ -1827,7 +1827,7 @@ Aurora Engine includes a pure-Rust 3D Spatio-Temporal Diffusion Transformer (`Co
 
 ---
 
-## 📄 License
+## ðŸ“„ License
 
 Licensed under either of:
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
@@ -1843,7 +1843,7 @@ at your option.
 `STUDIO_BIND`, default `0.0.0.0:7865`). Gemma uses the chat template and
 `LogitsProcessor` sampling (temperature, top-p, top-k, repetition); the
 telemetry line reports prefill/decode/reused tokens. The history is capped in
-characters (`AURORA_CHAT_MAX_CHARS`, default 4000). With
+characters (`AURORA_CHAT_MAX_CHARS`, default 4000 on Gemma, 8000 otherwise). With
 `AURORA_PREFIX_CACHE=1`, the KV prefix is reused across turns (Gemma, ~95 %
 measured); unsupported backends fall back with an English console warning.
 See [docs/PREFIX_CACHE.md](docs/PREFIX_CACHE.md) and

@@ -985,13 +985,32 @@ fn strip_unused(text: &str) -> String {
 /// Gemma 4 may emit `<unused94>thought ...<unused95>answer`; split the two
 /// channels and drop the `thought` label.
 fn split_channels(text: &str) -> (String, String) {
-    let (mut thinking, mut answer) = (String::new(), text.to_string());
+    let mut thinking = String::new();
+    let mut answer = text.to_string();
+    // Gemma 4: <unused94>thought ...<unused95>answer
     if let Some(i) = text.find("<unused95>") {
         let (head, tail) = text.split_at(i);
         answer = tail["<unused95>".len()..].to_string();
         if let Some(j) = head.find("<unused94>") {
             thinking = head[j + "<unused94>".len()..].to_string();
         }
+    }
+    // Qwen 3.5/3.8: <think>...</think>\n\nanswer
+    if let Some(end) = answer.find("</think>") {
+        let (head, tail) = answer.split_at(end);
+        let think = match head.rfind("<think>") {
+            Some(s) => &head[s + "<think>".len()..],
+            None => head,
+        };
+        if thinking.is_empty() {
+            thinking = think.to_string();
+        }
+        answer = tail["</think>".len()..].to_string();
+    } else if let Some(s) = answer.find("<think>") {
+        if thinking.is_empty() {
+            thinking = answer[s + "<think>".len()..].to_string();
+        }
+        answer = String::new();
     }
     let thinking = strip_unused(&thinking)
         .trim()
