@@ -103,9 +103,7 @@ jobs:
             libssl-dev \
             ca-certificates \
             clang \
-            libclang-dev \
-            rocblas-dev \
-            rocsolver-dev
+            libclang-dev
           rm -rf /var/lib/apt/lists/*
 
       - name: Install Rust toolchain
