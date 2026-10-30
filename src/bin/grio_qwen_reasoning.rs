@@ -178,7 +178,7 @@ mod app {
                             // 2. Format UI message with thinking quote if present
                             let formatted_message = if !res.thinking.is_empty() {
                                 format!(
-                                    "> 🧠 **Pensée interne (<think>) :**\n> {}\n\n{}",
+                                    "> 🧠 **Pensée interne :**\n> {}\n\n{}",
                                     res.thinking.replace("\n", "\n> "),
                                     res.answer
                                 )
