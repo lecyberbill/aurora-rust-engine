@@ -76,3 +76,13 @@ cache.
   / `reset_prefix_cache`.
 - `src/bin/grio_qwen_reasoning.rs` â€” uses the cached path and resets on
   **Effacer**.
+
+## Multi-turn memory (Gemma 4 31B)
+
+5-turn "remember the word" test (Q1 "remember semoule", then TCP, a limit case,
+a real example, then "what word?"): the history hit the 4000-char cap on the
+last turn and was middle-truncated (the first "semoule" turn + the recent kept,
+the middle dropped). The session reset (no reuse that turn) and the 31B
+answered "Le mot ... est semoule." with coherent TCP explanations throughout.
+The same 12B Q4_K_M degenerated at temperature 0.1 (model/quant), while the 31B
+stayed coherent.
