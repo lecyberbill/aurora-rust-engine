@@ -53,8 +53,8 @@ cache.
   4000 for 31B, 8000 for 27B, 32000 for 12B, from the model path). When over
   budget it **truncates the middle** (LM Studio style): the first message (a
   "remember X" turn) and the most recent ones are kept, the middle is dropped.
-  Sampling: temperature from the UI, top-p 0.95, top-k 40, repetition 1.1
-  (`min_p` is not implemented).
+  Sampling: temperature from the UI, top-p 0.95, top-k 40, repetition 1.1,
+  min-p 0.05 (LM Studio parity).
   Lower it (e.g. `AURORA_CHAT_MAX_CHARS=4000`) on the 31B to keep more VRAM
   headroom; raising it lets longer follow-ups through. The console prints the
   kept message count and character budget.

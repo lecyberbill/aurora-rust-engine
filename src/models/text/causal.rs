@@ -1,4 +1,4 @@
-// [WFGY] Zone: SAFE | λ: 0.30 | Fallbacks: 1 (fallback HuggingFace tokenizer when local not found) | Action: Universal CausalLM engine supporting Llama, DeepSeek, Qwen, Gemma, Mistral in GGUF & Safetensors
+// [WFGY] Zone: SAFE | Î»: 0.30 | Fallbacks: 1 (fallback HuggingFace tokenizer when local not found) | Action: Universal CausalLM engine supporting Llama, DeepSeek, Qwen, Gemma, Mistral in GGUF & Safetensors
 
 use std::sync::Arc;
 use candle_core::{DType, Device, IndexOp, Result as CandleResult, Tensor};
@@ -588,6 +588,7 @@ pub struct LogitsProcessor {
     pub top_p: f64,
     pub top_k: usize,
     pub repetition_penalty: f32,
+    pub min_p: f32,
 }
 
 impl LogitsProcessor {
@@ -597,6 +598,7 @@ impl LogitsProcessor {
             top_p,
             top_k,
             repetition_penalty,
+            min_p: 0.05,
         }
     }
 
@@ -655,6 +657,11 @@ impl LogitsProcessor {
         if self.top_k > 0 && self.top_k < indexed_probs.len() {
             indexed_probs.select_nth_unstable_by(self.top_k, |a, b| b.1.total_cmp(&a.1));
             indexed_probs.truncate(self.top_k);
+        }
+        if self.min_p > 0.0 && !indexed_probs.is_empty() {
+            let max_p = indexed_probs.iter().map(|(_, p)| *p).fold(0.0f32, f32::max);
+            let thresh = max_p * self.min_p;
+            indexed_probs.retain(|(_, p)| *p >= thresh);
         }
         indexed_probs.sort_by(|a, b| b.1.total_cmp(&a.1));
 
@@ -1184,7 +1191,7 @@ impl CausalLMPipeline {
         );
 
         // Prefill prompt tokens
-        println!("🔍 Prefill: prompt_tokens = {:?}", prompt_tokens);
+        println!("ðŸ” Prefill: prompt_tokens = {:?}", prompt_tokens);
         let input_tensor = Tensor::new(&prompt_tokens[..], &self.device)?.unsqueeze(0)?;
         let logits = self.forward(&input_tensor, 0)?;
         let last_logits = logits.i((0, prompt_tokens.len() - 1))?;
@@ -1193,10 +1200,10 @@ impl CausalLMPipeline {
         let nan_count = logits_vec.iter().filter(|v| v.is_nan()).count();
         let min_val = logits_vec.iter().cloned().fold(f32::INFINITY, f32::min);
         let max_val = logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        println!("🔍 Logits debug: min = {min_val:.4}, max = {max_val:.4}, nan_count = {nan_count}/{}", logits_vec.len());
+        println!("ðŸ” Logits debug: min = {min_val:.4}, max = {max_val:.4}, nan_count = {nan_count}/{}", logits_vec.len());
         let mut top_indices: Vec<(usize, f32)> = logits_vec.iter().enumerate().map(|(i, &v)| (i, v)).collect();
         top_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        println!("🔍 Top-5 logits at step 0:");
+        println!("ðŸ” Top-5 logits at step 0:");
         for (idx, score) in top_indices.iter().take(5) {
             let piece = self.tokenizer.as_ref().and_then(|t| t.decode(&[*idx as u32], false).ok()).unwrap_or_default();
             println!("   - token {idx} ({:?}): {score:.4}", piece);
@@ -1214,13 +1221,13 @@ impl CausalLMPipeline {
             if prompt_tokens.len() + params.max_tokens + 16 < max_len {
                 if let Err(e) = self.setup_hip_graph(prompt_tokens.len(), max_len) {
                     self.clear_hip_graph();
-                    eprintln!("⚠️ HIP graph disabled: {e}");
+                    eprintln!("âš ï¸ HIP graph disabled: {e}");
                 } else {
-                    eprintln!("⚡ HIP graph decode enabled (max_len={max_len})");
+                    eprintln!("âš¡ HIP graph decode enabled (max_len={max_len})");
                 }
             } else {
                 eprintln!(
-                    "⚠️ HIP graph skipped: {} prompt + {} new >= {} max_len",
+                    "âš ï¸ HIP graph skipped: {} prompt + {} new >= {} max_len",
                     prompt_tokens.len(), params.max_tokens, max_len
                 );
             }
@@ -1261,7 +1268,7 @@ impl CausalLMPipeline {
 
             if std::env::var_os("AURORA_DEBUG_TOKENS").is_some() {
                 let piece_str = self.tokenizer.as_ref().and_then(|t| t.decode(&[next_token], false).ok()).unwrap_or_default();
-                eprintln!("✨ [Step {}] pos={} generated token {} ({:?})", generated_tokens.len(), pos, next_token, piece_str);
+                eprintln!("âœ¨ [Step {}] pos={} generated token {} ({:?})", generated_tokens.len(), pos, next_token, piece_str);
             }
 
             if let Some(ref mut cb) = on_token {
@@ -1634,7 +1641,7 @@ impl CausalLMPipeline {
             let h_flat = hidden.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
             let min_h = h_flat.iter().cloned().fold(f32::INFINITY, f32::min);
             let max_h = h_flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            println!("🔍 [Step 0] Hidden after embed: min={min_h:.4}, max={max_h:.4}");
+            println!("ðŸ” [Step 0] Hidden after embed: min={min_h:.4}, max={max_h:.4}");
         }
 
         // 2. Transformer layers loop with KV-Cache and Dynamic Layer Offloading
@@ -1644,7 +1651,7 @@ impl CausalLMPipeline {
                 hidden = hidden.to_device(&layer_dev).map_err(LuminaError::Candle)?;
             }
             if pos == 0 {
-                eprintln!("🔍 [Step 0] Entering layer {layer_idx} (hidden shape: {:?})", hidden.shape());
+                eprintln!("ðŸ” [Step 0] Entering layer {layer_idx} (hidden shape: {:?})", hidden.shape());
             }
             hidden = self.forward_layer(layer_idx, &hidden, pos, seq_len)?;
 
@@ -1661,7 +1668,7 @@ impl CausalLMPipeline {
                 let h_flat = hidden.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
                 let min_h = h_flat.iter().cloned().fold(f32::INFINITY, f32::min);
                 let max_h = h_flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                println!("🔍 [Step 0] Hidden after layer {layer_idx}: min={min_h:.4}, max={max_h:.4}");
+                println!("ðŸ” [Step 0] Hidden after layer {layer_idx}: min={min_h:.4}, max={max_h:.4}");
             }
         }
 
@@ -1678,7 +1685,7 @@ impl CausalLMPipeline {
             let h_flat = hidden.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
             let min_h = h_flat.iter().cloned().fold(f32::INFINITY, f32::min);
             let max_h = h_flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            println!("🔍 [Step 0] Hidden after final norm: min={min_h:.4}, max={max_h:.4}");
+            println!("ðŸ” [Step 0] Hidden after final norm: min={min_h:.4}, max={max_h:.4}");
         }
 
         // 4. LM Head projection
@@ -1982,7 +1989,7 @@ impl CausalLMPipeline {
                 return Err(LuminaError::MissingWeight(format!("Attention weights for layer {layer_idx} not found")));
             };
             if pos == 0 {
-                eprintln!("🔍 [Layer {layer_idx}] Getting o_l...");
+                eprintln!("ðŸ” [Layer {layer_idx}] Getting o_l...");
             }
             let o_l = self.get_layer_linear(layer_idx, &["self_attn.o_proj.weight", "attn_output.weight", "attn_out.weight"])?;
 
@@ -2010,7 +2017,7 @@ impl CausalLMPipeline {
             let cur_num_kv_heads = (k_last_dim / cur_head_dim).max(1);
 
             if pos == 0 {
-                eprintln!("🔍 [Layer {layer_idx}] Attention dims: q_last_dim={q_last_dim}, head_dim={cur_head_dim}, num_heads={cur_num_heads}, kv_heads={cur_num_kv_heads}");
+                eprintln!("ðŸ” [Layer {layer_idx}] Attention dims: q_last_dim={q_last_dim}, head_dim={cur_head_dim}, num_heads={cur_num_heads}, kv_heads={cur_num_kv_heads}");
             }
 
             let mut q = q.reshape((b_sz, seq_len, cur_num_heads, cur_head_dim))?.transpose(1, 2)?;
@@ -2244,7 +2251,7 @@ impl CausalLMPipeline {
 
                         let u = Self::matmul_linear(&normed_post_x, &u_w)?;
                         let exp_act = if is_nemotron_moe {
-                            // Nemotron-H MoE uses squared ReLU (ReLU²) activation without gate
+                            // Nemotron-H MoE uses squared ReLU (ReLUÂ²) activation without gate
                             let relu_u = u.relu().map_err(LuminaError::Candle)?;
                             relu_u.sqr().map_err(LuminaError::Candle)?
                         } else if let Some(ref fg) = fused_g {
@@ -3138,7 +3145,7 @@ impl CausalLMPipeline {
         }
 
         // Rank on the (optionally biased) probabilities, combine with the
-        // unbiased ones and renormalise — identical to the dense loop.
+        // unbiased ones and renormalise â€” identical to the dense loop.
         let mut ids: Vec<u32> = Vec::with_capacity(tokens * top_k);
         let mut weights: Vec<f32> = Vec::with_capacity(tokens * top_k);
         for t in 0..tokens {
