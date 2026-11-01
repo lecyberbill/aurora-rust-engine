@@ -977,7 +977,7 @@ impl ModelWeights {
     /// Preallocated static decode KV (no per-token `cat`), seeded from the
     /// prefill. K/V stored at `num_kv_heads` (GQA broadcast by flash), F16 when
     /// the flash kernel can serve the head dim. `AURORA_KV_PREALLOC` selects it.
-    #[cfg(feature = "hip-graph")]
+    /// Mask rows and RoPE slices are views re-bound per step (portable).
     pub fn setup_static_cache(&mut self, prefill_len: usize, max_len: usize) -> Result<()> {
         if self.layers.is_empty() {
             return Err(candle_core::Error::Msg("static KV: empty model".into()));
@@ -989,7 +989,7 @@ impl ModelWeights {
         if !dev.is_rocm() {
             return Err(candle_core::Error::Msg("static KV: not a ROCm device".into()));
         }
-        let (head_dim, rotary_dim) = self
+        let (head_dim, _rotary_dim) = self
             .layers
             .iter()
             .find_map(|l| match &l.attn {
@@ -997,7 +997,6 @@ impl ModelWeights {
                 _ => None,
             })
             .ok_or_else(|| candle_core::Error::Msg("static KV: no attention layer".into()))?;
-        let half_rot = rotary_dim / 2;
         let flash_usable = std::env::var_os("AURORA_NO_FLASH").is_none()
             && (head_dim == 256 || head_dim == 512);
         let dtype = if flash_usable { DType::F16 } else { DType::F32 };
@@ -1009,13 +1008,9 @@ impl ModelWeights {
             }
         }
         let mask_src = Tensor::from_vec(mv, (max_len, max_len), &dev)?;
-        let mask_row = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
-        mask_row.copy2(&mask_src.narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?)?;
-
-        let cos_buf = Tensor::zeros((1, half_rot), DType::F32, &dev)?;
-        let sin_buf = Tensor::zeros((1, half_rot), DType::F32, &dev)?;
-        cos_buf.copy2(&self.rotary.cos.narrow(0, prefill_len, 1)?)?;
-        sin_buf.copy2(&self.rotary.sin.narrow(0, prefill_len, 1)?)?;
+        let mask_row = mask_src.narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?;
+        let cos_view = self.rotary.cos.narrow(0, prefill_len, 1)?;
+        let sin_view = self.rotary.sin.narrow(0, prefill_len, 1)?;
 
         for layer in self.layers.iter_mut() {
             let LayerKind::FullAttn(f) = &mut layer.attn else {
@@ -1043,25 +1038,18 @@ impl ModelWeights {
             f.static_v = Some(sv);
             f.static_idx = None;
             f.static_mask = Some(mask_row.clone());
-            f.static_rope = Some((cos_buf.clone(), sin_buf.clone()));
+            f.static_rope = Some((cos_view.clone(), sin_view.clone()));
         }
 
         self.static_h0 = None;
         self.static_idx = None;
-        self.static_mask_row = Some(mask_row);
+        self.static_mask_row = None;
         self.mask_src = Some(mask_src);
-        self.static_rope = Some((cos_buf, sin_buf));
+        self.static_rope = None;
         self.graph_max_len = max_len;
         self.graph_exec = None;
         self.graph_logits = None;
         Ok(())
-    }
-
-    #[cfg(not(feature = "hip-graph"))]
-    pub fn setup_static_cache(&mut self, _prefill_len: usize, _max_len: usize) -> Result<()> {
-        Err(candle_core::Error::Msg(
-            "static KV requires the hip-graph feature (candle fork)".into(),
-        ))
     }
 
     #[cfg(feature = "hip-graph")]
@@ -1334,21 +1322,27 @@ impl ModelWeights {
         self.graph_max_len = 0;
     }
 
-    #[cfg(feature = "hip-graph")]
+    /// Re-bind per-layer mask/rope views to `offset` (portable). The HIP-graph
+    /// path keeps its shared mutable buffers and is advanced by `graph_step`.
     fn advance_static(&mut self, offset: usize) -> Result<()> {
+        if self.static_idx.is_some() {
+            return Ok(());
+        }
         let max_len = self.graph_max_len;
-        if let (Some(buf), Some(src)) = (&self.static_mask_row, &self.mask_src) {
-            buf.copy2(&src.narrow(0, offset, 1)?.reshape((1, 1, 1, max_len))?)?;
+        let mask_src = self.mask_src.as_ref();
+        let rotary = &self.rotary;
+        for layer in self.layers.iter_mut() {
+            let LayerKind::FullAttn(f) = &mut layer.attn else {
+                continue;
+            };
+            if let Some(src) = mask_src {
+                f.static_mask = Some(src.narrow(0, offset, 1)?.reshape((1, 1, 1, max_len))?);
+            }
+            f.static_rope = Some((
+                rotary.cos.narrow(0, offset, 1)?,
+                rotary.sin.narrow(0, offset, 1)?,
+            ));
         }
-        if let Some((cb, sb)) = &self.static_rope {
-            cb.copy2(&self.rotary.cos.narrow(0, offset, 1)?)?;
-            sb.copy2(&self.rotary.sin.narrow(0, offset, 1)?)?;
-        }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "hip-graph"))]
-    fn advance_static(&mut self, _offset: usize) -> Result<()> {
         Ok(())
     }
 

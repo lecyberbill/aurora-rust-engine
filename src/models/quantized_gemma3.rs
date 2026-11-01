@@ -637,12 +637,9 @@ impl ModelWeights {
 
     /// Allocate static decode buffers seeded from the prefill K/V and serve the
     /// decode step through the split-K flash kernel (no per-token `cat`). This is
-    /// the memory path selected by `AURORA_KV_PREALLOC`; `setup_static_graph`
-    /// wraps it with HIP-graph capture.
-    ///
-    /// Uses the candle fork's in-place copy APIs, so it lives behind `hip-graph`
-    /// (which pulls the fork); the portable build gets the stub below.
-    #[cfg(feature = "hip-graph")]
+    /// the memory path selected by `AURORA_KV_PREALLOC`. Mask rows and RoPE
+    /// slices are views into the source tables, re-bound per step in `forward`,
+    /// so this path is portable (no in-place copy APIs).
     pub fn setup_static_cache(&mut self, prefill_len: usize, max_len: usize) -> Result<()> {
         if self.layers.is_empty() {
             return Err(candle_core::Error::Msg("static KV: empty model".into()));
@@ -676,14 +673,12 @@ impl ModelWeights {
         let sw = self.layers.iter().find_map(|l| l.sliding_window_size).unwrap_or(1024);
         let mask_src_global = Tensor::from_vec(build(None), (max_len, max_len), &dev)?;
         let mask_src_slide = Tensor::from_vec(build(Some(sw)), (max_len, max_len), &dev)?;
-        let mask_row_global = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
-        let mask_row_slide = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
 
         for layer in self.layers.iter_mut() {
             let (pk, pv) = layer
                 .kv_cache
                 .clone()
-                .ok_or_else(|| candle_core::Error::Msg("HIP graph: empty prefill KV".into()))?;
+                .ok_or_else(|| candle_core::Error::Msg("static KV: empty prefill KV".into()))?;
             let (b, nkv, s, d) = pk.shape().dims4().map_err(|e| candle_core::Error::Msg(format!("{e}")))?;
             let _ = b;
 
@@ -703,16 +698,15 @@ impl ModelWeights {
             sv.scatter_set(&idx_v, &pv.to_dtype(dtype)?, 2)?;
 
             // RoPE tables/query stay F32 regardless of the KV storage dtype.
-            let cos_buf = Tensor::zeros((1, layer.head_dim / 2), DType::F32, &dev)?;
-            let sin_buf = Tensor::zeros((1, layer.head_dim / 2), DType::F32, &dev)?;
-            cos_buf.copy2(&layer.rotary_embedding.cos.narrow(0, prefill_len, 1)?)?;
-            sin_buf.copy2(&layer.rotary_embedding.sin.narrow(0, prefill_len, 1)?)?;
+            let cos_buf = layer.rotary_embedding.cos.narrow(0, prefill_len, 1)?;
+            let sin_buf = layer.rotary_embedding.sin.narrow(0, prefill_len, 1)?;
 
-            let mask_row = if layer.sliding_window_size.is_some() {
-                mask_row_slide.clone()
+            let src = if layer.sliding_window_size.is_some() {
+                &mask_src_slide
             } else {
-                mask_row_global.clone()
+                &mask_src_global
             };
+            let mask_row = src.narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?;
 
             layer.static_k = Some(sk);
             layer.static_v = Some(sv);
@@ -725,27 +719,15 @@ impl ModelWeights {
         }
 
         self.static_idx = None;
-        let row_g = mask_src_global.narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?;
-        mask_row_global.copy2(&row_g)?;
-        let row_s = mask_src_slide.narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?;
-        mask_row_slide.copy2(&row_s)?;
-
         self.static_h0 = None;
         self.mask_src_global = Some(mask_src_global);
         self.mask_src_slide = Some(mask_src_slide);
-        self.mask_row_global = Some(mask_row_global);
-        self.mask_row_slide = Some(mask_row_slide);
+        self.mask_row_global = None;
+        self.mask_row_slide = None;
         self.graph_max_len = max_len;
         self.graph_exec = None;
         self.graph_logits = None;
         Ok(())
-    }
-
-    #[cfg(not(feature = "hip-graph"))]
-    pub fn setup_static_cache(&mut self, _prefill_len: usize, _max_len: usize) -> Result<()> {
-        Err(candle_core::Error::Msg(
-            "static KV requires the hip-graph feature (candle fork)".into(),
-        ))
     }
 
     /// As `setup_static_cache`, but additionally capture one decode step into a HIP graph.
@@ -765,10 +747,27 @@ impl ModelWeights {
         let head_dim = self.layers[0].head_dim;
         let shared_idx = Tensor::zeros((1, n_kv, 1, head_dim), DType::U32, &dev)?;
         shared_idx.copy_from_host_u32(&vec![prefill_len as u32; n_kv * head_dim])?;
+        // Owned mutable mask rows + rope buffers the captured graph updates in place.
+        let mask_row_global = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
+        let mask_row_slide = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
+        mask_row_global.copy2(&self.mask_src_global.as_ref().unwrap().narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?)?;
+        mask_row_slide.copy2(&self.mask_src_slide.as_ref().unwrap().narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?)?;
         self.static_idx = Some(shared_idx.clone());
         for layer in self.layers.iter_mut() {
             layer.static_idx_v = Some(shared_idx.clone());
+            layer.static_mask = Some(if layer.sliding_window_size.is_some() {
+                mask_row_slide.clone()
+            } else {
+                mask_row_global.clone()
+            });
+            let cb = Tensor::zeros((1, layer.head_dim / 2), DType::F32, &dev)?;
+            let sb = Tensor::zeros((1, layer.head_dim / 2), DType::F32, &dev)?;
+            cb.copy2(&layer.rotary_embedding.cos.narrow(0, prefill_len, 1)?)?;
+            sb.copy2(&layer.rotary_embedding.sin.narrow(0, prefill_len, 1)?)?;
+            layer.static_rope = Some((cb, sb));
         }
+        self.mask_row_global = Some(mask_row_global);
+        self.mask_row_slide = Some(mask_row_slide);
         let h0 = Tensor::zeros((1, 1, self.embedding_length), dtype, &dev)?;
         self.static_h0 = Some(h0);
 
@@ -954,32 +953,26 @@ impl ModelWeights {
         self.clear_static_graph();
     }
 
-    /// Advance the shared scatter index, mask row and rotary buffers to `index_pos`
-    /// for the preallocated static decode (fork in-place copies).
-    #[cfg(feature = "hip-graph")]
+    /// Re-bind the per-layer mask row and RoPE slice to `index_pos` for the
+    /// preallocated static decode (views, no in-place copies). The HIP-graph path
+    /// keeps its shared mutable buffers and is advanced by `graph_step` instead.
     fn advance_static(&mut self, index_pos: usize) -> Result<()> {
+        if self.static_idx.is_some() {
+            return Ok(());
+        }
         let max_len = self.graph_max_len;
-        if let Some(idx) = &self.static_idx {
-            let n = idx.elem_count();
-            idx.copy_from_host_u32(&vec![index_pos as u32; n])?;
-        }
-        if let (Some(buf), Some(src)) = (&self.mask_row_global, &self.mask_src_global) {
-            buf.copy2(&src.narrow(0, index_pos, 1)?.reshape((1, 1, 1, max_len))?)?;
-        }
-        if let (Some(buf), Some(src)) = (&self.mask_row_slide, &self.mask_src_slide) {
-            buf.copy2(&src.narrow(0, index_pos, 1)?.reshape((1, 1, 1, max_len))?)?;
-        }
-        for layer in self.layers.iter() {
-            if let Some((cb, sb)) = &layer.static_rope {
-                cb.copy2(&layer.rotary_embedding.cos.narrow(0, index_pos, 1)?)?;
-                sb.copy2(&layer.rotary_embedding.sin.narrow(0, index_pos, 1)?)?;
+        let global = self.mask_src_global.as_ref();
+        let slide = self.mask_src_slide.as_ref();
+        for layer in self.layers.iter_mut() {
+            let src = if layer.sliding_window_size.is_some() { slide } else { global };
+            if let Some(src) = src {
+                layer.static_mask = Some(src.narrow(0, index_pos, 1)?.reshape((1, 1, 1, max_len))?);
             }
+            layer.static_rope = Some((
+                layer.rotary_embedding.cos.narrow(0, index_pos, 1)?,
+                layer.rotary_embedding.sin.narrow(0, index_pos, 1)?,
+            ));
         }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "hip-graph"))]
-    fn advance_static(&mut self, _index_pos: usize) -> Result<()> {
         Ok(())
     }
 
