@@ -639,6 +639,10 @@ impl ModelWeights {
     /// decode step through the split-K flash kernel (no per-token `cat`). This is
     /// the memory path selected by `AURORA_KV_PREALLOC`; `setup_static_graph`
     /// wraps it with HIP-graph capture.
+    ///
+    /// Uses the candle fork's in-place copy APIs, so it lives behind `hip-graph`
+    /// (which pulls the fork); the portable build gets the stub below.
+    #[cfg(feature = "hip-graph")]
     pub fn setup_static_cache(&mut self, prefill_len: usize, max_len: usize) -> Result<()> {
         if self.layers.is_empty() {
             return Err(candle_core::Error::Msg("static KV: empty model".into()));
@@ -735,6 +739,13 @@ impl ModelWeights {
         self.graph_exec = None;
         self.graph_logits = None;
         Ok(())
+    }
+
+    #[cfg(not(feature = "hip-graph"))]
+    pub fn setup_static_cache(&mut self, _prefill_len: usize, _max_len: usize) -> Result<()> {
+        Err(candle_core::Error::Msg(
+            "static KV requires the hip-graph feature (candle fork)".into(),
+        ))
     }
 
     /// As `setup_static_cache`, but additionally capture one decode step into a HIP graph.
@@ -943,6 +954,35 @@ impl ModelWeights {
         self.clear_static_graph();
     }
 
+    /// Advance the shared scatter index, mask row and rotary buffers to `index_pos`
+    /// for the preallocated static decode (fork in-place copies).
+    #[cfg(feature = "hip-graph")]
+    fn advance_static(&mut self, index_pos: usize) -> Result<()> {
+        let max_len = self.graph_max_len;
+        if let Some(idx) = &self.static_idx {
+            let n = idx.elem_count();
+            idx.copy_from_host_u32(&vec![index_pos as u32; n])?;
+        }
+        if let (Some(buf), Some(src)) = (&self.mask_row_global, &self.mask_src_global) {
+            buf.copy2(&src.narrow(0, index_pos, 1)?.reshape((1, 1, 1, max_len))?)?;
+        }
+        if let (Some(buf), Some(src)) = (&self.mask_row_slide, &self.mask_src_slide) {
+            buf.copy2(&src.narrow(0, index_pos, 1)?.reshape((1, 1, 1, max_len))?)?;
+        }
+        for layer in self.layers.iter() {
+            if let Some((cb, sb)) = &layer.static_rope {
+                cb.copy2(&layer.rotary_embedding.cos.narrow(0, index_pos, 1)?)?;
+                sb.copy2(&layer.rotary_embedding.sin.narrow(0, index_pos, 1)?)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "hip-graph"))]
+    fn advance_static(&mut self, _index_pos: usize) -> Result<()> {
+        Ok(())
+    }
+
     pub fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
         let (b_sz, seq_len) = x.dims2()?;
 
@@ -965,23 +1005,7 @@ impl ModelWeights {
         // static buffers cleared.
         let graph_on = self.graph_exec.is_some();
         if seq_len == 1 && !graph_on && self.graph_max_len > 0 {
-            let max_len = self.graph_max_len;
-            if let Some(idx) = &self.static_idx {
-                let n = idx.elem_count();
-                idx.copy_from_host_u32(&vec![index_pos as u32; n])?;
-            }
-            if let (Some(buf), Some(src)) = (&self.mask_row_global, &self.mask_src_global) {
-                buf.copy2(&src.narrow(0, index_pos, 1)?.reshape((1, 1, 1, max_len))?)?;
-            }
-            if let (Some(buf), Some(src)) = (&self.mask_row_slide, &self.mask_src_slide) {
-                buf.copy2(&src.narrow(0, index_pos, 1)?.reshape((1, 1, 1, max_len))?)?;
-            }
-            for layer in self.layers.iter() {
-                if let Some((cb, sb)) = &layer.static_rope {
-                    cb.copy2(&layer.rotary_embedding.cos.narrow(0, index_pos, 1)?)?;
-                    sb.copy2(&layer.rotary_embedding.sin.narrow(0, index_pos, 1)?)?;
-                }
-            }
+            self.advance_static(index_pos)?;
         }
 
         for layer in self.layers.iter_mut() {

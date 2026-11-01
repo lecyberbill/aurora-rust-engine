@@ -384,8 +384,16 @@ impl TextModel {
         eprintln!("[aurora] prefix cache: reusing {lcp}/{} prompt tokens", tokens.len());
 
         let t_pre = std::time::Instant::now();
+        model.clear_static_cache();
         let input = Tensor::new(&tokens[lcp..], device)?.unsqueeze(0)?;
         let logits = model.forward(&input, lcp)?;
+        if let Some(cap) = prealloc_capacity() {
+            let max_len = cap.max(tokens.len() + max_tokens + 8);
+            if let Err(e) = model.setup_static_cache(tokens.len(), max_len) {
+                model.clear_static_cache();
+                eprintln!("[aurora] static KV disabled: {e}");
+            }
+        }
         let prefill_ms = t_pre.elapsed().as_secs_f64() * 1000.0;
         let t_dec = std::time::Instant::now();
         let processor = LogitsProcessor::new(temperature, 0.95, 40, 1.1);
@@ -427,6 +435,7 @@ impl TextModel {
         }
         if let TextBackend::QuantizedQwen35 { model, .. } = &mut self.inner {
             model.reset_cache();
+            model.clear_static_cache();
         }
     }
 }
@@ -816,8 +825,16 @@ impl GenerationModel for TextModel {
 
                 let mut mut_cb = on_token;
                 model.reset_cache();
+                model.clear_static_cache();
                 let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
                 let logits = model.forward(&input, 0)?;
+                if let Some(cap) = prealloc_capacity() {
+                    let max_len = cap.max(tokens.len() + params.max_tokens + 8);
+                    if let Err(e) = model.setup_static_cache(tokens.len(), max_len) {
+                        model.clear_static_cache();
+                        eprintln!("[aurora] static KV disabled: {e}");
+                    }
+                }
 
                 if std::env::var_os("AURORA_HIP_GRAPH").is_some() {
                     let max_len = tokens.len() + params.max_tokens + 8;

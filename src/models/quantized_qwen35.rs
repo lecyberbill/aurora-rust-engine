@@ -290,24 +290,40 @@ impl FullAttentionWeights {
 
         // Update the KV cache: static graph cache (full max_len) or growing cache.
         let (k_cache, v_rep, static_on, flash_ctx) = if let (Some(kt), Some(vv)) = (&self.static_k, &self.static_v) {
-            let (b_, _, s_, _) = k.dims4()?;
-            let (kr, vr) = if n_rep > 1 {
-                let rk = k
-                    .unsqueeze(2)?
-                    .expand((b_, self.num_kv_heads, n_rep, s_, self.head_dim))?
-                    .reshape((b_, self.num_heads, s_, self.head_dim))?;
-                let rv = v
-                    .unsqueeze(2)?
-                    .expand((b_, self.num_kv_heads, n_rep, s_, self.head_dim))?
-                    .reshape((b_, self.num_heads, s_, self.head_dim))?;
-                (rk, rv)
-            } else {
-                (k.clone(), v.clone())
+            // Static decode: scatter at the current position (index built per
+            // layer when no shared graph buffer), then flash over the prealloc.
+            let (_, nkv_s, _, d_s) = kt.dims4()?;
+            let idx_owned: Tensor;
+            let idx = match &self.static_idx {
+                Some(i) => i,
+                None => {
+                    idx_owned = Tensor::full(offset as u32, (1, nkv_s, 1, d_s), kt.device())?;
+                    &idx_owned
+                }
             };
-            let idx = self.static_idx.as_ref().unwrap();
-            kt.scatter_set(idx, &kr, 2)?;
-            vv.scatter_set(idx, &vr, 2)?;
-            (kt.clone(), vv.clone(), true, None)
+            let kd = kt.dtype();
+            kt.scatter_set(idx, &k.to_dtype(kd)?, 2)?;
+            vv.scatter_set(idx, &v.to_dtype(kd)?, 2)?;
+            let scale = 1.0 / (self.head_dim as f64).sqrt();
+            let flash = if l == 1 {
+                match &self.static_mask {
+                    Some(m) => {
+                        let mflat = m.flatten_all()?;
+                        crate::device::flash_decode_masked(&q, kt, vv, scale, &mflat)?
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            if flash.is_some() {
+                (kt.clone(), vv.clone(), true, flash)
+            } else {
+                let n_rep2 = self.num_heads / self.num_kv_heads;
+                let kf = if kd == DType::F32 { kt.clone() } else { kt.to_dtype(DType::F32)? };
+                let vf = if kd == DType::F32 { vv.clone() } else { vv.to_dtype(DType::F32)? };
+                (repeat_kv(kf, n_rep2)?, repeat_kv(vf, n_rep2)?, true, None)
+            }
         } else {
             let (k_all, v_all) = match &self.kv_cache {
                 Some((prev_k, prev_v)) => (
@@ -958,6 +974,96 @@ impl ModelWeights {
         !self.layers.is_empty()
     }
 
+    /// Preallocated static decode KV (no per-token `cat`), seeded from the
+    /// prefill. K/V stored at `num_kv_heads` (GQA broadcast by flash), F16 when
+    /// the flash kernel can serve the head dim. `AURORA_KV_PREALLOC` selects it.
+    #[cfg(feature = "hip-graph")]
+    pub fn setup_static_cache(&mut self, prefill_len: usize, max_len: usize) -> Result<()> {
+        if self.layers.is_empty() {
+            return Err(candle_core::Error::Msg("static KV: empty model".into()));
+        }
+        if prefill_len + 16 >= max_len {
+            return Err(candle_core::Error::Msg("static KV: context does not fit".into()));
+        }
+        let dev = self._device.clone();
+        if !dev.is_rocm() {
+            return Err(candle_core::Error::Msg("static KV: not a ROCm device".into()));
+        }
+        let (head_dim, rotary_dim) = self
+            .layers
+            .iter()
+            .find_map(|l| match &l.attn {
+                LayerKind::FullAttn(f) => Some((f.head_dim, f.rotary_emb.rotary_dim)),
+                _ => None,
+            })
+            .ok_or_else(|| candle_core::Error::Msg("static KV: no attention layer".into()))?;
+        let half_rot = rotary_dim / 2;
+        let flash_usable = std::env::var_os("AURORA_NO_FLASH").is_none()
+            && (head_dim == 256 || head_dim == 512);
+        let dtype = if flash_usable { DType::F16 } else { DType::F32 };
+
+        let mut mv = vec![0f32; max_len * max_len];
+        for i in 0..max_len {
+            for j in (i + 1)..max_len {
+                mv[i * max_len + j] = f32::NEG_INFINITY;
+            }
+        }
+        let mask_src = Tensor::from_vec(mv, (max_len, max_len), &dev)?;
+        let mask_row = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
+        mask_row.copy2(&mask_src.narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?)?;
+
+        let cos_buf = Tensor::zeros((1, half_rot), DType::F32, &dev)?;
+        let sin_buf = Tensor::zeros((1, half_rot), DType::F32, &dev)?;
+        cos_buf.copy2(&self.rotary.cos.narrow(0, prefill_len, 1)?)?;
+        sin_buf.copy2(&self.rotary.sin.narrow(0, prefill_len, 1)?)?;
+
+        for layer in self.layers.iter_mut() {
+            let LayerKind::FullAttn(f) = &mut layer.attn else {
+                continue;
+            };
+            let (pk, pv) = f
+                .kv_cache
+                .clone()
+                .ok_or_else(|| candle_core::Error::Msg("static KV: empty prefill KV".into()))?;
+            let (_, nkv, s, d) = pk.shape().dims4()?;
+            let sk = Tensor::zeros((1, nkv, max_len, f.head_dim), dtype, &dev)?;
+            let sv = Tensor::zeros((1, nkv, max_len, f.head_dim), dtype, &dev)?;
+            let mut idxv = Vec::with_capacity(nkv * s * d);
+            for _ in 0..nkv {
+                for si in 0..s {
+                    for _ in 0..d {
+                        idxv.push(si as u32);
+                    }
+                }
+            }
+            let idx = Tensor::from_vec(idxv, (1, nkv, s, d), &dev)?;
+            sk.scatter_set(&idx, &pk.to_dtype(dtype)?, 2)?;
+            sv.scatter_set(&idx, &pv.to_dtype(dtype)?, 2)?;
+            f.static_k = Some(sk);
+            f.static_v = Some(sv);
+            f.static_idx = None;
+            f.static_mask = Some(mask_row.clone());
+            f.static_rope = Some((cos_buf.clone(), sin_buf.clone()));
+        }
+
+        self.static_h0 = None;
+        self.static_idx = None;
+        self.static_mask_row = Some(mask_row);
+        self.mask_src = Some(mask_src);
+        self.static_rope = Some((cos_buf, sin_buf));
+        self.graph_max_len = max_len;
+        self.graph_exec = None;
+        self.graph_logits = None;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "hip-graph"))]
+    pub fn setup_static_cache(&mut self, _prefill_len: usize, _max_len: usize) -> Result<()> {
+        Err(candle_core::Error::Msg(
+            "static KV requires the hip-graph feature (candle fork)".into(),
+        ))
+    }
+
     #[cfg(feature = "hip-graph")]
     pub fn setup_static_graph(&mut self, prefill_len: usize, max_len: usize) -> Result<()> {
         use crate::models::text::causal::HipGraphExec;
@@ -1209,6 +1315,11 @@ impl ModelWeights {
     }
 
     /// Drop the static graph state and return to the normal path.
+    /// Drop the preallocated static decode buffers (and any captured graph).
+    pub fn clear_static_cache(&mut self) {
+        self.clear_static_graph();
+    }
+
     pub fn clear_static_graph(&mut self) {
         for layer in self.layers.iter_mut() {
             layer.clear_static();
@@ -1223,10 +1334,31 @@ impl ModelWeights {
         self.graph_max_len = 0;
     }
 
+    #[cfg(feature = "hip-graph")]
+    fn advance_static(&mut self, offset: usize) -> Result<()> {
+        let max_len = self.graph_max_len;
+        if let (Some(buf), Some(src)) = (&self.static_mask_row, &self.mask_src) {
+            buf.copy2(&src.narrow(0, offset, 1)?.reshape((1, 1, 1, max_len))?)?;
+        }
+        if let Some((cb, sb)) = &self.static_rope {
+            cb.copy2(&self.rotary.cos.narrow(0, offset, 1)?)?;
+            sb.copy2(&self.rotary.sin.narrow(0, offset, 1)?)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "hip-graph"))]
+    fn advance_static(&mut self, _offset: usize) -> Result<()> {
+        Ok(())
+    }
+
     pub fn forward(&mut self, input: &Tensor, offset: usize) -> Result<Tensor> {
         let (_b, seq_len) = input.dims2()?;
         if seq_len == 1 && self.graph_exec.is_some() {
             return self.graph_step(input, offset);
+        }
+        if seq_len == 1 && self.graph_max_len > 0 {
+            self.advance_static(offset)?;
         }
         let mut h = if let Some(h0) = &self.static_h0 {
             h0.clone()
