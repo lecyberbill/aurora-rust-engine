@@ -12,6 +12,20 @@ use crate::text::{Mistral3TextEncoder, Qwen3TextEncoder, T5TextEncoder};
 pub use causal::{CausalLM, CausalLMConfig, CausalLMPipeline, ChatMessage, ChatRole, LogitsProcessor, TextGenParams};
 use super::common::{AnyModel, EncodeModel, GenerationModel, ModelKind};
 
+/// `AURORA_KV_PREALLOC=1` enables the preallocated static decode KV. The
+/// capacity defaults to 8192 tokens and can be overridden with `AURORA_KV_CAPACITY`.
+fn prealloc_capacity() -> Option<usize> {
+    if std::env::var_os("AURORA_KV_PREALLOC").is_none() {
+        return None;
+    }
+    Some(
+        std::env::var("AURORA_KV_CAPACITY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8192),
+    )
+}
+
 /// A text backend boxed into one type.
 pub enum TextBackend {
     Qwen(Qwen3TextEncoder),
@@ -240,8 +254,16 @@ impl TextModel {
         eprintln!("[aurora] prefix cache: reusing {lcp}/{} prompt tokens", tokens.len());
 
         let t_pre = std::time::Instant::now();
+        model.clear_static_cache();
         let input = Tensor::new(&tokens[lcp..], device)?.unsqueeze(0)?;
         let logits = model.forward(&input, lcp)?;
+        if let Some(cap) = prealloc_capacity() {
+            let max_len = cap.max(tokens.len() + 32);
+            if let Err(e) = model.setup_static_cache(tokens.len(), max_len) {
+                model.clear_static_cache();
+                eprintln!("[aurora] static KV disabled: {e}");
+            }
+        }
         let prefill_ms = t_pre.elapsed().as_secs_f64() * 1000.0;
         let t_dec = std::time::Instant::now();
         let processor = LogitsProcessor::new(temperature, 0.95, 40, 1.1);
@@ -702,8 +724,16 @@ impl GenerationModel for TextModel {
                 );
 
                 let mut mut_cb = on_token;
+                model.clear_static_cache();
                 let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
                 let logits = model.forward(&input, 0)?;
+                if let Some(cap) = prealloc_capacity() {
+                    let max_len = cap.max(tokens.len() + params.max_tokens + 8);
+                    if let Err(e) = model.setup_static_cache(tokens.len(), max_len) {
+                        model.clear_static_cache();
+                        eprintln!("[aurora] static KV disabled: {e}");
+                    }
+                }
 
                 if std::env::var_os("AURORA_HIP_GRAPH").is_some() {
                     let max_len = tokens.len() + params.max_tokens + 8;

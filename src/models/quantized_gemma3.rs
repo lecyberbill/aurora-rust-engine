@@ -1,4 +1,4 @@
-// [WFGY] Zone: TRANSIT | λ: 0.15 | Fallbacks: 0 | Action: ROCm-compatible quantized Gemma 3 and Gemma 4 implementation
+// [WFGY] Zone: TRANSIT | Î»: 0.15 | Fallbacks: 0 | Action: ROCm-compatible quantized Gemma 3 and Gemma 4 implementation
 //! Custom implementation of quantized Gemma 3 and Gemma 4 with universal RMSNorm (works on CPU, CUDA, and AMD ROCm).
 //! Solves Candle kernel gaps for ROCm: `rms_norm`, `rotary_emb`, `softmax_last_dim`.
 //! Supports Gemma 4 hybrid per-layer head dimension (256 SWA / 512 Global), alternating head_count_kv,
@@ -237,9 +237,20 @@ impl LayerWeights {
 
         // K/V: static graph cache (full max_len) or the growing cache.
         let (k_cache, v, static_on, flash_ctx) = if let (Some(kt), Some(vv)) = (&self.static_k, &self.static_v) {
-            let idx = self.static_idx_v.as_ref().unwrap();
-            kt.scatter_set(idx, &k, 2)?;
-            vv.scatter_set(idx, &v, 2)?;
+            // Non-graph: index is the current position for this layer's K/V
+            // geometry. The graph path keeps a shared `static_idx_v` buffer.
+            let (_, nkv_s, _, d_s) = kt.dims4()?;
+            let idx_owned: Tensor;
+            let idx = match &self.static_idx_v {
+                Some(i) => i,
+                None => {
+                    idx_owned = Tensor::full(index_pos as u32, (1, nkv_s, 1, d_s), kt.device())?;
+                    &idx_owned
+                }
+            };
+            let kd = kt.dtype();
+            kt.scatter_set(idx, &k.to_dtype(kd)?, 2)?;
+            vv.scatter_set(idx, &v.to_dtype(kd)?, 2)?;
             let flash = if seq_len == 1 {
                 match &self.static_mask {
                     Some(m) => {
@@ -254,9 +265,13 @@ impl LayerWeights {
             if flash.is_some() {
                 (kt.clone(), vv.clone(), true, flash)
             } else {
+                // Flash unavailable (should not happen for F16, which is only
+                // enabled when the kernel can serve it): fall back to F32 math.
                 let n_rep = self.n_head / self.n_kv_head;
-                let kr = repeat_kv(kt.clone(), n_rep)?;
-                let vr = repeat_kv(vv.clone(), n_rep)?;
+                let kf = if kt.dtype() == DType::F32 { kt.clone() } else { kt.to_dtype(DType::F32)? };
+                let vf = if vv.dtype() == DType::F32 { vv.clone() } else { vv.to_dtype(DType::F32)? };
+                let kr = repeat_kv(kf, n_rep)?;
+                let vr = repeat_kv(vf, n_rep)?;
                 (kr, vr, true, None)
             }
         } else {
@@ -436,7 +451,13 @@ impl ModelWeights {
 
 
         let tok_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
-        let tok_embeddings = tok_embeddings.dequantize(device)?;
+        // F16 halves the large token embedding (vocab x hidden); the HIP-graph
+        // path keeps F32 because its static buffers assume the embedding dtype.
+        let tok_embeddings = if std::env::var_os("AURORA_HIP_GRAPH").is_some() {
+            tok_embeddings.dequantize(device)?
+        } else {
+            tok_embeddings.dequantize_f16(device)?
+        };
         let norm = RmsNorm::from_qtensor(
             ct.tensor(reader, "output_norm.weight", device)?,
             rms_norm_eps,
@@ -614,31 +635,27 @@ impl ModelWeights {
         !self.layers.is_empty() && self.layers.iter().all(|l| !l.is_gemma4)
     }
 
-    /// Allocate static decode buffers, seed them from the prefill K/V, warm up
-    /// and capture one decode step into a HIP graph.
-    #[cfg(feature = "hip-graph")]
-    pub fn setup_static_graph(&mut self, prefill_len: usize, max_len: usize) -> Result<()> {
-        use crate::models::text::causal::HipGraphExec;
-        use candle_core::rocm_backend::rocm_rs::hip::bindings;
-
-        if !self.supports_static_graph() {
-            return Err(candle_core::Error::Msg("HIP graph: unsupported gemma variant".into()));
+    /// Allocate static decode buffers seeded from the prefill K/V and serve the
+    /// decode step through the split-K flash kernel (no per-token `cat`). This is
+    /// the memory path selected by `AURORA_KV_PREALLOC`; `setup_static_graph`
+    /// wraps it with HIP-graph capture.
+    pub fn setup_static_cache(&mut self, prefill_len: usize, max_len: usize) -> Result<()> {
+        if self.layers.is_empty() {
+            return Err(candle_core::Error::Msg("static KV: empty model".into()));
         }
         if prefill_len + 16 >= max_len {
-            return Err(candle_core::Error::Msg("HIP graph: context does not fit".into()));
-        }
-        for l in &self.layers {
-            if let Some(w) = l.sliding_window_size {
-                if w < max_len {
-                    return Err(candle_core::Error::Msg("HIP graph: sliding window < max_len".into()));
-                }
-            }
+            return Err(candle_core::Error::Msg("static KV: context does not fit".into()));
         }
         let dev = self.emb_weight.device().clone();
         if !dev.is_rocm() {
-            return Err(candle_core::Error::Msg("HIP graph: not a ROCm device".into()));
+            return Err(candle_core::Error::Msg("static KV: not a ROCm device".into()));
         }
-        let dtype = self.emb_weight.dtype();
+        // K/V are stored F16 when the split-K flash kernel can serve the decode
+        // (ROCm, D=256). That halves the resident cache; the query, mask and
+        // softmax accumulation stay F32.
+        let flash_usable = std::env::var_os("AURORA_NO_FLASH").is_none()
+            && self.layers.iter().all(|l| l.head_dim == 256 || l.head_dim == 512);
+        let dtype = if flash_usable { DType::F16 } else { DType::F32 };
 
         let build = |window: Option<usize>| -> Vec<f32> {
             let mut m = vec![0f32; max_len * max_len];
@@ -657,11 +674,6 @@ impl ModelWeights {
         let mask_src_slide = Tensor::from_vec(build(Some(sw)), (max_len, max_len), &dev)?;
         let mask_row_global = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
         let mask_row_slide = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
-
-        let head_dim = self.layers[0].head_dim;
-        let n_kv = self.layers[0].n_kv_head;
-        let shared_idx = Tensor::zeros((1, n_kv, 1, head_dim), DType::U32, &dev)?;
-        shared_idx.copy_from_host_u32(&vec![prefill_len as u32; n_kv * head_dim])?;
 
         for layer in self.layers.iter_mut() {
             let (pk, pv) = layer
@@ -683,11 +695,12 @@ impl ModelWeights {
                 }
             }
             let idx_v = Tensor::from_vec(idx_kv, (1, nkv, s, d), &dev)?;
-            sk.scatter_set(&idx_v, &pk, 2)?;
-            sv.scatter_set(&idx_v, &pv, 2)?;
+            sk.scatter_set(&idx_v, &pk.to_dtype(dtype)?, 2)?;
+            sv.scatter_set(&idx_v, &pv.to_dtype(dtype)?, 2)?;
 
-            let cos_buf = Tensor::zeros((1, layer.head_dim / 2), dtype, &dev)?;
-            let sin_buf = Tensor::zeros((1, layer.head_dim / 2), dtype, &dev)?;
+            // RoPE tables/query stay F32 regardless of the KV storage dtype.
+            let cos_buf = Tensor::zeros((1, layer.head_dim / 2), DType::F32, &dev)?;
+            let sin_buf = Tensor::zeros((1, layer.head_dim / 2), DType::F32, &dev)?;
             cos_buf.copy2(&layer.rotary_embedding.cos.narrow(0, prefill_len, 1)?)?;
             sin_buf.copy2(&layer.rotary_embedding.sin.narrow(0, prefill_len, 1)?)?;
 
@@ -701,18 +714,19 @@ impl ModelWeights {
             layer.static_v = Some(sv);
             layer.static_rope = Some((cos_buf, sin_buf));
             layer.static_idx_k = None;
-            layer.static_idx_v = Some(shared_idx.clone());
+            // Non-graph path builds its scatter index from `index_pos` per layer
+            // (gemma4 layers can carry different KV head geometry).
+            layer.static_idx_v = None;
             layer.static_mask = Some(mask_row);
         }
 
-        let h0 = Tensor::zeros((1, 1, self.embedding_length), dtype, &dev)?;
-        self.static_idx = Some(shared_idx);
+        self.static_idx = None;
         let row_g = mask_src_global.narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?;
         mask_row_global.copy2(&row_g)?;
         let row_s = mask_src_slide.narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?;
         mask_row_slide.copy2(&row_s)?;
 
-        self.static_h0 = Some(h0);
+        self.static_h0 = None;
         self.mask_src_global = Some(mask_src_global);
         self.mask_src_slide = Some(mask_src_slide);
         self.mask_row_global = Some(mask_row_global);
@@ -720,6 +734,32 @@ impl ModelWeights {
         self.graph_max_len = max_len;
         self.graph_exec = None;
         self.graph_logits = None;
+        Ok(())
+    }
+
+    /// As `setup_static_cache`, but additionally capture one decode step into a HIP graph.
+    #[cfg(feature = "hip-graph")]
+    pub fn setup_static_graph(&mut self, prefill_len: usize, max_len: usize) -> Result<()> {
+        use crate::models::text::causal::HipGraphExec;
+        use candle_core::rocm_backend::rocm_rs::hip::bindings;
+
+        if !self.supports_static_graph() {
+            return Err(candle_core::Error::Msg("HIP graph: unsupported gemma variant".into()));
+        }
+        self.setup_static_cache(prefill_len, max_len)?;
+        let dev = self.emb_weight.device().clone();
+        let dtype = self.emb_weight.dtype();
+        // The captured graph reads one shared scatter index updated per step.
+        let n_kv = self.layers[0].n_kv_head;
+        let head_dim = self.layers[0].head_dim;
+        let shared_idx = Tensor::zeros((1, n_kv, 1, head_dim), DType::U32, &dev)?;
+        shared_idx.copy_from_host_u32(&vec![prefill_len as u32; n_kv * head_dim])?;
+        self.static_idx = Some(shared_idx.clone());
+        for layer in self.layers.iter_mut() {
+            layer.static_idx_v = Some(shared_idx.clone());
+        }
+        let h0 = Tensor::zeros((1, 1, self.embedding_length), dtype, &dev)?;
+        self.static_h0 = Some(h0);
 
         let dummy = Tensor::zeros((1, 1), DType::U32, &dev)?;
         for _ in 0..3 {
@@ -842,6 +882,11 @@ impl ModelWeights {
         Err(candle_core::Error::Msg("HIP graph requires the hip-graph feature".into()))
     }
 
+    /// Drop the preallocated static decode buffers (and any captured graph).
+    pub fn clear_static_cache(&mut self) {
+        self.clear_static_graph();
+    }
+
     /// Drop the static graph state and return to the normal path.
     pub fn clear_static_graph(&mut self) {
         for layer in self.layers.iter_mut() {
@@ -895,6 +940,7 @@ impl ModelWeights {
         for layer in &mut self.layers {
             layer.kv_cache = None;
         }
+        self.clear_static_graph();
     }
 
     pub fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
@@ -909,9 +955,34 @@ impl ModelWeights {
         let mut layer_in = if let Some(h0) = &self.static_h0 {
             (h0 * (self.embedding_length as f64).sqrt())?
         } else {
-            let e = self.tok_embeddings.forward(x)?;
+            let e = self.tok_embeddings.forward(x)?.to_dtype(DType::F32)?;
             (e * (self.embedding_length as f64).sqrt())?
         };
+
+        // Preallocated static decode: advance the shared scatter index, mask row
+        // and rotary buffers to `index_pos` before the layer loop (same updates
+        // the HIP-graph step performs). Multi-token prefill must run with the
+        // static buffers cleared.
+        let graph_on = self.graph_exec.is_some();
+        if seq_len == 1 && !graph_on && self.graph_max_len > 0 {
+            let max_len = self.graph_max_len;
+            if let Some(idx) = &self.static_idx {
+                let n = idx.elem_count();
+                idx.copy_from_host_u32(&vec![index_pos as u32; n])?;
+            }
+            if let (Some(buf), Some(src)) = (&self.mask_row_global, &self.mask_src_global) {
+                buf.copy2(&src.narrow(0, index_pos, 1)?.reshape((1, 1, 1, max_len))?)?;
+            }
+            if let (Some(buf), Some(src)) = (&self.mask_row_slide, &self.mask_src_slide) {
+                buf.copy2(&src.narrow(0, index_pos, 1)?.reshape((1, 1, 1, max_len))?)?;
+            }
+            for layer in self.layers.iter() {
+                if let Some((cb, sb)) = &layer.static_rope {
+                    cb.copy2(&layer.rotary_embedding.cos.narrow(0, index_pos, 1)?)?;
+                    sb.copy2(&layer.rotary_embedding.sin.narrow(0, index_pos, 1)?)?;
+                }
+            }
+        }
 
         for layer in self.layers.iter_mut() {
             let attention_mask = if seq_len == 1 {
@@ -957,7 +1028,7 @@ impl ModelWeights {
 
     /// Embed token IDs and apply Gemma sqrt(embedding_length) scaling
     pub fn embed_tokens(&self, x: &Tensor) -> Result<Tensor> {
-        let embeds = self.tok_embeddings.forward(x)?;
+        let embeds = self.tok_embeddings.forward(x)?.to_dtype(DType::F32)?;
         embeds * (self.embedding_length as f64).sqrt()
     }
 

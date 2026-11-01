@@ -355,6 +355,26 @@ fn flash_decode_impl(
             scale: f32,
             stream: *mut std::ffi::c_void,
         );
+        #[allow(clippy::too_many_arguments)]
+        fn launch_flash_decode_f16(
+            q: *const f32,
+            k: *const u16,
+            v: *const u16,
+            mask: *const f32,
+            pm: *mut f32,
+            pl: *mut f32,
+            pacc: *mut f32,
+            out: *mut f32,
+            b: i32,
+            h: i32,
+            hkv: i32,
+            l: i32,
+            d: i32,
+            nc: i32,
+            ck: i32,
+            scale: f32,
+            stream: *mut std::ffi::c_void,
+        );
     }
 
     if std::env::var_os("AURORA_NO_FLASH").is_some() {
@@ -364,8 +384,16 @@ fn flash_decode_impl(
         return Ok(None);
     }
     let (b, h, lq, d) = q.dims4()?;
-    let (_bk, hkv, l, _dk) = k.dims4()?;
-    if lq != 1 || d != 256 || h == 0 || hkv == 0 || h % hkv != 0 {
+    let (_bk, hkv, l, dk) = k.dims4()?;
+    if lq != 1 || (d != 256 && d != 512) || dk != d || h == 0 || hkv == 0 || h % hkv != 0 {
+        return Ok(None);
+    }
+    let kv_dtype = k.dtype();
+    if v.dtype() != kv_dtype || !matches!(kv_dtype, DType::F32 | DType::F16) {
+        return Ok(None);
+    }
+    // The F32 kernel path is compiled for D=256 only.
+    if kv_dtype != DType::F16 && d != 256 {
         return Ok(None);
     }
 
@@ -374,8 +402,9 @@ fn flash_decode_impl(
         let off = layout.start_offset();
         match &*st {
             Storage::Rocm(r) => match &r.slice {
-                RocmStorageSlice::F32(m) => Ok(unsafe { m.ptr_at(off) }),
-                _ => candle_core::bail!("flash: not f32"),
+                RocmStorageSlice::F32(m) => Ok(unsafe { m.ptr_at(off) as *mut std::ffi::c_void }),
+                RocmStorageSlice::F16(m) => Ok(unsafe { m.ptr_at(off) as *mut std::ffi::c_void }),
+                _ => candle_core::bail!("flash: unsupported dtype"),
             },
             _ => candle_core::bail!("flash: not rocm"),
         }
@@ -412,25 +441,51 @@ fn flash_decode_impl(
         _ => return Ok(None),
     };
 
+    let q_ptr = ptr_of(&q)? as *const f32;
+    let pm_ptr = ptr_of(&pm)? as *mut f32;
+    let pl_ptr = ptr_of(&pl)? as *mut f32;
+    let pacc_ptr = ptr_of(&pacc)? as *mut f32;
+    let out_ptr = ptr_of(&out)? as *mut f32;
     unsafe {
-        launch_flash_decode_f32(
-            ptr_of(&q)? as *const f32,
-            ptr_of(&k)? as *const f32,
-            ptr_of(&v)? as *const f32,
-            mask_ptr,
-            ptr_of(&pm)? as *mut f32,
-            ptr_of(&pl)? as *mut f32,
-            ptr_of(&pacc)? as *mut f32,
-            ptr_of(&out)? as *mut f32,
-            b as i32,
-            h as i32,
-            hkv as i32,
-            l as i32,
-            nc as i32,
-            ck as i32,
-            scale as f32,
-            stream,
-        );
+        match kv_dtype {
+            DType::F16 => launch_flash_decode_f16(
+                q_ptr,
+                ptr_of(&k)? as *const u16,
+                ptr_of(&v)? as *const u16,
+                mask_ptr,
+                pm_ptr,
+                pl_ptr,
+                pacc_ptr,
+                out_ptr,
+                b as i32,
+                h as i32,
+                hkv as i32,
+                l as i32,
+                d as i32,
+                nc as i32,
+                ck as i32,
+                scale as f32,
+                stream,
+            ),
+            _ => launch_flash_decode_f32(
+                q_ptr,
+                ptr_of(&k)? as *const f32,
+                ptr_of(&v)? as *const f32,
+                mask_ptr,
+                pm_ptr,
+                pl_ptr,
+                pacc_ptr,
+                out_ptr,
+                b as i32,
+                h as i32,
+                hkv as i32,
+                l as i32,
+                nc as i32,
+                ck as i32,
+                scale as f32,
+                stream,
+            ),
+        }
     }
     Ok(Some(out.reshape((b, h, 1, d))?))
 }
