@@ -974,6 +974,22 @@ impl ModelWeights {
         !self.layers.is_empty()
     }
 
+    /// One causal mask row for position `pos` (`[1, 1, 1, max_len]`, additive
+    /// `-1e4` for blocked KV positions), built on the fly (no dense table).
+    fn causal_row(
+        max_len: usize,
+        pos: usize,
+        dev: &candle_core::Device,
+    ) -> Result<Tensor> {
+        let mut row = vec![0f32; max_len];
+        for (j, v) in row.iter_mut().enumerate() {
+            if j > pos {
+                *v = -1e4;
+            }
+        }
+        Tensor::from_vec(row, (1, 1, 1, max_len), dev)
+    }
+
     /// Preallocated static decode KV (no per-token `cat`), seeded from the
     /// prefill. K/V stored at `num_kv_heads` (GQA broadcast by flash), F16 when
     /// the flash kernel can serve the head dim. `AURORA_KV_PREALLOC` selects it.
@@ -1001,14 +1017,6 @@ impl ModelWeights {
             && (head_dim == 256 || head_dim == 512);
         let dtype = if flash_usable { DType::F16 } else { DType::F32 };
 
-        let mut mv = vec![0f32; max_len * max_len];
-        for i in 0..max_len {
-            for j in (i + 1)..max_len {
-                mv[i * max_len + j] = f32::NEG_INFINITY;
-            }
-        }
-        let mask_src = Tensor::from_vec(mv, (max_len, max_len), &dev)?;
-        let mask_row = mask_src.narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?;
         let cos_view = self.rotary.cos.narrow(0, prefill_len, 1)?;
         let sin_view = self.rotary.sin.narrow(0, prefill_len, 1)?;
 
@@ -1037,14 +1045,14 @@ impl ModelWeights {
             f.static_k = Some(sk);
             f.static_v = Some(sv);
             f.static_idx = None;
-            f.static_mask = Some(mask_row.clone());
+            f.static_mask = Some(Self::causal_row(max_len, prefill_len, &dev)?);
             f.static_rope = Some((cos_view.clone(), sin_view.clone()));
         }
 
         self.static_h0 = None;
         self.static_idx = None;
         self.static_mask_row = None;
-        self.mask_src = Some(mask_src);
+        self.mask_src = None;
         self.static_rope = None;
         self.graph_max_len = max_len;
         self.graph_exec = None;
@@ -1329,15 +1337,14 @@ impl ModelWeights {
             return Ok(());
         }
         let max_len = self.graph_max_len;
-        let mask_src = self.mask_src.as_ref();
+        let dev = self._device.clone();
+        let row = Self::causal_row(max_len, offset, &dev)?;
         let rotary = &self.rotary;
         for layer in self.layers.iter_mut() {
             let LayerKind::FullAttn(f) = &mut layer.attn else {
                 continue;
             };
-            if let Some(src) = mask_src {
-                f.static_mask = Some(src.narrow(0, offset, 1)?.reshape((1, 1, 1, max_len))?);
-            }
+            f.static_mask = Some(row.clone());
             f.static_rope = Some((
                 rotary.cos.narrow(0, offset, 1)?,
                 rotary.sin.narrow(0, offset, 1)?,

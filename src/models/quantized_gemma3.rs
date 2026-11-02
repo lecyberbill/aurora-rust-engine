@@ -635,6 +635,24 @@ impl ModelWeights {
         !self.layers.is_empty() && self.layers.iter().all(|l| !l.is_gemma4)
     }
 
+    /// One causal (optionally sliding-window) mask row for position `pos`,
+    /// shaped `[1, 1, 1, max_len]` (additive `-1e4` for blocked KV positions).
+    /// Built on the fly so no dense `[max_len, max_len]` table is resident.
+    fn causal_row(
+        max_len: usize,
+        pos: usize,
+        window: Option<usize>,
+        dev: &candle_core::Device,
+    ) -> Result<Tensor> {
+        let mut row = vec![0f32; max_len];
+        for (j, v) in row.iter_mut().enumerate() {
+            if j > pos || window.map_or(false, |w| j + w < pos) {
+                *v = -1e4;
+            }
+        }
+        Tensor::from_vec(row, (1, 1, 1, max_len), dev)
+    }
+
     /// Allocate static decode buffers seeded from the prefill K/V and serve the
     /// decode step through the split-K flash kernel (no per-token `cat`). This is
     /// the memory path selected by `AURORA_KV_PREALLOC`. Mask rows and RoPE
@@ -657,22 +675,6 @@ impl ModelWeights {
         let flash_usable = std::env::var_os("AURORA_NO_FLASH").is_none()
             && self.layers.iter().all(|l| l.head_dim == 256 || l.head_dim == 512);
         let dtype = if flash_usable { DType::F16 } else { DType::F32 };
-
-        let build = |window: Option<usize>| -> Vec<f32> {
-            let mut m = vec![0f32; max_len * max_len];
-            for i in 0..max_len {
-                for j in 0..max_len {
-                    let blocked = j > i || window.map_or(false, |w| j + w < i);
-                    if blocked {
-                        m[i * max_len + j] = -1e4;
-                    }
-                }
-            }
-            m
-        };
-        let sw = self.layers.iter().find_map(|l| l.sliding_window_size).unwrap_or(1024);
-        let mask_src_global = Tensor::from_vec(build(None), (max_len, max_len), &dev)?;
-        let mask_src_slide = Tensor::from_vec(build(Some(sw)), (max_len, max_len), &dev)?;
 
         for layer in self.layers.iter_mut() {
             let (pk, pv) = layer
@@ -701,12 +703,8 @@ impl ModelWeights {
             let cos_buf = layer.rotary_embedding.cos.narrow(0, prefill_len, 1)?;
             let sin_buf = layer.rotary_embedding.sin.narrow(0, prefill_len, 1)?;
 
-            let src = if layer.sliding_window_size.is_some() {
-                &mask_src_slide
-            } else {
-                &mask_src_global
-            };
-            let mask_row = src.narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?;
+            let mask_row =
+                Self::causal_row(max_len, prefill_len, layer.sliding_window_size, &dev)?;
 
             layer.static_k = Some(sk);
             layer.static_v = Some(sv);
@@ -720,8 +718,8 @@ impl ModelWeights {
 
         self.static_idx = None;
         self.static_h0 = None;
-        self.mask_src_global = Some(mask_src_global);
-        self.mask_src_slide = Some(mask_src_slide);
+        self.mask_src_global = None;
+        self.mask_src_slide = None;
         self.mask_row_global = None;
         self.mask_row_slide = None;
         self.graph_max_len = max_len;
@@ -748,10 +746,9 @@ impl ModelWeights {
         let shared_idx = Tensor::zeros((1, n_kv, 1, head_dim), DType::U32, &dev)?;
         shared_idx.copy_from_host_u32(&vec![prefill_len as u32; n_kv * head_dim])?;
         // Owned mutable mask rows + rope buffers the captured graph updates in place.
-        let mask_row_global = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
-        let mask_row_slide = Tensor::zeros((1, 1, 1, max_len), DType::F32, &dev)?;
-        mask_row_global.copy2(&self.mask_src_global.as_ref().unwrap().narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?)?;
-        mask_row_slide.copy2(&self.mask_src_slide.as_ref().unwrap().narrow(0, prefill_len, 1)?.reshape((1, 1, 1, max_len))?)?;
+        let sw = self.layers.iter().find_map(|l| l.sliding_window_size).unwrap_or(1024);
+        let mask_row_global = Self::causal_row(max_len, prefill_len, None, &dev)?;
+        let mask_row_slide = Self::causal_row(max_len, prefill_len, Some(sw), &dev)?;
         self.static_idx = Some(shared_idx.clone());
         for layer in self.layers.iter_mut() {
             layer.static_idx_v = Some(shared_idx.clone());
@@ -852,13 +849,12 @@ impl ModelWeights {
         if let Some(idx) = &self.static_idx {
             idx.copy_from_host_u32(&vec![pos as u32; n_kv * head_dim])?;
         }
-        if let (Some(buf), Some(src)) = (&self.mask_row_global, &self.mask_src_global) {
-            let row = src.narrow(0, pos, 1)?.reshape((1, 1, 1, max_len))?;
-            buf.copy2(&row)?;
+        if let Some(buf) = &self.mask_row_global {
+            buf.copy2(&Self::causal_row(max_len, pos, None, buf.device())?)?;
         }
-        if let (Some(buf), Some(src)) = (&self.mask_row_slide, &self.mask_src_slide) {
-            let row = src.narrow(0, pos, 1)?.reshape((1, 1, 1, max_len))?;
-            buf.copy2(&row)?;
+        if let Some(buf) = &self.mask_row_slide {
+            let sw = self.layers.iter().find_map(|l| l.sliding_window_size).unwrap_or(1024);
+            buf.copy2(&Self::causal_row(max_len, pos, Some(sw), buf.device())?)?;
         }
         for layer in self.layers.iter() {
             if let Some((cb, sb)) = &layer.static_rope {
@@ -961,13 +957,19 @@ impl ModelWeights {
             return Ok(());
         }
         let max_len = self.graph_max_len;
-        let global = self.mask_src_global.as_ref();
-        let slide = self.mask_src_slide.as_ref();
+        let dev = self.emb_weight.device().clone();
+        let global_row = Self::causal_row(max_len, index_pos, None, &dev)?;
+        let slide_row = match self.layers.iter().find_map(|l| l.sliding_window_size) {
+            Some(w) => Some(Self::causal_row(max_len, index_pos, Some(w), &dev)?),
+            None => None,
+        };
         for layer in self.layers.iter_mut() {
-            let src = if layer.sliding_window_size.is_some() { slide } else { global };
-            if let Some(src) = src {
-                layer.static_mask = Some(src.narrow(0, index_pos, 1)?.reshape((1, 1, 1, max_len))?);
-            }
+            let row = if layer.sliding_window_size.is_some() {
+                slide_row.clone().unwrap_or_else(|| global_row.clone())
+            } else {
+                global_row.clone()
+            };
+            layer.static_mask = Some(row);
             layer.static_rope = Some((
                 layer.rotary_embedding.cos.narrow(0, index_pos, 1)?,
                 layer.rotary_embedding.sin.narrow(0, index_pos, 1)?,
